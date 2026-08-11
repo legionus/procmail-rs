@@ -1,0 +1,7 @@
+[package]
+name = "procmail-rs"
+version = "0.1.0"
+edition = "2024"
+license = "Artistic-1.0-Perl"
+
+[dependencies]
