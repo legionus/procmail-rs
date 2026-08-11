@@ -2,6 +2,7 @@ mod parser;
 
 use std::fmt;
 
+pub(crate) use parser::build_regex;
 pub use parser::parse;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,8 +26,27 @@ pub struct Assignment {
 pub struct Recipe {
     pub flags: String,
     pub lock: Option<String>,
-    pub conditions: Vec<String>,
+    pub conditions: Vec<Condition>,
     pub destination: Destination,
+}
+
+impl Recipe {
+    pub fn has_flag(&self, flag: char) -> bool {
+        self.flags.contains(flag)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Condition {
+    pub negated: bool,
+    pub kind: ConditionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionKind {
+    Regex(String),
+    SmallerThan(usize),
+    LargerThan(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

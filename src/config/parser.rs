@@ -1,4 +1,8 @@
-use super::{Assignment, Config, Destination, ParseError, Recipe, Statement};
+use regex::bytes::RegexBuilder;
+
+use super::{
+    Assignment, Condition, ConditionKind, Config, Destination, ParseError, Recipe, Statement,
+};
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
     let lines: Vec<&str> = input.lines().collect();
@@ -69,7 +73,7 @@ fn parse_recipe(lines: &[&str], start: usize) -> Result<(Recipe, usize), ParseEr
             continue;
         }
         if let Some(condition) = line.strip_prefix('*') {
-            conditions.push(condition.trim().to_owned());
+            conditions.push(parse_condition(condition, index + 1, flags.contains('D'))?);
             index += 1;
             continue;
         }
@@ -113,15 +117,13 @@ fn parse_recipe(lines: &[&str], start: usize) -> Result<(Recipe, usize), ParseEr
         Destination::Auto(action.to_owned())
     };
 
-    Ok((
-        Recipe {
-            flags,
-            lock,
-            conditions,
-            destination,
-        },
-        index + 1,
-    ))
+    let recipe = Recipe {
+        flags,
+        lock,
+        conditions,
+        destination,
+    };
+    Ok((recipe, index + 1))
 }
 
 fn parse_recipe_header(rest: &str, line: usize) -> Result<(String, Option<String>), ParseError> {
@@ -137,8 +139,65 @@ fn parse_recipe_header(rest: &str, line: usize) -> Result<(String, Option<String
     if !flag_text.bytes().all(|byte| byte.is_ascii_alphabetic()) {
         return Err(ParseError::new(line, "invalid recipe flags"));
     }
+    if let Some(flag) = flag_text
+        .chars()
+        .find(|flag| !matches!(flag, 'H' | 'B' | 'D' | 'c'))
+    {
+        return Err(ParseError::new(
+            line,
+            format!("recipe flag '{flag}' is not supported yet"),
+        ));
+    }
 
     Ok((flag_text.to_owned(), lock))
+}
+
+fn parse_condition(
+    input: &str,
+    line: usize,
+    case_sensitive: bool,
+) -> Result<Condition, ParseError> {
+    let mut input = input.trim();
+    let mut negated = false;
+    while let Some(rest) = input.strip_prefix('!') {
+        negated = !negated;
+        input = rest.trim_start();
+    }
+
+    if input.is_empty() {
+        return Err(ParseError::new(line, "condition is empty"));
+    }
+
+    let kind = if let Some(value) = input.strip_prefix('<') {
+        ConditionKind::SmallerThan(parse_size(value, line)?)
+    } else if let Some(value) = input.strip_prefix('>') {
+        ConditionKind::LargerThan(parse_size(value, line)?)
+    } else {
+        build_regex(input, case_sensitive).map_err(|error| {
+            ParseError::new(line, format!("invalid regular expression: {error}"))
+        })?;
+        ConditionKind::Regex(input.to_owned())
+    };
+
+    Ok(Condition { negated, kind })
+}
+
+fn parse_size(input: &str, line: usize) -> Result<usize, ParseError> {
+    input
+        .trim()
+        .parse()
+        .map_err(|_| ParseError::new(line, "size condition requires a non-negative integer"))
+}
+
+pub(crate) fn build_regex(
+    pattern: &str,
+    case_sensitive: bool,
+) -> Result<regex::bytes::Regex, regex::Error> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(!case_sensitive)
+        .multi_line(true)
+        .unicode(false)
+        .build()
 }
 
 fn required_path(path: &str, line: usize) -> Result<String, ParseError> {
@@ -176,7 +235,10 @@ mod tests {
             Statement::Recipe(Recipe {
                 flags: "Bc".into(),
                 lock: Some(String::new()),
-                conditions: vec!["! ^Subject: spam".into()],
+                conditions: vec![Condition {
+                    negated: true,
+                    kind: ConditionKind::Regex("^Subject: spam".into()),
+                }],
                 destination: Destination::Maildir("inbox".into()),
             })
         );
@@ -206,5 +268,21 @@ mod tests {
 
         assert_eq!(error.line, 1);
         assert_eq!(error.message, "recipe has no action");
+    }
+
+    #[test]
+    fn rejects_unsupported_flag() {
+        let error = parse(":0 f\ninbox/\n").unwrap_err();
+
+        assert_eq!(error.line, 1);
+        assert_eq!(error.message, "recipe flag 'f' is not supported yet");
+    }
+
+    #[test]
+    fn rejects_invalid_regex_at_condition_line() {
+        let error = parse(":0\n* [unterminated\ninbox/\n").unwrap_err();
+
+        assert_eq!(error.line, 2);
+        assert!(error.message.starts_with("invalid regular expression:"));
     }
 }
