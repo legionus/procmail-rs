@@ -16,6 +16,10 @@ use super::{PendingSink, PublishedDelivery};
 const MAX_NAME_ATTEMPTS: u64 = 128;
 static NEXT_NAME: AtomicU64 = AtomicU64::new(0);
 
+/// A pending delivery into an existing Maildir.
+///
+/// The destination and its `tmp`, `new`, and `cur` directories must already
+/// exist. Delivery never creates or repairs Maildir directory structures.
 pub struct MaildirSink {
     file: OwnedFd,
     tmp_dir: OwnedFd,
@@ -28,8 +32,15 @@ pub struct MaildirSink {
 impl MaildirSink {
     pub fn create(path: &Path) -> io::Result<Self> {
         let maildir = open_directory_path(path)?;
+
+        // Validate all three standard components before creating a pending
+        // file. Although delivery does not access `cur`, accepting an
+        // incomplete directory here would hide a configuration error until a
+        // mail reader tries to use the destination. Descriptor-relative opens
+        // also reject a component replaced with a symlink during this step.
         let tmp_dir = open_directory_at(&maildir, OsStr::new("tmp"))?;
         let new_dir = open_directory_at(&maildir, OsStr::new("new"))?;
+        let _cur_dir = open_directory_at(&maildir, OsStr::new("cur"))?;
 
         for attempt in 0..MAX_NAME_ATTEMPTS {
             let name = unique_name(attempt);
@@ -318,6 +329,18 @@ mod tests {
 
         assert!(MaildirSink::create(maildir.path()).is_err());
         assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn requires_an_existing_complete_maildir() {
+        for component in ["tmp", "new", "cur"] {
+            let maildir = TestMaildir::create();
+            fs::remove_dir(maildir.path().join(component)).unwrap();
+
+            let error = MaildirSink::create(maildir.path()).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{component}");
+            assert!(!maildir.path().join(component).exists());
+        }
     }
 
     #[test]
