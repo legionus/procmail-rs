@@ -287,6 +287,31 @@ fn invalid_command_line_variable_does_not_consume_stdin() {
 }
 
 #[test]
+fn filter_does_not_import_ambient_environment_variables() {
+    let config = config_file(":0\nmaildir:$PROCMail_RS_AMBIENT_TEST\n");
+    let input_path = config.parent().unwrap().join("message.eml");
+    fs::write(&input_path, b"Subject: must remain unread\n\nbody").unwrap();
+    let mut input = fs::File::open(&input_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .env("PROCMail_RS_AMBIENT_TEST", "attacker-controlled")
+        .stdin(Stdio::from(input.try_clone().unwrap()))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("variable PROCMail_RS_AMBIENT_TEST is not defined")
+    );
+    assert_eq!(input.stream_position().unwrap(), 0);
+    fs::remove_dir_all(config.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn check_rejects_too_many_command_line_variables() {
     let config = config_file(":0\nmaildir:unused\n");
     let mut command = Command::new(env!("CARGO_BIN_EXE_procmail-rs"));
