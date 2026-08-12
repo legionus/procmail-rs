@@ -4,11 +4,16 @@
 //! Typed, value-free events used to explain filtering decisions.
 
 use std::fmt;
+use std::fmt::Write as _;
+use std::io::{self, Write};
 
 use crate::config::MAX_ASSIGNMENT_NAME_LEN;
 use crate::config::{AssignmentTarget, Config, Statement};
 
-pub const MAX_MEMORY_TRACE_EVENTS: usize = 16 * 1024;
+pub const MAX_TRACE_EVENT_SIZE: usize = 1024;
+pub const MAX_TRACE_EVENTS: usize = 16 * 1024;
+pub const MAX_TRACE_BYTES: usize = 1024 * 1024;
+pub const MAX_MEMORY_TRACE_EVENTS: usize = MAX_TRACE_EVENTS;
 
 pub struct EscapedBytes<'a>(&'a [u8]);
 
@@ -154,6 +159,158 @@ pub struct NoTrace;
 
 impl TraceSink for NoTrace {
     fn record(&mut self, _: TraceEvent) {}
+}
+
+#[derive(Debug)]
+pub struct BoundedTraceWriter<W> {
+    writer: W,
+    events: usize,
+    bytes: usize,
+    stopped: Option<TraceStopReason>,
+}
+
+impl<W> BoundedTraceWriter<W> {
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            events: 0,
+            bytes: 0,
+            stopped: None,
+        }
+    }
+
+    pub fn event_count(&self) -> usize {
+        self.events
+    }
+
+    pub fn byte_count(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn stop_reason(&self) -> Option<TraceStopReason> {
+        self.stopped
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl<W: Write> TraceSink for BoundedTraceWriter<W> {
+    fn record(&mut self, event: TraceEvent) {
+        if self.stopped.is_some() {
+            return;
+        }
+        if self.events >= MAX_TRACE_EVENTS {
+            self.stopped = Some(TraceStopReason::EventLimit);
+            return;
+        }
+
+        // Format into a fixed-capacity builder before touching the output.
+        // This prevents both a partial record and allocation beyond the
+        // per-event budget when an event contains hostile future fields.
+        let mut rendered = BoundedText::new(MAX_TRACE_EVENT_SIZE);
+        if render_event(&mut rendered, &event).is_err() || rendered.write_char('\n').is_err() {
+            self.stopped = Some(TraceStopReason::EventSizeLimit);
+            return;
+        }
+        let Some(total) = self.bytes.checked_add(rendered.len()) else {
+            self.stopped = Some(TraceStopReason::ByteLimit);
+            return;
+        };
+        if total > MAX_TRACE_BYTES {
+            self.stopped = Some(TraceStopReason::ByteLimit);
+            return;
+        }
+        if let Err(error) = self.writer.write_all(rendered.as_bytes()) {
+            self.stopped = Some(TraceStopReason::Io(error.kind()));
+            return;
+        }
+        self.events += 1;
+        self.bytes = total;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceStopReason {
+    EventSizeLimit,
+    EventLimit,
+    ByteLimit,
+    Io(io::ErrorKind),
+}
+
+struct BoundedText {
+    bytes: String,
+    limit: usize,
+}
+
+impl BoundedText {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: String::with_capacity(limit),
+            limit,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.bytes.as_bytes()
+    }
+}
+
+impl fmt::Write for BoundedText {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let new_len = self
+            .bytes
+            .len()
+            .checked_add(value.len())
+            .ok_or(fmt::Error)?;
+        if new_len > self.limit {
+            return Err(fmt::Error);
+        }
+        self.bytes.push_str(value);
+        Ok(())
+    }
+}
+
+fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
+    match event {
+        TraceEvent::VariableAssigned { line, name, source } => write!(
+            output,
+            "event=variable-assigned line={} name=\"{}\" source={source:?}",
+            line.map_or(0, |value| value),
+            EscapedBytes::new(name.as_str().as_bytes())
+        ),
+        TraceEvent::LastFolderUpdated => output.write_str("event=last-folder-updated"),
+        TraceEvent::ConditionEvaluated {
+            recipe_line,
+            condition_index,
+            kind,
+            negated,
+            matched,
+        } => write!(
+            output,
+            "event=condition recipe_line={recipe_line} condition_index={condition_index} kind={kind:?} negated={negated} matched={matched}"
+        ),
+        TraceEvent::RecipeEvaluated { line, decision } => {
+            write!(output, "event=recipe line={line} decision={decision:?}")
+        }
+        TraceEvent::Delivery {
+            recipe_line,
+            destination,
+            stage,
+        } => write!(
+            output,
+            "event=delivery recipe_line={recipe_line} destination={destination:?} stage={stage:?}"
+        ),
+        TraceEvent::ExternalCommand { recipe_line, stage } => write!(
+            output,
+            "event=external-command recipe_line={recipe_line} stage={stage:?}"
+        ),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -312,13 +469,17 @@ pub enum FailureClass {
 mod tests {
     use super::*;
 
+    fn variable_event(name: &str) -> TraceEvent {
+        TraceEvent::VariableAssigned {
+            line: Some(7),
+            name: TraceName::new(name).unwrap(),
+            source: VariableSource::RcFile,
+        }
+    }
+
     #[test]
     fn variable_event_contains_a_name_but_no_value_slot() {
-        let event = TraceEvent::VariableAssigned {
-            line: Some(7),
-            name: TraceName::new("MAILBOX").unwrap(),
-            source: VariableSource::RcFile,
-        };
+        let event = variable_event("MAILBOX");
 
         let rendered = format!("{event:?}");
         assert!(rendered.contains("MAILBOX"));
@@ -408,6 +569,52 @@ mod tests {
             EscapedBytes::new(&printable).to_string().as_bytes(),
             printable
         );
+    }
+
+    #[test]
+    fn bounded_writer_emits_complete_records_with_accounted_sizes() {
+        let mut trace = BoundedTraceWriter::new(Vec::new());
+        trace.record(variable_event("MAILBOX"));
+        trace.record(TraceEvent::LastFolderUpdated);
+
+        assert_eq!(trace.event_count(), 2);
+        assert_eq!(trace.stop_reason(), None);
+        assert_eq!(trace.byte_count(), trace.writer.len());
+        let output = String::from_utf8(trace.into_inner()).unwrap();
+        assert_eq!(output.lines().count(), 2);
+        assert!(output.contains("name=\"MAILBOX\""));
+    }
+
+    #[test]
+    fn bounded_writer_stops_before_exceeding_total_byte_limit() {
+        let mut trace = BoundedTraceWriter::new(Vec::new());
+        let event = variable_event(&"N".repeat(MAX_ASSIGNMENT_NAME_LEN));
+        while trace.stop_reason().is_none() {
+            trace.record(event.clone());
+        }
+
+        assert_eq!(trace.stop_reason(), Some(TraceStopReason::ByteLimit));
+        assert!(trace.byte_count() <= MAX_TRACE_BYTES);
+        assert_eq!(trace.byte_count(), trace.writer.len());
+    }
+
+    #[test]
+    fn bounded_writer_stops_at_event_count_limit() {
+        let mut trace = BoundedTraceWriter::new(io::sink());
+        for _ in 0..=MAX_TRACE_EVENTS {
+            trace.record(TraceEvent::LastFolderUpdated);
+        }
+
+        assert_eq!(trace.event_count(), MAX_TRACE_EVENTS);
+        assert_eq!(trace.stop_reason(), Some(TraceStopReason::EventLimit));
+    }
+
+    #[test]
+    fn bounded_text_rejects_a_record_before_partial_growth() {
+        let mut output = BoundedText::new(4);
+        assert!(output.write_str("1234").is_ok());
+        assert!(output.write_str("5").is_err());
+        assert_eq!(output.as_bytes(), b"1234");
     }
 
     #[test]
