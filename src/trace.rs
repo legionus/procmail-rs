@@ -355,6 +355,25 @@ mod tests {
     }
 
     #[test]
+    fn tracing_is_disabled_without_an_explicit_verbose_assignment() {
+        let empty = crate::config::parse("").unwrap().expand().unwrap();
+        let logfile_only = crate::config::parse("LOGFILE=/mail/filter.log\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+
+        for config in [&empty, &logfile_only] {
+            let settings = TraceConfig::from_config(config).unwrap();
+            assert!(!settings.verbose());
+            assert!(!settings.enabled());
+        }
+        assert_eq!(
+            TraceConfig::from_config(&logfile_only).unwrap().logfile(),
+            Some("/mail/filter.log")
+        );
+    }
+
+    #[test]
     fn accepts_documented_procmail_boolean_prefixes() {
         for value in ["1", "9anything", "on", "yes", "true", "enable"] {
             assert_eq!(parse_procmail_boolean(value), Some(true), "{value:?}");

@@ -237,6 +237,43 @@ fn filter_streams_header_decided_message_to_maildir() {
 }
 
 #[test]
+fn successful_filter_is_quiet_and_does_not_create_disabled_logfile() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("inbox");
+    let logfile = path.parent().unwrap().join("filter.log");
+    create_maildir(&maildir);
+    fs::write(
+        &path,
+        format!(
+            "LOGFILE={}\n:0\nmaildir:{}\n",
+            logfile.display(),
+            maildir.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::from(
+            fs::File::open({
+                let message = path.parent().unwrap().join("message.eml");
+                fs::write(&message, b"Subject: quiet\n\nbody").unwrap();
+                message
+            })
+            .unwrap(),
+        ))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(!logfile.exists());
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn maildir_resolves_relative_delivery_paths() {
     let path = config_file("");
     let maildir = path.parent().unwrap().join("mail");
