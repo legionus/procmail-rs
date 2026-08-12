@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
 #![deny(unsafe_code)]
 
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]

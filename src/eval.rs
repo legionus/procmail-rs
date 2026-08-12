@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
 use std::fmt;
 
 use regex::bytes::Regex;

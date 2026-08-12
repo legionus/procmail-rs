@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Seek, Write};

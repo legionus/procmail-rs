@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::Path;
