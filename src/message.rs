@@ -116,7 +116,32 @@ impl MessageHead {
 
     pub fn read_body(mut self, reader: &mut impl BufRead) -> Result<Message, MessageReadError> {
         let body_start = self.raw.len();
-        read_body(reader, &self.limits, body_start, &mut self.raw, None)?;
+        read_body(reader, &self.limits, body_start, &mut self.raw, true, None)?;
+        let body_end = self.raw.len();
+
+        Ok(Message {
+            header: 0..body_start,
+            body: body_start..body_end,
+            raw: self.raw,
+        })
+    }
+
+    pub fn read_body_to(
+        mut self,
+        reader: &mut impl BufRead,
+        writer: &mut impl Write,
+    ) -> Result<Message, MessageReadError> {
+        writer.write_all(&self.raw)?;
+        let body_start = self.raw.len();
+        let mut total = body_start;
+        read_body(
+            reader,
+            &self.limits,
+            body_start,
+            &mut self.raw,
+            true,
+            Some((&mut total, writer)),
+        )?;
         let body_end = self.raw.len();
 
         Ok(Message {
@@ -138,6 +163,7 @@ impl MessageHead {
             &self.limits,
             self.raw.len(),
             &mut Vec::new(),
+            false,
             Some((&mut total, writer)),
         )?;
 
@@ -275,6 +301,7 @@ fn read_body(
     limits: &MessageLimits,
     body_start: usize,
     raw: &mut Vec<u8>,
+    retain: bool,
     mut stream: Option<(&mut usize, &mut dyn Write)>,
 ) -> Result<(), MessageReadError> {
     let mut body_size = 0usize;
@@ -294,12 +321,13 @@ fn read_body(
         check_size(next_total_size, limits.message_size, MessageLimit::Message)?;
 
         let consumed = available.len();
+        if retain {
+            debug_assert_eq!(raw.len().saturating_sub(body_start), body_size);
+            raw.extend_from_slice(available);
+        }
         if let Some((total, writer)) = stream.as_mut() {
             writer.write_all(available)?;
             **total = next_total_size;
-        } else {
-            debug_assert_eq!(raw.len().saturating_sub(body_start), body_size);
-            raw.extend_from_slice(available);
         }
         body_size = next_body_size;
         reader.consume(consumed);
@@ -510,6 +538,19 @@ mod tests {
         assert_eq!(streamed.header(), &raw[..header_len]);
         assert_eq!(streamed.len(), raw.len());
         assert_eq!(writer.bytes, raw.len());
+    }
+
+    #[test]
+    fn buffers_body_while_streaming_an_identical_message() {
+        let input = b"Subject: test\n\nbinary:\xff\x00body";
+        let mut reader = Cursor::new(input);
+        let head = Message::read_headers(&mut reader, MessageLimits::default()).unwrap();
+        let mut writer = Vec::new();
+
+        let message = head.read_body_to(&mut reader, &mut writer).unwrap();
+        assert_eq!(message.as_bytes(), input);
+        assert_eq!(message.body(), b"binary:\xff\x00body");
+        assert_eq!(writer, input);
     }
 
     #[test]

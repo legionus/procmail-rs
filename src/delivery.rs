@@ -1,7 +1,7 @@
 use std::fmt;
 use std::io::{self, BufRead, Write};
 
-use crate::message::{MessageHead, MessageReadError, StreamedMessage};
+use crate::message::{Message, MessageHead, MessageReadError, StreamedMessage};
 
 #[cfg(target_os = "linux")]
 pub mod maildir;
@@ -25,7 +25,6 @@ pub struct PendingFanout {
 
 pub struct ValidatedFanout {
     sinks: Vec<Box<dyn PendingSink>>,
-    message: StreamedMessage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +42,12 @@ pub struct StreamDeliveryError {
 pub struct CommitError {
     source: io::Error,
     committed: usize,
+    abort_failures: usize,
+}
+
+#[derive(Debug)]
+pub struct AppendError {
+    source: io::Error,
     abort_failures: usize,
 }
 
@@ -69,12 +74,36 @@ impl PendingFanout {
         mut self,
         head: MessageHead,
         reader: &mut impl BufRead,
-    ) -> Result<ValidatedFanout, StreamDeliveryError> {
+    ) -> Result<(ValidatedFanout, StreamedMessage), StreamDeliveryError> {
         match head.stream_to(reader, &mut self) {
-            Ok(message) => Ok(ValidatedFanout {
-                sinks: std::mem::take(&mut self.sinks),
+            Ok(message) => Ok((
+                ValidatedFanout {
+                    sinks: std::mem::take(&mut self.sinks),
+                },
                 message,
-            }),
+            )),
+            Err(source) => {
+                let abort_failures = self.abort_all();
+                Err(StreamDeliveryError {
+                    source,
+                    abort_failures,
+                })
+            }
+        }
+    }
+
+    pub fn buffer(
+        mut self,
+        head: MessageHead,
+        reader: &mut impl BufRead,
+    ) -> Result<(ValidatedFanout, Message), StreamDeliveryError> {
+        match head.read_body_to(reader, &mut self) {
+            Ok(message) => Ok((
+                ValidatedFanout {
+                    sinks: std::mem::take(&mut self.sinks),
+                },
+                message,
+            )),
             Err(source) => {
                 let abort_failures = self.abort_all();
                 Err(StreamDeliveryError {
@@ -119,8 +148,36 @@ impl Drop for PendingFanout {
 }
 
 impl ValidatedFanout {
-    pub fn message(&self) -> &StreamedMessage {
-        &self.message
+    pub fn append_buffered(
+        mut self,
+        mut pending: PendingFanout,
+        message: &Message,
+    ) -> Result<Self, AppendError> {
+        let count = self.sinks.len().saturating_add(pending.sinks.len());
+        if count > MAX_PENDING_SINKS {
+            let source = io::Error::new(
+                io::ErrorKind::InvalidInput,
+                FanoutLimitError::TooManySinks {
+                    count,
+                    limit: MAX_PENDING_SINKS,
+                },
+            );
+            let abort_failures = pending.abort_all().saturating_add(self.abort_all());
+            return Err(AppendError {
+                source,
+                abort_failures,
+            });
+        }
+
+        if let Err(source) = pending.write_all(message.as_bytes()) {
+            let abort_failures = pending.abort_all().saturating_add(self.abort_all());
+            return Err(AppendError {
+                source,
+                abort_failures,
+            });
+        }
+        self.sinks.append(&mut pending.sinks);
+        Ok(self)
     }
 
     pub fn commit(mut self) -> Result<(), CommitError> {
@@ -249,6 +306,36 @@ impl std::error::Error for CommitError {
     }
 }
 
+impl AppendError {
+    pub fn abort_failures(&self) -> usize {
+        self.abort_failures
+    }
+}
+
+impl fmt::Display for AppendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "cannot append buffered delivery: {}",
+            self.source
+        )?;
+        if self.abort_failures != 0 {
+            write!(
+                formatter,
+                "; failed to abort {} pending sink(s)",
+                self.abort_failures
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for AppendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -359,8 +446,8 @@ mod tests {
         ])
         .unwrap();
 
-        let validated = pending.stream(head, &mut reader).unwrap();
-        assert_eq!(validated.message().len(), input.len());
+        let (validated, message) = pending.stream(head, &mut reader).unwrap();
+        assert_eq!(message.len(), input.len());
         assert!(first.borrow().visible.is_none());
         assert!(second.borrow().visible.is_none());
 
@@ -441,7 +528,7 @@ mod tests {
             TestSink::boxed(third.clone()),
         ])
         .unwrap();
-        let validated = pending.stream(head, &mut reader).unwrap();
+        let (validated, _) = pending.stream(head, &mut reader).unwrap();
 
         let error = validated.commit().unwrap_err();
         assert_eq!(error.committed(), 1);

@@ -53,11 +53,7 @@ fn run() -> Result<(), String> {
                 HeaderEvaluation::NeedsMessage(continuation)
                     if continuation.requirements().needs_body_contents =>
                 {
-                    let message = head
-                        .read_body(&mut stdin)
-                        .map_err(|error| format!("cannot read message body from stdin: {error}"))?;
-                    plan.resume_buffered(continuation, &message)
-                        .map_err(|error| format!("cannot evaluate message: {error}"))?
+                    return deliver_buffered(head, &mut stdin, &plan, continuation);
                 }
                 HeaderEvaluation::NeedsMessage(continuation) => {
                     let message = head
@@ -80,8 +76,51 @@ fn deliver_decided(
     reader: &mut impl io::BufRead,
     plan: &DeliveryPlan,
 ) -> Result<(), String> {
-    let mut sinks: Vec<Box<dyn PendingSink>> = Vec::with_capacity(plan.destinations().len());
-    for destination in plan.destinations() {
+    let sinks = open_sinks(plan.destinations())?;
+    let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
+    let (validated, _) = pending
+        .stream(head, reader)
+        .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
+    validated
+        .commit()
+        .map_err(|error| format!("cannot publish Maildir delivery: {error}"))?;
+
+    delivery_outcome(plan)
+}
+
+fn deliver_buffered(
+    head: procmail_rs::message::MessageHead,
+    reader: &mut impl io::BufRead,
+    execution: &ExecutionPlan,
+    continuation: procmail_rs::eval::Continuation,
+) -> Result<(), String> {
+    let early_count = continuation.pending_destinations().len();
+    let early_sinks = open_sinks(continuation.pending_destinations())?;
+    let pending = PendingFanout::new(early_sinks).map_err(|error| error.to_string())?;
+    let (validated, message) = pending
+        .buffer(head, reader)
+        .map_err(|error| format!("cannot read message body from stdin: {error}"))?;
+    let plan = execution
+        .resume_buffered(continuation, &message)
+        .map_err(|error| format!("cannot evaluate message: {error}"))?;
+    let late_destinations = plan.destinations().get(early_count..).ok_or_else(|| {
+        "internal error: deferred delivery discarded an early copy destination".to_owned()
+    })?;
+    let late_sinks = open_sinks(late_destinations)?;
+    let late = PendingFanout::new(late_sinks).map_err(|error| error.to_string())?;
+    let validated = validated
+        .append_buffered(late, &message)
+        .map_err(|error| error.to_string())?;
+    validated
+        .commit()
+        .map_err(|error| format!("cannot publish Maildir delivery: {error}"))?;
+
+    delivery_outcome(&plan)
+}
+
+fn open_sinks(destinations: &[Destination]) -> Result<Vec<Box<dyn PendingSink>>, String> {
+    let mut sinks: Vec<Box<dyn PendingSink>> = Vec::with_capacity(destinations.len());
+    for destination in destinations {
         match destination {
             Destination::Maildir(path) => {
                 let sink = MaildirSink::create(Path::new(path))
@@ -98,15 +137,10 @@ fn deliver_decided(
             }
         }
     }
+    Ok(sinks)
+}
 
-    let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
-    let validated = pending
-        .stream(head, reader)
-        .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
-    validated
-        .commit()
-        .map_err(|error| format!("cannot publish Maildir delivery: {error}"))?;
-
+fn delivery_outcome(plan: &DeliveryPlan) -> Result<(), String> {
     if plan.original_delivered() {
         Ok(())
     } else {
