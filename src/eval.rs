@@ -861,8 +861,8 @@ mod tests {
     use crate::config;
     use crate::limits::MessageLimits;
     use crate::trace::{
-        ConditionKind as TraceConditionKind, MemoryTrace, RecipeDecision, TraceEvent, TraceName,
-        VariableSource as TraceVariableSource,
+        BoundedTraceWriter, ConditionKind as TraceConditionKind, MemoryTrace, RecipeDecision,
+        TraceEvent, TraceName, VariableSource as TraceVariableSource,
     };
 
     #[derive(Default)]
@@ -953,6 +953,41 @@ mod tests {
             ]
         );
         assert!(!trace.was_truncated());
+    }
+
+    #[test]
+    fn rendered_default_trace_excludes_message_and_configuration_values() {
+        let config = config::parse(
+            "TOKEN=variable-secret\n:0 c\n* ^Subject: header-secret$\nmaildir:path-secret\n:0\nmaildir:final-secret\n",
+        )
+        .unwrap()
+        .expand()
+        .unwrap();
+        let plan = ExecutionPlan::compile(&config);
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = BoundedTraceWriter::new(Vec::new());
+
+        let result = plan.evaluate_headers_with_trace(
+            &head(b"Subject: header-secret\nAuthorization: credential-secret\n\nbody-secret"),
+            &mut runtime,
+            &mut trace,
+        );
+        assert!(matches!(result, HeaderEvaluation::Decided(_)));
+
+        let rendered = String::from_utf8(trace.into_inner()).unwrap();
+        for private in [
+            "variable-secret",
+            "header-secret",
+            "credential-secret",
+            "body-secret",
+            "path-secret",
+            "final-secret",
+        ] {
+            assert!(!rendered.contains(private), "leaked {private:?}");
+        }
+        assert!(rendered.contains("name=\"TOKEN\""));
+        assert!(rendered.contains("event=condition"));
+        assert!(rendered.contains("event=recipe"));
     }
 
     #[test]
