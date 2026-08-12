@@ -405,6 +405,77 @@ mod tests {
     }
 
     #[test]
+    fn bounds_expanded_assignment_values_at_the_boundary() {
+        let prefix = "a".repeat(MAX_ASSIGNMENT_VALUE_LEN / 2);
+        for length in [
+            MAX_ASSIGNMENT_VALUE_LEN - 1,
+            MAX_ASSIGNMENT_VALUE_LEN,
+            MAX_ASSIGNMENT_VALUE_LEN + 1,
+        ] {
+            let suffix = "b".repeat(length - prefix.len());
+            let source = format!("PREFIX={prefix}\nVALUE=${{PREFIX}}{suffix}\n");
+            let result = parse(&source).unwrap().expand();
+
+            if length <= MAX_ASSIGNMENT_VALUE_LEN {
+                let config = result.unwrap();
+                let Statement::Assignment(value) = &config.statements[1] else {
+                    panic!("expected assignment");
+                };
+                assert_eq!(value.value.len(), length);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 2);
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "expanded value exceeds the hard limit of {MAX_ASSIGNMENT_VALUE_LEN} bytes"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bounds_expanded_destination_and_lock_paths_at_the_boundary() {
+        let prefix = "a".repeat(MAX_PATH_EXPRESSION_LEN / 2);
+        for length in [
+            MAX_PATH_EXPRESSION_LEN - 1,
+            MAX_PATH_EXPRESSION_LEN,
+            MAX_PATH_EXPRESSION_LEN + 1,
+        ] {
+            let suffix = "b".repeat(length - prefix.len());
+            for source in [
+                format!("PREFIX={prefix}\n:0\nmaildir:${{PREFIX}}{suffix}\n"),
+                format!("PREFIX={prefix}\n:0 :${{PREFIX}}{suffix}\nmaildir:target\n"),
+            ] {
+                let result = parse(&source).unwrap().expand();
+                if length <= MAX_PATH_EXPRESSION_LEN {
+                    let config = result.unwrap();
+                    let Statement::Recipe(recipe) = &config.statements[1] else {
+                        panic!("expected recipe");
+                    };
+                    let actual = recipe.lock.as_deref().unwrap_or_else(|| {
+                        let Destination::Maildir(path) = &recipe.destination else {
+                            panic!("expected Maildir destination");
+                        };
+                        path
+                    });
+                    assert_eq!(actual.len(), length);
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(matches!(error.line, 2 | 3));
+                    assert_eq!(
+                        error.message,
+                        format!(
+                            "expanded value exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes"
+                        )
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn bounds_maildir_path_join_before_allocation_growth() {
         let source = format!(
             "MAILDIR=/{}\n:0\nmaildir:child\n",
@@ -417,6 +488,39 @@ mod tests {
             error.message,
             format!("expanded value exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes")
         );
+    }
+
+    #[test]
+    fn bounds_maildir_path_join_at_the_boundary() {
+        for length in [
+            MAX_PATH_EXPRESSION_LEN - 1,
+            MAX_PATH_EXPRESSION_LEN,
+            MAX_PATH_EXPRESSION_LEN + 1,
+        ] {
+            let base_len = length - 2;
+            let source = format!("MAILDIR=/{}\n:0\nmaildir:x\n", "a".repeat(base_len - 1));
+            let result = parse(&source).unwrap().expand();
+
+            if length <= MAX_PATH_EXPRESSION_LEN {
+                let config = result.unwrap();
+                let Statement::Recipe(recipe) = &config.statements[1] else {
+                    panic!("expected recipe");
+                };
+                let Destination::Maildir(path) = &recipe.destination else {
+                    panic!("expected Maildir destination");
+                };
+                assert_eq!(path.len(), length);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 3);
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "expanded value exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes"
+                    )
+                );
+            }
+        }
     }
 
     #[test]
