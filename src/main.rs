@@ -46,8 +46,7 @@ fn run() -> Result<(), String> {
     }
     let limits = MessageLimits::from_config(&config)
         .map_err(|error| format!("{}:{error}", path.display()))?;
-    let plan = ExecutionPlan::compile(&config)
-        .map_err(|error| format!("cannot compile {}: {error}", path.display()))?;
+    let plan = ExecutionPlan::compile(&config);
 
     // A deferred decision needs a replayable private copy of stdin. Requiring
     // MAILDIR before reading headers prevents a configuration failure from

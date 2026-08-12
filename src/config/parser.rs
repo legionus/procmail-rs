@@ -3,8 +3,8 @@ use regex::bytes::RegexBuilder;
 use super::{
     Assignment, Condition, ConditionKind, Config, Destination, MAX_ASSIGNMENT_NAME_LEN,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
-    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, ParseError,
-    Recipe, Statement,
+    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH,
+    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, ParseError, Recipe, RegexCondition, Statement,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -265,10 +265,21 @@ fn parse_condition(
     } else if let Some(value) = input.strip_prefix('>') {
         ConditionKind::LargerThan(parse_size(value, line)?)
     } else {
-        build_regex(input, case_sensitive).map_err(|error| {
+        if input.len() > MAX_REGEX_PATTERN_LEN {
+            return Err(ParseError::new(
+                line,
+                format!(
+                    "regular expression exceeds the hard limit of {MAX_REGEX_PATTERN_LEN} bytes"
+                ),
+            ));
+        }
+        let compiled = build_regex(input, case_sensitive).map_err(|error| {
             ParseError::new(line, format!("invalid regular expression: {error}"))
         })?;
-        ConditionKind::Regex(input.to_owned())
+        ConditionKind::Regex(RegexCondition {
+            pattern: input.to_owned(),
+            compiled,
+        })
     };
 
     Ok(Condition { negated, kind })
@@ -289,6 +300,7 @@ pub(crate) fn build_regex(
         .case_insensitive(!case_sensitive)
         .multi_line(true)
         .unicode(false)
+        .size_limit(MAX_REGEX_COMPILED_SIZE)
         .build()
 }
 
@@ -341,7 +353,10 @@ mod tests {
                 lock: Some(String::new()),
                 conditions: vec![Condition {
                     negated: true,
-                    kind: ConditionKind::Regex("^Subject: spam".into()),
+                    kind: ConditionKind::Regex(RegexCondition {
+                        pattern: "^Subject: spam".into(),
+                        compiled: build_regex("^Subject: spam", false).unwrap(),
+                    }),
                 }],
                 destination: Destination::Maildir("inbox".into()),
             })
@@ -413,6 +428,59 @@ mod tests {
 
         assert_eq!(error.line, 2);
         assert!(error.message.starts_with("invalid regular expression:"));
+    }
+
+    #[test]
+    fn enforces_regex_pattern_length_at_the_boundary() {
+        for length in [
+            MAX_REGEX_PATTERN_LEN - 1,
+            MAX_REGEX_PATTERN_LEN,
+            MAX_REGEX_PATTERN_LEN + 1,
+        ] {
+            let source = format!(":0\n* {}\ninbox/\n", "a".repeat(length));
+            let result = parse(&source);
+
+            if length <= MAX_REGEX_PATTERN_LEN {
+                let config = result.unwrap();
+                let Statement::Recipe(recipe) = &config.statements[0] else {
+                    panic!("expected recipe");
+                };
+                let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+                    panic!("expected regular expression");
+                };
+                assert_eq!(regex.pattern().len(), length);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 2);
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "regular expression exceeds the hard limit of {MAX_REGEX_PATTERN_LEN} bytes"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn size_conditions_do_not_use_regex_pattern_limit() {
+        let value = "9".repeat(MAX_REGEX_PATTERN_LEN + 1);
+        let error = parse(&format!(":0\n* < {value}\ninbox/\n")).unwrap_err();
+
+        assert_eq!(error.line, 2);
+        assert_eq!(
+            error.message,
+            "size condition requires a non-negative integer"
+        );
+    }
+
+    #[test]
+    fn rejects_regex_above_compiled_size_limit() {
+        let error = parse(":0\n* (?:a.){65535}\ninbox/\n").unwrap_err();
+
+        assert_eq!(error.line, 2);
+        assert!(error.message.starts_with("invalid regular expression:"));
+        assert!(error.message.contains("Compiled regex exceeds size limit"));
     }
 
     #[test]

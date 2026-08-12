@@ -2,7 +2,8 @@ mod parser;
 
 use std::fmt;
 
-pub(crate) use parser::build_regex;
+use regex::bytes::Regex;
+
 pub use parser::parse;
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;
@@ -10,6 +11,8 @@ pub const MAX_ASSIGNMENT_VALUE_LEN: usize = 64 * 1024;
 pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
 pub const MAX_PATH_EXPRESSION_LEN: usize = 4096;
 pub const MAX_RECIPE_NESTING_DEPTH: usize = 0;
+pub const MAX_REGEX_COMPILED_SIZE: usize = 8 * 1024 * 1024;
+pub const MAX_REGEX_PATTERN_LEN: usize = 64 * 1024;
 pub const MAX_RC_CONDITIONS: usize = 4096;
 pub const MAX_RC_RECIPES: usize = 1024;
 pub const MAX_RC_STATEMENTS: usize = 4096;
@@ -65,10 +68,34 @@ pub struct Condition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConditionKind {
-    Regex(String),
+    Regex(RegexCondition),
     SmallerThan(usize),
     LargerThan(usize),
 }
+
+#[derive(Debug, Clone)]
+pub struct RegexCondition {
+    pattern: String,
+    compiled: Regex,
+}
+
+impl RegexCondition {
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    pub(crate) fn compiled(&self) -> &Regex {
+        &self.compiled
+    }
+}
+
+impl PartialEq for RegexCondition {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
+}
+
+impl Eq for RegexCondition {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destination {

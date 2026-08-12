@@ -2,7 +2,7 @@ use std::fmt;
 
 use regex::bytes::Regex;
 
-use crate::config::{ConditionKind, Config, Destination, Recipe, Statement, build_regex};
+use crate::config::{ConditionKind, Config, Destination, Recipe, Statement};
 use crate::message::{Message, MessageHead, StreamedMessage};
 
 pub trait Delivery {
@@ -108,10 +108,6 @@ pub enum Outcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
-    InvalidRegex {
-        pattern: String,
-        message: String,
-    },
     BodyWasNotBuffered,
     Delivery {
         destination: String,
@@ -122,12 +118,6 @@ pub enum EvalError {
 impl fmt::Display for EvalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidRegex { pattern, message } => {
-                write!(
-                    formatter,
-                    "invalid regular expression '{pattern}': {message}"
-                )
-            }
             Self::BodyWasNotBuffered => {
                 formatter.write_str("execution plan requires body contents that were not buffered")
             }
@@ -142,13 +132,13 @@ impl fmt::Display for EvalError {
 impl std::error::Error for EvalError {}
 
 impl ExecutionPlan {
-    pub fn compile(config: &Config) -> Result<Self, EvalError> {
+    pub fn compile(config: &Config) -> Self {
         let mut recipes = Vec::new();
         for statement in &config.statements {
             let Statement::Recipe(recipe) = statement else {
                 continue;
             };
-            recipes.push(CompiledRecipe::compile(recipe)?);
+            recipes.push(CompiledRecipe::compile(recipe));
         }
 
         let mut suffix_requirements = vec![InputRequirements::default(); recipes.len() + 1];
@@ -159,11 +149,11 @@ impl ExecutionPlan {
         }
         let requirements = suffix_requirements[0];
 
-        Ok(Self {
+        Self {
             recipes,
             suffix_requirements,
             requirements,
-        })
+        }
     }
 
     pub fn requirements(&self) -> InputRequirements {
@@ -271,7 +261,7 @@ impl ExecutionPlan {
 }
 
 impl CompiledRecipe {
-    fn compile(recipe: &Recipe) -> Result<Self, EvalError> {
+    fn compile(recipe: &Recipe) -> Self {
         let area = match (recipe.has_flag('H'), recipe.has_flag('B')) {
             (false, true) => RegexArea::Body,
             (true, true) => RegexArea::Message,
@@ -283,13 +273,12 @@ impl CompiledRecipe {
             let kind = match &condition.kind {
                 ConditionKind::SmallerThan(size) => CompiledConditionKind::SmallerThan(*size),
                 ConditionKind::LargerThan(size) => CompiledConditionKind::LargerThan(*size),
-                ConditionKind::Regex(pattern) => {
-                    let regex = build_regex(pattern, recipe.has_flag('D')).map_err(|error| {
-                        EvalError::InvalidRegex {
-                            pattern: pattern.clone(),
-                            message: error.to_string(),
-                        }
-                    })?;
+                ConditionKind::Regex(regex) => {
+                    // Parsing already validated and compiled this expression.
+                    // Cloning Regex shares its read-only compiled program, so
+                    // execution planning cannot repeat attacker-controlled
+                    // compilation work after configuration validation.
+                    let regex = regex.compiled().clone();
                     match area {
                         RegexArea::Headers => CompiledConditionKind::HeaderRegex(regex),
                         RegexArea::Body => CompiledConditionKind::BodyRegex(regex),
@@ -303,11 +292,11 @@ impl CompiledRecipe {
             });
         }
 
-        Ok(Self {
+        Self {
             conditions,
             destination: recipe.destination.clone(),
             copy: recipe.has_flag('c'),
-        })
+        }
     }
 
     fn requirements(&self) -> InputRequirements {
@@ -475,7 +464,7 @@ pub fn evaluate(
     message: &Message,
     delivery: &mut impl Delivery,
 ) -> Result<Outcome, EvalError> {
-    let plan = ExecutionPlan::compile(config)?;
+    let plan = ExecutionPlan::compile(config);
     let delivery_plan = plan.evaluate_full(message)?;
     execute_deliveries(&delivery_plan, message, delivery)
 }
@@ -532,7 +521,7 @@ mod tests {
     }
 
     fn compile(source: &str) -> ExecutionPlan {
-        ExecutionPlan::compile(&config::parse(source).unwrap()).unwrap()
+        ExecutionPlan::compile(&config::parse(source).unwrap())
     }
 
     fn evaluate_config(source: &str, raw: &[u8]) -> (Outcome, Recorder) {
