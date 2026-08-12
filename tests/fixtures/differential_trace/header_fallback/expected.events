@@ -1,0 +1,5 @@
+assignment BOX
+condition header-regex false
+recipe skipped
+condition header-regex true
+recipe selected

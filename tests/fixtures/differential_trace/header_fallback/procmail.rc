@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+VERBOSE=yes
+LOGFILE=tests/fixtures/differential_trace/header_fallback/procmail.log
+BOX=selected
+
+:0 c
+* ^From:.*@example\.com
+/dev/null
+
+:0
+* ^Subject:.*release
+/dev/null
+
+:0
+/dev/null
