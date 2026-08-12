@@ -142,10 +142,12 @@ pub(super) fn expand(
         match statement {
             Statement::Assignment(assignment) => {
                 let limit = match assignment.target {
-                    AssignmentTarget::Maildir => MAX_PATH_EXPRESSION_LEN,
-                    AssignmentTarget::MessageLimit(_) | AssignmentTarget::User => {
-                        MAX_ASSIGNMENT_VALUE_LEN
+                    AssignmentTarget::Maildir | AssignmentTarget::LogFile => {
+                        MAX_PATH_EXPRESSION_LEN
                     }
+                    AssignmentTarget::Verbose
+                    | AssignmentTarget::MessageLimit(_)
+                    | AssignmentTarget::User => MAX_ASSIGNMENT_VALUE_LEN,
                 };
                 let expanded = expand_text(&assignment.value, assignment.line, limit, &variables)?;
                 assignment.value = expanded.text;
@@ -157,6 +159,15 @@ pub(super) fn expand(
                     )?;
                     validate_filesystem_path(&assignment.value, assignment.line, "MAILDIR", true)?;
                     maildir = Some(assignment.value.clone());
+                } else if assignment.target == AssignmentTarget::LogFile
+                    && !assignment.value.is_empty()
+                {
+                    assignment.value = resolve_relative_path(
+                        &assignment.value,
+                        maildir.as_deref(),
+                        assignment.line,
+                    )?;
+                    validate_filesystem_path(&assignment.value, assignment.line, "LOGFILE", false)?;
                 }
                 variables.insert(
                     assignment.name.clone(),

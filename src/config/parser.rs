@@ -118,8 +118,8 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
             format!("assignment value exceeds the hard limit of {MAX_ASSIGNMENT_VALUE_LEN} bytes"),
         ));
     }
-    if name == "MAILDIR" {
-        check_path_length(value, line_number, "MAILDIR path")?;
+    if matches!(name, "MAILDIR" | "LOGFILE") {
+        check_path_length(value, line_number, &format!("{name} path"))?;
     }
     let target = variable_policy(name)
         .assignment_target(VariableSource::RcFile)

@@ -19,6 +19,8 @@ pub enum MessageLimitVariable {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignmentTarget {
     Maildir,
+    LogFile,
+    Verbose,
     MessageLimit(MessageLimitVariable),
     User,
 }
@@ -115,6 +117,8 @@ fn valid_name(name: &str) -> bool {
 pub fn variable_policy(name: &str) -> VariablePolicy {
     match name {
         "MAILDIR" => VariablePolicy::RcOnly(AssignmentTarget::Maildir),
+        "LOGFILE" => VariablePolicy::RcOnly(AssignmentTarget::LogFile),
+        "VERBOSE" => VariablePolicy::RcOnly(AssignmentTarget::Verbose),
         "LASTFOLDER" => VariablePolicy::RuntimeOnly,
         "LIMIT_MSG_SIZE" => VariablePolicy::RcOnly(AssignmentTarget::MessageLimit(
             MessageLimitVariable::MessageSize,
@@ -173,6 +177,16 @@ mod tests {
         assert!(!variable_policy("MAILDIR").allows(VariableSource::CommandLine));
         assert!(variable_policy("LASTFOLDER").allows(VariableSource::Runtime));
         assert!(!variable_policy("LASTFOLDER").allows(VariableSource::RcFile));
+        assert_eq!(
+            variable_policy("VERBOSE").assignment_target(VariableSource::RcFile),
+            Some(AssignmentTarget::Verbose)
+        );
+        assert_eq!(
+            variable_policy("LOGFILE").assignment_target(VariableSource::RcFile),
+            Some(AssignmentTarget::LogFile)
+        );
+        assert!(!variable_policy("VERBOSE").allows(VariableSource::CommandLine));
+        assert!(!variable_policy("LOGFILE").allows(VariableSource::CommandLine));
         assert_eq!(
             variable_policy("USER_VALUE").assignment_target(VariableSource::CommandLine),
             Some(AssignmentTarget::User)

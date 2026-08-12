@@ -6,8 +6,94 @@
 use std::fmt;
 
 use crate::config::MAX_ASSIGNMENT_NAME_LEN;
+use crate::config::{AssignmentTarget, Config, Statement};
 
 pub const MAX_MEMORY_TRACE_EVENTS: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TraceConfig {
+    verbose: bool,
+    logfile: Option<String>,
+}
+
+impl TraceConfig {
+    pub fn from_config(config: &Config) -> Result<Self, TraceConfigError> {
+        let mut settings = Self::default();
+        for statement in &config.statements {
+            let Statement::Assignment(assignment) = statement else {
+                continue;
+            };
+            match assignment.target {
+                AssignmentTarget::Verbose => {
+                    settings.verbose =
+                        parse_procmail_boolean(&assignment.value).ok_or_else(|| {
+                            TraceConfigError {
+                                line: assignment.line,
+                                name: assignment.name.clone(),
+                                reason: "expected a procmail boolean value".to_owned(),
+                            }
+                        })?;
+                }
+                AssignmentTarget::LogFile => {
+                    settings.logfile =
+                        (!assignment.value.is_empty()).then(|| assignment.value.clone());
+                }
+                _ => {}
+            }
+        }
+        Ok(settings)
+    }
+
+    pub fn verbose(&self) -> bool {
+        self.verbose
+    }
+
+    pub fn logfile(&self) -> Option<&str> {
+        self.logfile.as_deref()
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.verbose
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceConfigError {
+    pub line: usize,
+    pub name: String,
+    pub reason: String,
+}
+
+impl fmt::Display for TraceConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "line {}: invalid {}: {}",
+            self.line, self.name, self.reason
+        )
+    }
+}
+
+impl std::error::Error for TraceConfigError {}
+
+fn parse_procmail_boolean(value: &str) -> Option<bool> {
+    let value = value.to_ascii_lowercase();
+    if value.starts_with(|character: char| character.is_ascii_digit() && character != '0')
+        || ["on", "y", "t", "e"]
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
+    {
+        Some(true)
+    } else if value.starts_with('0')
+        || ["off", "n", "f", "d"]
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
 
 pub trait TraceSink {
     fn record(&mut self, event: TraceEvent);
@@ -251,5 +337,45 @@ mod tests {
             })
         );
         assert!(trace.was_truncated());
+    }
+
+    #[test]
+    fn reads_procmail_style_trace_controls_in_statement_order() {
+        let config = crate::config::parse(
+            "MAILDIR=/mail\nVERBOSE=off\nLOGFILE=logs/first\nVERBOSE=YesPlease\nLOGFILE=$MAILDIR/log\n",
+        )
+        .unwrap()
+        .expand()
+        .unwrap();
+
+        let settings = TraceConfig::from_config(&config).unwrap();
+        assert!(settings.enabled());
+        assert!(settings.verbose());
+        assert_eq!(settings.logfile(), Some("/mail/log"));
+    }
+
+    #[test]
+    fn accepts_documented_procmail_boolean_prefixes() {
+        for value in ["1", "9anything", "on", "yes", "true", "enable"] {
+            assert_eq!(parse_procmail_boolean(value), Some(true), "{value:?}");
+        }
+        for value in ["0", "0anything", "off", "no", "false", "disable"] {
+            assert_eq!(parse_procmail_boolean(value), Some(false), "{value:?}");
+        }
+        for value in ["", "maybe", "-1"] {
+            assert_eq!(parse_procmail_boolean(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_verbose_value_with_its_source_line() {
+        let config = crate::config::parse("VERBOSE=maybe\n:0\nmaildir:inbox\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+
+        let error = TraceConfig::from_config(&config).unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(error.name, "VERBOSE");
     }
 }

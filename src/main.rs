@@ -23,8 +23,8 @@ use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::runtime::RuntimeVariables;
 use procmail_rs::trace::{
-    DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, NoTrace, TraceEvent,
-    TraceSink,
+    DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, NoTrace, TraceConfig,
+    TraceEvent, TraceSink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +66,8 @@ fn run() -> Result<(), String> {
     let limits = MessageLimits::from_config(&config)
         .map_err(|error| format!("{}:{error}", path.display()))?;
     let plan = ExecutionPlan::compile(&config);
+    let _trace_config =
+        TraceConfig::from_config(&config).map_err(|error| format!("{}:{error}", path.display()))?;
 
     // A deferred decision needs a replayable private copy of stdin. Requiring
     // MAILDIR before reading headers prevents a configuration failure from
