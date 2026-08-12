@@ -339,9 +339,10 @@ fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result
         } => {
             write!(
                 output,
-                "event=variable-assigned line={} name=\"{}\" source={source:?}",
+                "event=variable-assigned line={} name=\"{}\" source={}",
                 line.map_or(0, |value| value),
-                EscapedBytes::new(name.as_str().as_bytes())
+                EscapedBytes::new(name.as_str().as_bytes()),
+                variable_source_name(*source)
             )?;
             if let Some(value) = value {
                 write!(
@@ -356,29 +357,104 @@ fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result
         TraceEvent::LastFolderUpdated => output.write_str("event=last-folder-updated"),
         TraceEvent::ConditionEvaluated {
             recipe_line,
+            condition_line,
             condition_index,
             kind,
             negated,
             matched,
         } => write!(
             output,
-            "event=condition recipe_line={recipe_line} condition_index={condition_index} kind={kind:?} negated={negated} matched={matched}"
+            "event=condition recipe_line={recipe_line} condition_line={condition_line} condition_index={condition_index} kind={} negated={negated} matched={matched}",
+            condition_kind_name(*kind)
         ),
         TraceEvent::RecipeEvaluated { line, decision } => {
-            write!(output, "event=recipe line={line} decision={decision:?}")
+            write!(
+                output,
+                "event=recipe line={line} decision={}",
+                recipe_decision_name(*decision)
+            )
         }
         TraceEvent::Delivery {
             recipe_line,
             destination,
             stage,
-        } => write!(
-            output,
-            "event=delivery recipe_line={recipe_line} destination={destination:?} stage={stage:?}"
-        ),
-        TraceEvent::ExternalCommand { recipe_line, stage } => write!(
-            output,
-            "event=external-command recipe_line={recipe_line} stage={stage:?}"
-        ),
+        } => {
+            write!(
+                output,
+                "event=delivery recipe_line={recipe_line} destination={} stage=",
+                destination_kind_name(*destination)
+            )?;
+            render_delivery_stage(output, *stage)
+        }
+        TraceEvent::ExternalCommand { recipe_line, stage } => {
+            write!(
+                output,
+                "event=external-command recipe_line={recipe_line} stage="
+            )?;
+            render_external_stage(output, *stage)
+        }
+    }
+}
+
+fn condition_kind_name(kind: ConditionKind) -> &'static str {
+    match kind {
+        ConditionKind::HeaderRegex => "header-regex",
+        ConditionKind::BodyRegex => "body-regex",
+        ConditionKind::MessageRegex => "message-regex",
+        ConditionKind::SmallerThan => "smaller-than",
+        ConditionKind::LargerThan => "larger-than",
+    }
+}
+
+fn variable_source_name(source: VariableSource) -> &'static str {
+    match source {
+        VariableSource::RcFile => "rc-file",
+        VariableSource::CommandLine => "command-line",
+        VariableSource::Runtime => "runtime",
+    }
+}
+
+fn recipe_decision_name(decision: RecipeDecision) -> &'static str {
+    match decision {
+        RecipeDecision::Selected => "selected",
+        RecipeDecision::Deferred => "deferred",
+        RecipeDecision::Skipped => "skipped",
+    }
+}
+
+fn destination_kind_name(kind: DestinationKind) -> &'static str {
+    match kind {
+        DestinationKind::Maildir => "maildir",
+        DestinationKind::Mbox => "mbox",
+    }
+}
+
+fn failure_class_name(class: FailureClass) -> &'static str {
+    match class {
+        FailureClass::InputLimit => "input-limit",
+        FailureClass::Transient => "transient",
+        FailureClass::Permanent => "permanent",
+        FailureClass::Internal => "internal",
+    }
+}
+
+fn render_delivery_stage(output: &mut impl fmt::Write, stage: DeliveryStage) -> fmt::Result {
+    match stage {
+        DeliveryStage::Preparing => output.write_str("preparing"),
+        DeliveryStage::Published => output.write_str("published"),
+        DeliveryStage::Failed(class) => {
+            write!(output, "failed failure_class={}", failure_class_name(class))
+        }
+    }
+}
+
+fn render_external_stage(output: &mut impl fmt::Write, stage: ExternalCommandStage) -> fmt::Result {
+    match stage {
+        ExternalCommandStage::Starting => output.write_str("starting"),
+        ExternalCommandStage::Succeeded => output.write_str("succeeded"),
+        ExternalCommandStage::Failed(class) => {
+            write!(output, "failed failure_class={}", failure_class_name(class))
+        }
     }
 }
 
@@ -428,6 +504,7 @@ pub enum TraceEvent {
     LastFolderUpdated,
     ConditionEvaluated {
         recipe_line: usize,
+        condition_line: usize,
         condition_index: usize,
         kind: ConditionKind,
         negated: bool,
@@ -594,6 +671,7 @@ mod tests {
             TraceEvent::LastFolderUpdated,
             TraceEvent::ConditionEvaluated {
                 recipe_line: 2,
+                condition_line: 3,
                 condition_index: 0,
                 kind: ConditionKind::HeaderRegex,
                 negated: false,
@@ -678,6 +756,52 @@ mod tests {
         let output = String::from_utf8(trace.into_inner()).unwrap();
         assert_eq!(output.lines().count(), 2);
         assert!(output.contains("name=\"MAILBOX\""));
+    }
+
+    #[test]
+    fn renders_stable_event_fixture_with_source_lines() {
+        let events = [
+            variable_event("BOX"),
+            TraceEvent::ConditionEvaluated {
+                recipe_line: 10,
+                condition_line: 11,
+                condition_index: 0,
+                kind: ConditionKind::BodyRegex,
+                negated: true,
+                matched: false,
+            },
+            TraceEvent::RecipeEvaluated {
+                line: 10,
+                decision: RecipeDecision::Deferred,
+            },
+            TraceEvent::Delivery {
+                recipe_line: 12,
+                destination: DestinationKind::Maildir,
+                stage: DeliveryStage::Failed(FailureClass::Transient),
+            },
+            TraceEvent::LastFolderUpdated,
+            TraceEvent::ExternalCommand {
+                recipe_line: 20,
+                stage: ExternalCommandStage::Succeeded,
+            },
+        ];
+        let mut trace = BoundedTraceWriter::new(Vec::new());
+        for event in events {
+            trace.record(event);
+        }
+
+        let rendered = String::from_utf8(trace.into_inner()).unwrap();
+        assert_eq!(
+            rendered,
+            concat!(
+                "event=variable-assigned line=7 name=\"BOX\" source=rc-file\n",
+                "event=condition recipe_line=10 condition_line=11 condition_index=0 kind=body-regex negated=true matched=false\n",
+                "event=recipe line=10 decision=deferred\n",
+                "event=delivery recipe_line=12 destination=maildir stage=failed failure_class=transient\n",
+                "event=last-folder-updated\n",
+                "event=external-command recipe_line=20 stage=succeeded\n",
+            )
+        );
     }
 
     #[test]

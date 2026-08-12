@@ -91,6 +91,7 @@ impl Recipe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Condition {
+    pub line: usize,
     pub negated: bool,
     pub kind: ConditionKind,
 }

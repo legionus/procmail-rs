@@ -61,6 +61,7 @@ struct CompiledAssignment {
 
 #[derive(Debug)]
 struct CompiledCondition {
+    line: usize,
     negated: bool,
     kind: CompiledConditionKind,
 }
@@ -553,6 +554,7 @@ impl CompiledRecipe {
                 }
             };
             conditions.push(CompiledCondition {
+                line: condition.line,
                 negated: condition.negated,
                 kind,
             });
@@ -672,6 +674,7 @@ impl CompiledCondition {
         };
         trace.record(TraceEvent::ConditionEvaluated {
             recipe_line,
+            condition_line: self.line,
             condition_index,
             kind,
             negated: self.negated,
@@ -946,6 +949,7 @@ mod tests {
                 },
                 TraceEvent::ConditionEvaluated {
                     recipe_line: 2,
+                    condition_line: 3,
                     condition_index: 0,
                     kind: TraceConditionKind::HeaderRegex,
                     negated: false,

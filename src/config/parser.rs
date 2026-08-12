@@ -360,7 +360,14 @@ fn parse_condition(
         )
     };
 
-    Ok((Condition { negated, kind }, is_regex))
+    Ok((
+        Condition {
+            line,
+            negated,
+            kind,
+        },
+        is_regex,
+    ))
 }
 
 fn parse_size(input: &str, line: usize) -> Result<usize, ParseError> {
@@ -433,6 +440,7 @@ mod tests {
                 flags: "Bc".into(),
                 lock: Some(String::new()),
                 conditions: vec![Condition {
+                    line: 4,
                     negated: true,
                     kind: ConditionKind::Regex(RegexCondition {
                         pattern: "^Subject: spam".into(),
