@@ -87,9 +87,7 @@ pub(super) fn expand(
                     }
                 }
                 let path = match &mut recipe.destination {
-                    Destination::Mbox(path)
-                    | Destination::Maildir(path)
-                    | Destination::Auto(path) => path,
+                    Destination::Mbox(path) | Destination::Maildir(path) => path,
                 };
                 *path = expand_text(
                     path,

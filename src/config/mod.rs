@@ -122,7 +122,6 @@ impl Eq for RegexCondition {}
 pub enum Destination {
     Mbox(String),
     Maildir(String),
-    Auto(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

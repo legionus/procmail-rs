@@ -123,7 +123,7 @@ fn check_rejects_unresolved_destination_types() {
         ),
         (
             "ambiguous",
-            "line 2: destination type is ambiguous; use an explicit maildir: or mbox: prefix",
+            "line 2: destination type is ambiguous; use an explicit maildir: or mbox: prefix, or a trailing '/' for Maildir",
         ),
     ] {
         let path = config_file(&format!(":0\n{action}\n"));

@@ -216,7 +216,11 @@ fn parse_recipe(
     } else if action.ends_with('/') {
         Destination::Maildir(required_path(action, index + 1, "destination path")?)
     } else {
-        Destination::Auto(required_path(action, index + 1, "destination path")?)
+        check_path_length(action, index + 1, "destination path")?;
+        return Err(ParseError::new(
+            index + 1,
+            "destination type is ambiguous; use an explicit maildir: or mbox: prefix, or a trailing '/' for Maildir",
+        ));
     };
 
     let recipe = Recipe {
@@ -424,6 +428,17 @@ mod tests {
         };
 
         assert_eq!(recipe.destination, Destination::Maildir("inbox/".into()));
+    }
+
+    #[test]
+    fn rejects_destination_without_a_stable_type() {
+        let error = parse(":0\ninbox\n").unwrap_err();
+
+        assert_eq!(error.line, 2);
+        assert_eq!(
+            error.message,
+            "destination type is ambiguous; use an explicit maildir: or mbox: prefix, or a trailing '/' for Maildir"
+        );
     }
 
     #[test]

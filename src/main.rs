@@ -113,9 +113,6 @@ fn validate_destination_types(config: &config::Config, rc_path: &Path) -> Result
         let message = match &recipe.destination {
             Destination::Maildir(_) => continue,
             Destination::Mbox(_) => "mbox delivery is not implemented",
-            Destination::Auto(_) => {
-                "destination type is ambiguous; use an explicit maildir: or mbox: prefix"
-            }
         };
         return Err(format!(
             "{}:line {}: {message}",
@@ -211,11 +208,6 @@ fn open_sinks(destinations: &[Destination]) -> Result<Vec<Box<dyn PendingSink>>,
             }
             Destination::Mbox(path) => {
                 return Err(format!("mbox delivery is not implemented yet: {path}"));
-            }
-            Destination::Auto(path) => {
-                return Err(format!(
-                    "automatic destination detection is not implemented yet: {path}"
-                ));
             }
         }
     }

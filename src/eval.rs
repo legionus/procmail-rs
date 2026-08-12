@@ -496,7 +496,7 @@ fn execute_deliveries(
 
 fn destination_name(destination: &Destination) -> &str {
     match destination {
-        Destination::Mbox(path) | Destination::Maildir(path) | Destination::Auto(path) => path,
+        Destination::Mbox(path) | Destination::Maildir(path) => path,
     }
 }
 
