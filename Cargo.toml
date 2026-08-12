@@ -2,7 +2,7 @@
 name = "procmail-rs"
 version = "0.1.0"
 edition = "2024"
-license = "Artistic-1.0-Perl"
+license = "MIT"
 
 [dependencies]
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf-literal"] }

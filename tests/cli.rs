@@ -427,6 +427,76 @@ fn filter_streams_early_copy_while_buffering_for_body_rule() {
 }
 
 #[test]
+fn deferred_copy_keeps_variables_from_its_selection_point() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("mail");
+    let first = maildir.join("first");
+    let second = maildir.join("second");
+    create_maildir(&maildir);
+    create_maildir(&first);
+    create_maildir(&second);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nBOX=first\n:0c\nmaildir:$BOX\nBOX=second\n:0B\n* body\nmaildir:$BOX\n",
+            maildir.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: snapshots\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&first), [input.to_vec()]);
+    assert_eq!(delivered_messages(&second), [input.to_vec()]);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn runtime_destination_is_resolved_after_previous_copy_is_published() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("mail");
+    let first = maildir.join("first");
+    create_maildir(&maildir);
+    create_maildir(&first);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0c\nfirst/\n:0\nmaildir:${{LASTFOLDER}}/child/\n",
+            maildir.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: runtime destination\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(delivered_messages(&first), [input.to_vec()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("runtime variable LASTFOLDER is not set"));
+    assert!(stderr.contains("cannot open Maildir"), "{stderr}");
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn body_limit_aborts_early_copy_before_publication() {
     let path = config_file("");
     let copy = path.parent().unwrap().join("copy");

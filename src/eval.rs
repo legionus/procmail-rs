@@ -4,6 +4,7 @@ use regex::bytes::Regex;
 
 use crate::config::{ConditionKind, Config, Destination, Recipe, Statement};
 use crate::message::{Message, MessageHead, StreamedMessage};
+use crate::runtime::RuntimeVariables;
 
 pub trait Delivery {
     fn deliver(&mut self, destination: &Destination, message: &Message) -> Result<(), String>;
@@ -31,10 +32,12 @@ pub struct ExecutionPlan {
     recipes: Vec<CompiledRecipe>,
     suffix_requirements: Vec<InputRequirements>,
     requirements: InputRequirements,
+    requires_ordered_delivery: bool,
 }
 
 #[derive(Debug)]
 struct CompiledRecipe {
+    assignments: Vec<(String, String)>,
     conditions: Vec<CompiledCondition>,
     destination: Destination,
     copy: bool,
@@ -81,6 +84,7 @@ impl DeliveryPlan {
 pub enum HeaderEvaluation {
     Decided(DeliveryPlan),
     NeedsMessage(Continuation),
+    Error(EvalError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +113,7 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
     BodyWasNotBuffered,
+    Expansion(crate::config::ExpansionError),
     Delivery {
         destination: String,
         message: String,
@@ -121,6 +126,7 @@ impl fmt::Display for EvalError {
             Self::BodyWasNotBuffered => {
                 formatter.write_str("execution plan requires body contents that were not buffered")
             }
+            Self::Expansion(error) => write!(formatter, "cannot resolve destination: {error}"),
             Self::Delivery {
                 destination,
                 message,
@@ -134,11 +140,19 @@ impl std::error::Error for EvalError {}
 impl ExecutionPlan {
     pub fn compile(config: &Config) -> Self {
         let mut recipes = Vec::new();
+        let mut assignments = config.initial_variables().to_vec();
         for statement in &config.statements {
-            let Statement::Recipe(recipe) = statement else {
-                continue;
-            };
-            recipes.push(CompiledRecipe::compile(recipe));
+            match statement {
+                Statement::Assignment(assignment) => {
+                    assignments.push((assignment.name.clone(), assignment.value.clone()));
+                }
+                Statement::Recipe(recipe) => {
+                    recipes.push(CompiledRecipe::compile(
+                        recipe,
+                        std::mem::take(&mut assignments),
+                    ));
+                }
+            }
         }
 
         let mut suffix_requirements = vec![InputRequirements::default(); recipes.len() + 1];
@@ -148,22 +162,46 @@ impl ExecutionPlan {
                 .union(suffix_requirements[index + 1]);
         }
         let requirements = suffix_requirements[0];
+        let requires_ordered_delivery = recipes
+            .iter()
+            .any(|recipe| recipe.destination.needs_runtime_variables());
 
         Self {
             recipes,
             suffix_requirements,
             requirements,
+            requires_ordered_delivery,
         }
     }
 
     pub fn requirements(&self) -> InputRequirements {
-        self.requirements
+        if self.requires_ordered_delivery {
+            self.requirements.union(InputRequirements {
+                needs_end_of_message: true,
+                ..InputRequirements::default()
+            })
+        } else {
+            self.requirements
+        }
+    }
+
+    pub fn requires_ordered_delivery(&self) -> bool {
+        self.requires_ordered_delivery
     }
 
     pub fn evaluate_headers(&self, head: &MessageHead) -> HeaderEvaluation {
+        self.evaluate_headers_with_runtime(head, &mut RuntimeVariables::default())
+    }
+
+    pub fn evaluate_headers_with_runtime(
+        &self,
+        head: &MessageHead,
+        runtime: &mut RuntimeVariables,
+    ) -> HeaderEvaluation {
         let mut destinations = Vec::new();
 
         for (index, recipe) in self.recipes.iter().enumerate() {
+            recipe.apply_assignments(runtime);
             match recipe.matches_headers(head) {
                 PartialMatch::False => continue,
                 PartialMatch::Deferred => {
@@ -174,7 +212,14 @@ impl ExecutionPlan {
                     });
                 }
                 PartialMatch::True => {
-                    destinations.push(recipe.destination.clone());
+                    let destination = match recipe
+                        .destination
+                        .bind_with(|name| runtime.get(name).map(str::to_owned))
+                    {
+                        Ok(destination) => destination,
+                        Err(error) => return HeaderEvaluation::Error(EvalError::Expansion(error)),
+                    };
+                    destinations.push(destination);
                     if !recipe.copy {
                         return HeaderEvaluation::Decided(DeliveryPlan {
                             destinations,
@@ -216,20 +261,42 @@ impl ExecutionPlan {
         raw: &[u8],
         header_len: usize,
     ) -> Result<DeliveryPlan, EvalError> {
+        self.resume_mapped_with_runtime(
+            continuation,
+            raw,
+            header_len,
+            &mut RuntimeVariables::default(),
+        )
+    }
+
+    pub fn resume_mapped_with_runtime(
+        &self,
+        continuation: Continuation,
+        raw: &[u8],
+        header_len: usize,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<DeliveryPlan, EvalError> {
         if header_len > raw.len() {
             return Err(EvalError::BodyWasNotBuffered);
         }
-        self.resume(continuation, CompleteMessage::Mapped { raw, header_len })
+        self.resume_with_runtime(
+            continuation,
+            CompleteMessage::Mapped { raw, header_len },
+            runtime,
+            true,
+        )
     }
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
-        self.resume(
+        self.resume_with_runtime(
             Continuation {
                 recipe_index: 0,
                 destinations: Vec::new(),
                 requirements: self.requirements,
             },
             CompleteMessage::Buffered(message),
+            &mut RuntimeVariables::default(),
+            false,
         )
     }
 
@@ -238,13 +305,36 @@ impl ExecutionPlan {
         continuation: Continuation,
         message: CompleteMessage<'_>,
     ) -> Result<DeliveryPlan, EvalError> {
+        self.resume_with_runtime(
+            continuation,
+            message,
+            &mut RuntimeVariables::default(),
+            true,
+        )
+    }
+
+    fn resume_with_runtime(
+        &self,
+        continuation: Continuation,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        first_assignments_applied: bool,
+    ) -> Result<DeliveryPlan, EvalError> {
         let mut destinations = continuation.destinations;
 
-        for recipe in &self.recipes[continuation.recipe_index..] {
+        for (offset, recipe) in self.recipes[continuation.recipe_index..].iter().enumerate() {
+            if offset != 0 || !first_assignments_applied {
+                recipe.apply_assignments(runtime);
+            }
             if !recipe.matches_complete(message)? {
                 continue;
             }
-            destinations.push(recipe.destination.clone());
+            destinations.push(
+                recipe
+                    .destination
+                    .bind_with(|name| runtime.get(name).map(str::to_owned))
+                    .map_err(EvalError::Expansion)?,
+            );
             if !recipe.copy {
                 return Ok(DeliveryPlan {
                     destinations,
@@ -261,7 +351,7 @@ impl ExecutionPlan {
 }
 
 impl CompiledRecipe {
-    fn compile(recipe: &Recipe) -> Self {
+    fn compile(recipe: &Recipe, assignments: Vec<(String, String)>) -> Self {
         let area = match (recipe.has_flag('H'), recipe.has_flag('B')) {
             (false, true) => RegexArea::Body,
             (true, true) => RegexArea::Message,
@@ -293,9 +383,16 @@ impl CompiledRecipe {
         }
 
         Self {
+            assignments,
             conditions,
             destination: recipe.destination.clone(),
             copy: recipe.has_flag('c'),
+        }
+    }
+
+    fn apply_assignments(&self, runtime: &mut RuntimeVariables) {
+        for (name, value) in &self.assignments {
+            runtime.set(name.clone(), value.clone());
         }
     }
 
@@ -316,7 +413,7 @@ impl CompiledRecipe {
                 PartialMatch::True => {}
             }
         }
-        if deferred {
+        if deferred || self.destination.needs_runtime_variables() {
             PartialMatch::Deferred
         } else {
             PartialMatch::True
@@ -495,9 +592,7 @@ fn execute_deliveries(
 }
 
 fn destination_name(destination: &Destination) -> &str {
-    match destination {
-        Destination::Mbox(path) | Destination::Maildir(path) => path,
-    }
+    destination.path()
 }
 
 #[cfg(test)]

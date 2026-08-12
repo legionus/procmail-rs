@@ -1,15 +1,24 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::delivery::{CommitError, CommitReport};
+use crate::delivery::{CommitError, CommitReport, PublishedDelivery};
 
 #[derive(Debug, Default)]
 pub struct RuntimeVariables {
-    last_folder: Option<String>,
+    values: BTreeMap<String, String>,
 }
 
 impl RuntimeVariables {
+    pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.values.insert(name.into(), value.into());
+    }
+
     pub fn last_folder(&self) -> Option<&str> {
-        self.last_folder.as_deref()
+        self.get("LASTFOLDER")
+    }
+
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(String::as_str)
     }
 
     pub fn record_commit(&mut self, report: &CommitReport) -> Result<(), String> {
@@ -18,6 +27,10 @@ impl RuntimeVariables {
 
     pub fn record_partial_commit(&mut self, error: &CommitError) -> Result<(), String> {
         self.record_last_folder(error.last_folder())
+    }
+
+    pub fn record_delivery(&mut self, delivery: &PublishedDelivery) -> Result<(), String> {
+        self.record_last_folder(Some(delivery.last_folder()))
     }
 
     fn record_last_folder(&mut self, path: Option<&Path>) -> Result<(), String> {
@@ -30,7 +43,8 @@ impl RuntimeVariables {
                 path.display()
             )
         })?;
-        self.last_folder = Some(value.to_owned());
+        self.values
+            .insert("LASTFOLDER".to_owned(), value.to_owned());
         Ok(())
     }
 }

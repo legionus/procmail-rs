@@ -4,8 +4,8 @@ use super::{
     Assignment, Condition, ConditionKind, Config, Destination, MAX_ASSIGNMENT_NAME_LEN,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
     MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS,
-    MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, ParseError, Recipe,
-    RegexCondition, Statement, VariableSource, variable_policy,
+    MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, ParseError,
+    PathExpression, Recipe, RegexCondition, Statement, VariableSource, variable_policy,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -64,7 +64,10 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
         ));
     }
 
-    Ok(Config { statements })
+    Ok(Config {
+        statements,
+        initial_variables: Vec::new(),
+    })
 }
 
 fn check_recipe_limit(count: usize, line: usize) -> Result<(), ParseError> {
@@ -210,11 +213,29 @@ fn parse_recipe(
     }
 
     let destination = if let Some(path) = action.strip_prefix("mbox:") {
-        Destination::Mbox(required_path(path, index + 1, "destination path")?)
+        Destination::Mbox(PathExpression {
+            source: required_path(path, index + 1, "destination path")?,
+            base: None,
+            line: index + 1,
+            runtime_dependent: false,
+            expansion: None,
+        })
     } else if let Some(path) = action.strip_prefix("maildir:") {
-        Destination::Maildir(required_path(path, index + 1, "destination path")?)
+        Destination::Maildir(PathExpression {
+            source: required_path(path, index + 1, "destination path")?,
+            base: None,
+            line: index + 1,
+            runtime_dependent: false,
+            expansion: None,
+        })
     } else if action.ends_with('/') {
-        Destination::Maildir(required_path(action, index + 1, "destination path")?)
+        Destination::Maildir(PathExpression {
+            source: required_path(action, index + 1, "destination path")?,
+            base: None,
+            line: index + 1,
+            runtime_dependent: false,
+            expansion: None,
+        })
     } else {
         check_path_length(action, index + 1, "destination path")?;
         return Err(ParseError::new(
@@ -723,7 +744,7 @@ mod tests {
                 let Destination::Maildir(path) = &recipe.destination else {
                     panic!("expected Maildir destination");
                 };
-                assert_eq!(path.len(), length);
+                assert_eq!(path.source().len(), length);
             } else {
                 assert_path_limit_error(result.unwrap_err(), 2, "destination path");
             }

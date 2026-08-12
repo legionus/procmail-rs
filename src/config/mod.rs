@@ -30,6 +30,7 @@ pub const MAX_RC_STATEMENTS: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub statements: Vec<Statement>,
+    pub(crate) initial_variables: Vec<(String, String)>,
 }
 
 impl Config {
@@ -48,6 +49,10 @@ impl Config {
             };
             (assignment.target == AssignmentTarget::Maildir).then_some(assignment.value.as_str())
         })
+    }
+
+    pub(crate) fn initial_variables(&self) -> &[(String, String)] {
+        &self.initial_variables
     }
 }
 
@@ -120,8 +125,73 @@ impl Eq for RegexCondition {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destination {
-    Mbox(String),
-    Maildir(String),
+    Mbox(PathExpression),
+    Maildir(PathExpression),
+}
+
+#[derive(Debug, Clone)]
+pub struct PathExpression {
+    pub(crate) source: String,
+    pub(crate) base: Option<String>,
+    pub(crate) line: usize,
+    pub(crate) runtime_dependent: bool,
+    pub(crate) expansion: Option<ExpansionExpression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpansionExpression {
+    pub(crate) parts: Vec<ExpansionPart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExpansionPart {
+    Literal(String),
+    Variable {
+        name: String,
+        default: Option<ExpansionExpression>,
+    },
+}
+
+impl PartialEq for PathExpression {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source && self.base == other.base
+    }
+}
+
+impl Eq for PathExpression {}
+
+impl From<&str> for PathExpression {
+    fn from(source: &str) -> Self {
+        Self {
+            source: source.to_owned(),
+            base: None,
+            line: 0,
+            runtime_dependent: false,
+            expansion: None,
+        }
+    }
+}
+
+impl From<String> for PathExpression {
+    fn from(source: String) -> Self {
+        Self {
+            source,
+            base: None,
+            line: 0,
+            runtime_dependent: false,
+            expansion: None,
+        }
+    }
+}
+
+impl PathExpression {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn line(&self) -> usize {
+        self.line
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

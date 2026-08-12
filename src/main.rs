@@ -5,7 +5,7 @@ compile_error!("procmail-rs currently supports only 64-bit Linux targets");
 
 use std::env;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -80,7 +80,7 @@ fn run() -> Result<(), String> {
             let mut stdin = io::stdin().lock();
             let head = Message::read_headers(&mut stdin, limits)
                 .map_err(|error| format!("cannot read message headers from stdin: {error}"))?;
-            match plan.evaluate_headers(&head) {
+            match plan.evaluate_headers_with_runtime(&head, &mut runtime) {
                 HeaderEvaluation::Decided(delivery) => {
                     deliver_decided(head, &mut stdin, &delivery, &mut runtime)
                 }
@@ -97,6 +97,7 @@ fn run() -> Result<(), String> {
                         &mut runtime,
                     )
                 }
+                HeaderEvaluation::Error(error) => Err(format!("cannot evaluate message: {error}")),
             }
         }
     }
@@ -129,7 +130,7 @@ fn deliver_decided(
     plan: &DeliveryPlan,
     runtime: &mut RuntimeVariables,
 ) -> Result<(), String> {
-    let sinks = open_sinks(plan.destinations())?;
+    let sinks = open_sinks(plan.destinations(), runtime)?;
     let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
     let (validated, _) = pending
         .stream(head, reader)
@@ -148,7 +149,11 @@ fn deliver_staged(
     runtime: &mut RuntimeVariables,
 ) -> Result<(), String> {
     let early_count = continuation.pending_destinations().len();
-    let early_sinks = open_sinks(continuation.pending_destinations())?;
+    let early_sinks = if execution.requires_ordered_delivery() {
+        Vec::new()
+    } else {
+        open_sinks(continuation.pending_destinations(), runtime)?
+    };
     let pending = PendingFanout::new(early_sinks).map_err(|error| error.to_string())?;
     let mut staging = StagingFile::create(staging_directory)
         .map_err(|error| format!("cannot create private staging file: {error}"))?;
@@ -165,12 +170,21 @@ fn deliver_staged(
         .map_err(|error| format!("cannot map staged message: {error}"))?;
 
     let plan = execution
-        .resume_mapped(continuation, staged.as_bytes(), staged.header_len())
+        .resume_mapped_with_runtime(
+            continuation,
+            staged.as_bytes(),
+            staged.header_len(),
+            runtime,
+        )
         .map_err(|error| format!("cannot evaluate message: {error}"))?;
+    if execution.requires_ordered_delivery() {
+        deliver_ordered(&plan, staged.as_bytes(), runtime)?;
+        return delivery_outcome(&plan);
+    }
     let late_destinations = plan.destinations().get(early_count..).ok_or_else(|| {
         "internal error: deferred delivery discarded an early copy destination".to_owned()
     })?;
-    let late_sinks = open_sinks(late_destinations)?;
+    let late_sinks = open_sinks(late_destinations, runtime)?;
     let late = PendingFanout::new(late_sinks).map_err(|error| error.to_string())?;
     let validated = validated
         .append_bytes(late, staged.as_bytes())
@@ -178,6 +192,29 @@ fn deliver_staged(
     commit_delivery(validated, runtime)?;
 
     delivery_outcome(&plan)
+}
+
+fn deliver_ordered(
+    plan: &DeliveryPlan,
+    message: &[u8],
+    runtime: &mut RuntimeVariables,
+) -> Result<(), String> {
+    // A later path may depend on the exact file published by an earlier copy.
+    // Publish one complete staged copy at a time and update runtime values
+    // before resolving the next expression.
+    for destination in plan.destinations() {
+        let mut sinks = open_sinks(std::slice::from_ref(destination), runtime)?;
+        let mut sink = sinks
+            .pop()
+            .ok_or_else(|| "internal error: destination produced no sink".to_owned())?;
+        sink.write_all(message)
+            .map_err(|error| format!("cannot write staged delivery: {error}"))?;
+        let published = sink
+            .commit()
+            .map_err(|error| format!("cannot publish Maildir delivery: {error}"))?;
+        runtime.record_delivery(&published)?;
+    }
+    Ok(())
 }
 
 fn commit_delivery(
@@ -196,18 +233,27 @@ fn commit_delivery(
     }
 }
 
-fn open_sinks(destinations: &[Destination]) -> Result<Vec<Box<dyn PendingSink>>, String> {
+fn open_sinks(
+    destinations: &[Destination],
+    runtime: &RuntimeVariables,
+) -> Result<Vec<Box<dyn PendingSink>>, String> {
     let mut sinks: Vec<Box<dyn PendingSink>> = Vec::with_capacity(destinations.len());
-    for destination in destinations {
-        match destination {
-            Destination::Maildir(path) => {
-                let path = Path::new(path);
+    for unresolved in destinations {
+        let destination = unresolved
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .map_err(|error| error.to_string())?;
+        match &destination {
+            Destination::Maildir(expression) => {
+                let path = Path::new(expression.source());
                 let sink = MaildirSink::create(path)
                     .map_err(|error| format!("cannot open Maildir {}: {error}", path.display()))?;
                 sinks.push(Box::new(sink));
             }
-            Destination::Mbox(path) => {
-                return Err(format!("mbox delivery is not implemented yet: {path}"));
+            Destination::Mbox(expression) => {
+                return Err(format!(
+                    "mbox delivery is not implemented yet: {}",
+                    expression.source()
+                ));
             }
         }
     }
