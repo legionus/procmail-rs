@@ -1,5 +1,7 @@
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Seek, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
@@ -92,6 +94,9 @@ fn invalid_configuration_does_not_consume_stdin() {
         ":0\nmaildir:$UNDEFINED\n",
         ":0\nmbox:unsupported\n",
         ":0\nambiguous\n",
+        ":0\nmaildir:../escape\n",
+        ":0\nmaildir:one//two\n",
+        "MAILDIR=\n:0\nmaildir:inbox\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
@@ -112,6 +117,32 @@ fn invalid_configuration_does_not_consume_stdin() {
         assert_eq!(input.stream_position().unwrap(), 0, "rules: {rules:?}");
         fs::remove_dir_all(config.parent().unwrap()).unwrap();
     }
+}
+
+#[test]
+fn non_utf8_command_line_value_does_not_consume_stdin() {
+    let config = config_file(":0\nmaildir:$DESTINATION\n");
+    let input_path = config.parent().unwrap().join("message.eml");
+    fs::write(&input_path, b"Subject: must remain unread\n\nbody").unwrap();
+    let mut input = fs::File::open(&input_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .arg("--set")
+        .arg(OsString::from_vec(b"DESTINATION=bad\xffpath".to_vec()))
+        .stdin(Stdio::from(input.try_clone().unwrap()))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("--set value is not valid UTF-8")
+    );
+    assert_eq!(input.stream_position().unwrap(), 0);
+    fs::remove_dir_all(config.parent().unwrap()).unwrap();
 }
 
 #[test]

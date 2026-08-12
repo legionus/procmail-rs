@@ -68,6 +68,7 @@ pub(super) fn expand(
                         maildir.as_deref(),
                         assignment.line,
                     )?;
+                    validate_filesystem_path(&assignment.value, assignment.line, "MAILDIR", true)?;
                     maildir = Some(assignment.value.clone());
                 }
                 variables.insert(
@@ -84,10 +85,12 @@ pub(super) fn expand(
                         expand_text(lock, recipe.line, MAX_PATH_EXPRESSION_LEN, &variables)?.text;
                     if !lock.is_empty() {
                         *lock = resolve_relative_path(lock, maildir.as_deref(), recipe.line)?;
+                        validate_filesystem_path(lock, recipe.line, "lockfile", false)?;
                     }
                 }
-                let path = match &mut recipe.destination {
-                    Destination::Mbox(path) | Destination::Maildir(path) => path,
+                let (path, description, allows_trailing_slash) = match &mut recipe.destination {
+                    Destination::Maildir(path) => (path, "Maildir destination", true),
+                    Destination::Mbox(path) => (path, "mbox destination", false),
                 };
                 *path = expand_text(
                     path,
@@ -97,11 +100,76 @@ pub(super) fn expand(
                 )?
                 .text;
                 *path = resolve_relative_path(path, maildir.as_deref(), recipe.action_line)?;
+                validate_filesystem_path(
+                    path,
+                    recipe.action_line,
+                    description,
+                    allows_trailing_slash,
+                )?;
             }
         }
     }
 
     Ok(config)
+}
+
+fn validate_filesystem_path(
+    path: &str,
+    line: usize,
+    description: &str,
+    allows_trailing_slash: bool,
+) -> Result<(), ExpansionError> {
+    if path.is_empty() {
+        return Err(ExpansionError::new(
+            line,
+            format!("{description} path is empty"),
+        ));
+    }
+    if path.as_bytes().contains(&0) {
+        return Err(ExpansionError::new(
+            line,
+            format!("{description} path contains NUL"),
+        ));
+    }
+    if path.ends_with('/') && !allows_trailing_slash {
+        return Err(ExpansionError::new(
+            line,
+            format!("{description} path must not end with '/'"),
+        ));
+    }
+
+    // Inspect the original spelling rather than Path::components(), which
+    // normalizes repeated separators and '.' before policy checks can reject
+    // ambiguous aliases. A single leading root and an allowed trailing
+    // Maildir marker are syntax, not empty path components.
+    let mut components = path;
+    if let Some(relative) = components.strip_prefix('/') {
+        components = relative;
+    }
+    if allows_trailing_slash && let Some(without_marker) = components.strip_suffix('/') {
+        components = without_marker;
+    }
+    if components.is_empty() {
+        return Err(ExpansionError::new(
+            line,
+            format!("{description} path does not name a filesystem entry"),
+        ));
+    }
+    for component in components.split('/') {
+        let message = match component {
+            "" => Some("contains an empty component"),
+            "." => Some("must not contain '.'"),
+            ".." => Some("must not contain '..'"),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return Err(ExpansionError::new(
+                line,
+                format!("{description} path {message}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_relative_path(
@@ -518,6 +586,48 @@ mod tests {
                     )
                 );
             }
+        }
+    }
+
+    #[test]
+    fn accepts_only_unambiguous_filesystem_path_components() {
+        for (path, allows_trailing_slash) in [
+            ("relative/mail", false),
+            ("/absolute/mail", false),
+            ("relative/mail/", true),
+            ("/absolute/mail/", true),
+        ] {
+            validate_filesystem_path(path, 1, "test", allows_trailing_slash).unwrap();
+        }
+
+        for (path, allows_trailing_slash, expected) in [
+            ("", true, "path is empty"),
+            ("/", true, "does not name a filesystem entry"),
+            ("a//b", true, "contains an empty component"),
+            ("//a", true, "contains an empty component"),
+            ("a/./b", true, "must not contain '.'"),
+            ("a/../b", true, "must not contain '..'"),
+            ("a/", false, "must not end with '/'"),
+            ("a\0b", true, "contains NUL"),
+        ] {
+            let error =
+                validate_filesystem_path(path, 7, "test", allows_trailing_slash).unwrap_err();
+            assert_eq!(error.line, 7);
+            assert!(error.message.contains(expected), "{path:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn validates_paths_after_variable_expansion() {
+        for source in [
+            "MAILDIR=\n",
+            "EMPTY=\n:0\nmaildir:$EMPTY\n",
+            "BAD=../escape\n:0\nmaildir:$BAD\n",
+            "BAD=one//two\n:0\nmaildir:$BAD\n",
+            "BAD=one/./two\n:0 :$BAD\nmaildir:target\n",
+            "BAD=box/\n:0\nmbox:$BAD\n",
+        ] {
+            assert!(parse(source).unwrap().expand().is_err(), "{source:?}");
         }
     }
 
