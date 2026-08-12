@@ -10,6 +10,36 @@ use crate::config::{AssignmentTarget, Config, Statement};
 
 pub const MAX_MEMORY_TRACE_EVENTS: usize = 16 * 1024;
 
+pub struct EscapedBytes<'a>(&'a [u8]);
+
+impl<'a> EscapedBytes<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl fmt::Display for EscapedBytes<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Render one byte at a time so malformed UTF-8 can never enter the
+        // output unchecked. Keeping only a conservative printable ASCII set
+        // literal also makes every record boundary visible to line-oriented
+        // log consumers.
+        for byte in self.0 {
+            match byte {
+                b'\n' => formatter.write_str("\\n")?,
+                b'\r' => formatter.write_str("\\r")?,
+                b'\t' => formatter.write_str("\\t")?,
+                b'\\' => formatter.write_str("\\\\")?,
+                b'\'' => formatter.write_str("\\'")?,
+                b'"' => formatter.write_str("\\\"")?,
+                b' '..=b'~' => formatter.write_str(char::from(*byte).encode_utf8(&mut [0; 4]))?,
+                _ => write!(formatter, "\\x{byte:02x}")?,
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFailurePolicy {
     Advisory,
@@ -357,6 +387,27 @@ mod tests {
             })
         );
         assert!(trace.was_truncated());
+    }
+
+    #[test]
+    fn escapes_record_delimiters_control_bytes_and_non_utf8_input() {
+        let hostile = b"line\nnext\r\t'\"\\\0\x1f\x7f\x80\xff";
+        assert_eq!(
+            EscapedBytes::new(hostile).to_string(),
+            "line\\nnext\\r\\t\\'\\\"\\\\\\x00\\x1f\\x7f\\x80\\xff"
+        );
+        assert!(!EscapedBytes::new(hostile).to_string().contains('\n'));
+    }
+
+    #[test]
+    fn leaves_only_safe_printable_ascii_unescaped() {
+        let printable = (b' '..=b'~')
+            .filter(|byte| !matches!(byte, b'\\' | b'\'' | b'"'))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            EscapedBytes::new(&printable).to_string().as_bytes(),
+            printable
+        );
     }
 
     #[test]
