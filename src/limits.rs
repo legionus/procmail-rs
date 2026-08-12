@@ -2,11 +2,12 @@ use std::fmt;
 
 use crate::config::{Config, Statement};
 
+pub use crate::config::MAX_RC_SIZE;
+
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
 const GIB: usize = 1024 * MIB;
 
-pub const MAX_RC_SIZE: usize = MIB;
 pub const MAX_MESSAGE_SIZE: usize = 256 * MIB;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

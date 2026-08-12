@@ -3,15 +3,24 @@ use regex::bytes::RegexBuilder;
 use super::{
     Assignment, Condition, ConditionKind, Config, Destination, MAX_ASSIGNMENT_NAME_LEN,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
-    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH,
-    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, ParseError, Recipe, RegexCondition, Statement,
+    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS,
+    MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, ParseError, Recipe,
+    RegexCondition, Statement,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
+    if input.len() > MAX_RC_SIZE {
+        return Err(ParseError::new(
+            1,
+            format!("rc file exceeds the hard limit of {MAX_RC_SIZE} bytes"),
+        ));
+    }
+
     let lines: Vec<&str> = input.lines().collect();
     let mut statements = Vec::new();
     let mut condition_count = 0usize;
     let mut recipe_count = 0;
+    let mut regex_count = 0usize;
     let mut index = 0;
 
     while index < lines.len() {
@@ -27,10 +36,14 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
 
         if line.starts_with(':') {
             check_recipe_limit(recipe_count, line_number)?;
-            let (recipe, next) = parse_recipe(&lines, index, condition_count)?;
+            let (recipe, next, recipe_regexes) =
+                parse_recipe(&lines, index, condition_count, regex_count)?;
             condition_count = condition_count
                 .checked_add(recipe.conditions.len())
                 .ok_or_else(|| ParseError::new(line_number, "rc condition count overflows"))?;
+            regex_count = regex_count
+                .checked_add(recipe_regexes)
+                .ok_or_else(|| ParseError::new(line_number, "rc regex count overflows"))?;
             statements.push(Statement::Recipe(recipe));
             recipe_count = recipe_count
                 .checked_add(1)
@@ -114,13 +127,15 @@ fn parse_recipe(
     lines: &[&str],
     start: usize,
     prior_conditions: usize,
-) -> Result<(Recipe, usize), ParseError> {
+    prior_regexes: usize,
+) -> Result<(Recipe, usize, usize), ParseError> {
     let header = lines[start].trim();
     let rest = header
         .strip_prefix(":0")
         .ok_or_else(|| ParseError::new(start + 1, "only ':0' recipes are supported"))?;
     let (flags, lock) = parse_recipe_header(rest, start + 1)?;
     let mut conditions = Vec::new();
+    let mut regex_count = 0usize;
     let mut index = start + 1;
 
     while index < lines.len() {
@@ -135,7 +150,17 @@ fn parse_recipe(
             // budgets are separate because either shape can make later plan
             // construction disproportionately expensive.
             check_condition_limits(conditions.len(), prior_conditions, index + 1)?;
-            conditions.push(parse_condition(condition, index + 1, flags.contains('D'))?);
+            let (condition, is_regex) = parse_condition(
+                condition,
+                index + 1,
+                flags.contains('D'),
+                prior_regexes,
+                regex_count,
+            )?;
+            conditions.push(condition);
+            regex_count = regex_count
+                .checked_add(usize::from(is_regex))
+                .ok_or_else(|| ParseError::new(index + 1, "recipe regex count overflows"))?;
             index += 1;
             continue;
         }
@@ -191,7 +216,7 @@ fn parse_recipe(
         conditions,
         destination,
     };
-    Ok((recipe, index + 1))
+    Ok((recipe, index + 1, regex_count))
 }
 
 fn check_condition_limits(
@@ -248,7 +273,9 @@ fn parse_condition(
     input: &str,
     line: usize,
     case_sensitive: bool,
-) -> Result<Condition, ParseError> {
+    prior_regexes: usize,
+    recipe_regexes: usize,
+) -> Result<(Condition, bool), ParseError> {
     let mut input = input.trim();
     let mut negated = false;
     while let Some(rest) = input.strip_prefix('!') {
@@ -260,11 +287,20 @@ fn parse_condition(
         return Err(ParseError::new(line, "condition is empty"));
     }
 
-    let kind = if let Some(value) = input.strip_prefix('<') {
-        ConditionKind::SmallerThan(parse_size(value, line)?)
+    let (kind, is_regex) = if let Some(value) = input.strip_prefix('<') {
+        (ConditionKind::SmallerThan(parse_size(value, line)?), false)
     } else if let Some(value) = input.strip_prefix('>') {
-        ConditionKind::LargerThan(parse_size(value, line)?)
+        (ConditionKind::LargerThan(parse_size(value, line)?), false)
     } else {
+        let total_regexes = prior_regexes
+            .checked_add(recipe_regexes)
+            .ok_or_else(|| ParseError::new(line, "rc regex count overflows"))?;
+        if total_regexes >= MAX_RC_REGEXES {
+            return Err(ParseError::new(
+                line,
+                format!("rc regex count exceeds the hard limit of {MAX_RC_REGEXES}"),
+            ));
+        }
         if input.len() > MAX_REGEX_PATTERN_LEN {
             return Err(ParseError::new(
                 line,
@@ -276,13 +312,16 @@ fn parse_condition(
         let compiled = build_regex(input, case_sensitive).map_err(|error| {
             ParseError::new(line, format!("invalid regular expression: {error}"))
         })?;
-        ConditionKind::Regex(RegexCondition {
-            pattern: input.to_owned(),
-            compiled,
-        })
+        (
+            ConditionKind::Regex(RegexCondition {
+                pattern: input.to_owned(),
+                compiled,
+            }),
+            true,
+        )
     };
 
-    Ok(Condition { negated, kind })
+    Ok((Condition { negated, kind }, is_regex))
 }
 
 fn parse_size(input: &str, line: usize) -> Result<usize, ParseError> {
@@ -481,6 +520,67 @@ mod tests {
         assert_eq!(error.line, 2);
         assert!(error.message.starts_with("invalid regular expression:"));
         assert!(error.message.contains("Compiled regex exceeds size limit"));
+    }
+
+    #[test]
+    fn enforces_regex_count_at_the_boundary() {
+        for count in [MAX_RC_REGEXES - 1, MAX_RC_REGEXES, MAX_RC_REGEXES + 1] {
+            let source = format!(":0\n{}inbox/\n", "* pattern\n".repeat(count));
+            let result = parse(&source);
+
+            if count <= MAX_RC_REGEXES {
+                assert!(result.is_ok());
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, MAX_RC_REGEXES + 2);
+                assert_eq!(
+                    error.message,
+                    format!("rc regex count exceeds the hard limit of {MAX_RC_REGEXES}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn size_conditions_do_not_count_as_regexes() {
+        let mut source = format!(":0\n{}", "* pattern\n".repeat(MAX_RC_REGEXES));
+        source.push_str(&"* < 100\n".repeat(MAX_CONDITIONS_PER_RECIPE - MAX_RC_REGEXES));
+        source.push_str("inbox/\n");
+
+        assert!(parse(&source).is_ok());
+    }
+
+    #[test]
+    fn accumulates_regex_count_across_recipes() {
+        let mut source = ":0 c\n* pattern\ninbox/\n".repeat(MAX_RC_REGEXES);
+        source.push_str(":0\n* excess\ninbox/\n");
+
+        let error = parse(&source).unwrap_err();
+
+        assert_eq!(error.line, MAX_RC_REGEXES * 3 + 2);
+        assert_eq!(
+            error.message,
+            format!("rc regex count exceeds the hard limit of {MAX_RC_REGEXES}")
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_source_before_splitting_lines() {
+        for length in [MAX_RC_SIZE - 1, MAX_RC_SIZE, MAX_RC_SIZE + 1] {
+            let source = format!("#{}", "x".repeat(length - 1));
+            let result = parse(&source);
+
+            if length <= MAX_RC_SIZE {
+                assert!(result.is_ok());
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 1);
+                assert_eq!(
+                    error.message,
+                    format!("rc file exceeds the hard limit of {MAX_RC_SIZE} bytes")
+                );
+            }
+        }
     }
 
     #[test]
