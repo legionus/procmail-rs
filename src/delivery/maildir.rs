@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::io::{self, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, openat, renameat_with, unlinkat};
 
-use super::PendingSink;
+use super::{PendingSink, PublishedDelivery};
 
 const MAX_NAME_ATTEMPTS: u64 = 128;
 static NEXT_NAME: AtomicU64 = AtomicU64::new(0);
@@ -18,6 +18,7 @@ pub struct MaildirSink {
     tmp_dir: OwnedFd,
     new_dir: OwnedFd,
     name: String,
+    maildir: PathBuf,
     pending: bool,
 }
 
@@ -41,6 +42,7 @@ impl MaildirSink {
                         tmp_dir,
                         new_dir,
                         name,
+                        maildir: path.to_owned(),
                         pending: true,
                     });
                 }
@@ -80,7 +82,7 @@ impl Write for MaildirSink {
 }
 
 impl PendingSink for MaildirSink {
-    fn commit(mut self: Box<Self>) -> io::Result<()> {
+    fn commit(mut self: Box<Self>) -> io::Result<PublishedDelivery> {
         match renameat_with(
             &self.tmp_dir,
             self.name.as_str(),
@@ -90,7 +92,9 @@ impl PendingSink for MaildirSink {
         ) {
             Ok(()) => {
                 self.pending = false;
-                Ok(())
+                Ok(PublishedDelivery::new(
+                    self.maildir.join("new").join(&self.name),
+                ))
             }
             Err(error) => {
                 let rename_error = io_error(error);
@@ -254,7 +258,11 @@ mod tests {
         assert!(maildir.path().join("tmp").join(&name).is_file());
         assert!(!maildir.path().join("new").join(&name).exists());
 
-        PendingSink::commit(sink).unwrap();
+        let published = PendingSink::commit(sink).unwrap();
+        assert_eq!(
+            published.last_folder(),
+            maildir.path().join("new").join(&name)
+        );
         assert!(!maildir.path().join("tmp").join(&name).exists());
         assert_eq!(
             fs::read(maildir.path().join("new").join(name)).unwrap(),

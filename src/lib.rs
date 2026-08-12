@@ -8,6 +8,7 @@ pub mod delivery;
 pub mod eval;
 pub mod limits;
 pub mod message;
+pub mod runtime;
 
 #[allow(unsafe_code)]
 mod mapped_file;

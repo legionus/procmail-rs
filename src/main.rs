@@ -16,6 +16,7 @@ use procmail_rs::delivery::{PendingFanout, PendingSink};
 use procmail_rs::eval::{DeliveryPlan, ExecutionPlan, HeaderEvaluation};
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
+use procmail_rs::runtime::RuntimeVariables;
 
 enum Command {
     Check { config: PathBuf },
@@ -67,16 +68,26 @@ fn run() -> Result<(), String> {
     match command {
         Command::Check { .. } => Ok(()),
         Command::Filter { .. } => {
+            let mut runtime = RuntimeVariables::default();
             let mut stdin = io::stdin().lock();
             let head = Message::read_headers(&mut stdin, limits)
                 .map_err(|error| format!("cannot read message headers from stdin: {error}"))?;
             match plan.evaluate_headers(&head) {
-                HeaderEvaluation::Decided(delivery) => deliver_decided(head, &mut stdin, &delivery),
+                HeaderEvaluation::Decided(delivery) => {
+                    deliver_decided(head, &mut stdin, &delivery, &mut runtime)
+                }
                 HeaderEvaluation::NeedsMessage(continuation) => {
                     let staging_directory = staging_directory.as_deref().ok_or_else(|| {
                         "internal error: deferred evaluation has no staging directory".to_owned()
                     })?;
-                    deliver_staged(head, &mut stdin, &plan, continuation, staging_directory)
+                    deliver_staged(
+                        head,
+                        &mut stdin,
+                        &plan,
+                        continuation,
+                        staging_directory,
+                        &mut runtime,
+                    )
                 }
             }
         }
@@ -87,15 +98,14 @@ fn deliver_decided(
     head: procmail_rs::message::MessageHead,
     reader: &mut impl io::BufRead,
     plan: &DeliveryPlan,
+    runtime: &mut RuntimeVariables,
 ) -> Result<(), String> {
     let sinks = open_sinks(plan.destinations())?;
     let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
     let (validated, _) = pending
         .stream(head, reader)
         .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
-    validated
-        .commit()
-        .map_err(|error| format!("cannot publish Maildir delivery: {error}"))?;
+    commit_delivery(validated, runtime)?;
 
     delivery_outcome(plan)
 }
@@ -106,6 +116,7 @@ fn deliver_staged(
     execution: &ExecutionPlan,
     continuation: procmail_rs::eval::Continuation,
     staging_directory: &Path,
+    runtime: &mut RuntimeVariables,
 ) -> Result<(), String> {
     let early_count = continuation.pending_destinations().len();
     let early_sinks = open_sinks(continuation.pending_destinations())?;
@@ -135,11 +146,25 @@ fn deliver_staged(
     let validated = validated
         .append_bytes(late, staged.as_bytes())
         .map_err(|error| error.to_string())?;
-    validated
-        .commit()
-        .map_err(|error| format!("cannot publish Maildir delivery: {error}"))?;
+    commit_delivery(validated, runtime)?;
 
     delivery_outcome(&plan)
+}
+
+fn commit_delivery(
+    validated: procmail_rs::delivery::ValidatedFanout,
+    runtime: &mut RuntimeVariables,
+) -> Result<(), String> {
+    // Each sink reports the path it actually made visible. Update LASTFOLDER
+    // from that report, including the last successful sink in a partial
+    // fan-out, instead of guessing from the requested destination directory.
+    match validated.commit() {
+        Ok(report) => runtime.record_commit(&report),
+        Err(error) => {
+            runtime.record_partial_commit(&error)?;
+            Err(format!("cannot publish Maildir delivery: {error}"))
+        }
+    }
 }
 
 fn open_sinks(destinations: &[Destination]) -> Result<Vec<Box<dyn PendingSink>>, String> {

@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 use crate::message::{Message, MessageHead, MessageReadError, StreamedMessage};
 
@@ -17,8 +18,19 @@ pub const MAX_PENDING_SINKS: usize = 256;
 /// if it returns an error, it must not have published the delivery and must
 /// clean up its private state.
 pub trait PendingSink: Write {
-    fn commit(self: Box<Self>) -> io::Result<()>;
+    /// Publishes the pending bytes and reports the exact visible destination.
+    fn commit(self: Box<Self>) -> io::Result<PublishedDelivery>;
     fn abort(self: Box<Self>) -> io::Result<()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedDelivery {
+    last_folder: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitReport {
+    published: Vec<PublishedDelivery>,
 }
 
 pub struct PendingFanout {
@@ -43,8 +55,28 @@ pub struct StreamDeliveryError {
 #[derive(Debug)]
 pub struct CommitError {
     source: io::Error,
-    committed: usize,
+    published: Vec<PublishedDelivery>,
     abort_failures: usize,
+}
+
+impl PublishedDelivery {
+    pub fn new(last_folder: PathBuf) -> Self {
+        Self { last_folder }
+    }
+
+    pub fn last_folder(&self) -> &std::path::Path {
+        &self.last_folder
+    }
+}
+
+impl CommitReport {
+    pub fn published(&self) -> &[PublishedDelivery] {
+        &self.published
+    }
+
+    pub fn last_folder(&self) -> Option<&std::path::Path> {
+        self.published.last().map(PublishedDelivery::last_folder)
+    }
 }
 
 #[derive(Debug)]
@@ -238,24 +270,29 @@ impl ValidatedFanout {
         Ok(self)
     }
 
-    pub fn commit(mut self) -> Result<(), CommitError> {
-        let mut committed = 0usize;
+    pub fn commit(mut self) -> Result<CommitReport, CommitError> {
+        let mut published = Vec::with_capacity(self.sinks.len());
         let sinks = std::mem::take(&mut self.sinks);
         let mut remaining = sinks.into_iter();
         while let Some(sink) = remaining.next() {
-            if let Err(source) = sink.commit() {
-                let abort_failures = remaining
-                    .map(|sink| usize::from(sink.abort().is_err()))
-                    .fold(0usize, usize::saturating_add);
-                return Err(CommitError {
-                    source,
-                    committed,
-                    abort_failures,
-                });
+            match sink.commit() {
+                Ok(delivery) => published.push(delivery),
+                Err(source) => {
+                    // A fan-out cannot roll back sinks already made visible.
+                    // Preserve their exact names for LASTFOLDER, while aborting
+                    // every sink that has not yet reached publication.
+                    let abort_failures = remaining
+                        .map(|sink| usize::from(sink.abort().is_err()))
+                        .fold(0usize, usize::saturating_add);
+                    return Err(CommitError {
+                        source,
+                        published,
+                        abort_failures,
+                    });
+                }
             }
-            committed = committed.saturating_add(1);
         }
-        Ok(())
+        Ok(CommitReport { published })
     }
 
     fn abort_all(&mut self) -> usize {
@@ -332,7 +369,15 @@ impl std::error::Error for StreamDeliveryError {
 
 impl CommitError {
     pub fn committed(&self) -> usize {
-        self.committed
+        self.published.len()
+    }
+
+    pub fn published(&self) -> &[PublishedDelivery] {
+        &self.published
+    }
+
+    pub fn last_folder(&self) -> Option<&std::path::Path> {
+        self.published.last().map(PublishedDelivery::last_folder)
     }
 
     pub fn abort_failures(&self) -> usize {
@@ -345,7 +390,8 @@ impl fmt::Display for CommitError {
         write!(
             formatter,
             "cannot commit delivery after publishing {} sink(s): {}",
-            self.committed, self.source
+            self.published.len(),
+            self.source
         )?;
         if self.abort_failures != 0 {
             write!(
@@ -398,6 +444,7 @@ impl std::error::Error for AppendError {
 mod tests {
     use std::cell::RefCell;
     use std::io::{self, Cursor, Write};
+    use std::path::Path;
     use std::rc::Rc;
 
     use super::*;
@@ -416,6 +463,7 @@ mod tests {
         fail_write_at: Option<usize>,
         fail_commit: bool,
         fail_abort: bool,
+        last_folder: PathBuf,
     }
 
     impl TestSink {
@@ -426,6 +474,7 @@ mod tests {
                 fail_write_at: None,
                 fail_commit: false,
                 fail_abort: false,
+                last_folder: PathBuf::from("test-folder"),
             })
         }
 
@@ -436,6 +485,7 @@ mod tests {
                 fail_write_at: Some(at),
                 fail_commit: false,
                 fail_abort: false,
+                last_folder: PathBuf::from("test-folder"),
             })
         }
 
@@ -446,6 +496,7 @@ mod tests {
                 fail_write_at: None,
                 fail_commit: true,
                 fail_abort: false,
+                last_folder: PathBuf::from("test-folder"),
             })
         }
     }
@@ -468,12 +519,12 @@ mod tests {
     }
 
     impl PendingSink for TestSink {
-        fn commit(self: Box<Self>) -> io::Result<()> {
+        fn commit(self: Box<Self>) -> io::Result<PublishedDelivery> {
             if self.fail_commit {
                 return Err(io::Error::other("injected commit failure"));
             }
             self.state.borrow_mut().visible = Some(self.pending.clone());
-            Ok(())
+            Ok(PublishedDelivery::new(self.last_folder.clone()))
         }
 
         fn abort(self: Box<Self>) -> io::Result<()> {
@@ -509,7 +560,8 @@ mod tests {
         assert!(first.borrow().visible.is_none());
         assert!(second.borrow().visible.is_none());
 
-        validated.commit().unwrap();
+        let report = validated.commit().unwrap();
+        assert_eq!(report.last_folder(), Some(Path::new("test-folder")));
         assert_eq!(first.borrow().visible.as_deref(), Some(input.as_slice()));
         assert_eq!(second.borrow().visible.as_deref(), Some(input.as_slice()));
     }
