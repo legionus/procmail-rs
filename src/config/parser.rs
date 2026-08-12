@@ -25,7 +25,7 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
             continue;
         }
 
-        if let Some(assignment) = parse_assignment(line) {
+        if let Some(assignment) = parse_assignment(line, line_number) {
             statements.push(Statement::Assignment(assignment));
             index += 1;
             continue;
@@ -40,7 +40,7 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
     Ok(Config { statements })
 }
 
-fn parse_assignment(line: &str) -> Option<Assignment> {
+fn parse_assignment(line: &str, line_number: usize) -> Option<Assignment> {
     let (name, value) = line.split_once('=')?;
     let name = name.trim();
     if name.is_empty()
@@ -52,6 +52,7 @@ fn parse_assignment(line: &str) -> Option<Assignment> {
     }
 
     Some(Assignment {
+        line: line_number,
         name: name.to_owned(),
         value: strip_comment(value.trim()).trim().to_owned(),
     })
@@ -226,6 +227,7 @@ mod tests {
         assert_eq!(
             config.statements[0],
             Statement::Assignment(Assignment {
+                line: 1,
                 name: "MAILDIR".into(),
                 value: "/srv/mail".into(),
             })

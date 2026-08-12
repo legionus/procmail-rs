@@ -18,6 +18,7 @@ pub enum Statement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
+    pub line: usize,
     pub name: String,
     pub value: String,
 }
