@@ -38,7 +38,10 @@ fn run() -> Result<(), String> {
         Command::Check { config } | Command::Filter { config } => config,
     };
     let source = read_config(path)?;
-    let config = config::parse(&source).map_err(|error| format!("{}:{error}", path.display()))?;
+    let config = config::parse(&source)
+        .map_err(|error| format!("{}:{error}", path.display()))?
+        .expand()
+        .map_err(|error| format!("{}:{error}", path.display()))?;
     let staging_directory = config.maildir().map(PathBuf::from);
     if let Some(maildir) = &staging_directory {
         validate_maildir_path(maildir)

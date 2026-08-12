@@ -1,3 +1,4 @@
+mod expand;
 mod parser;
 mod variables;
 
@@ -5,6 +6,7 @@ use std::fmt;
 
 use regex::bytes::Regex;
 
+pub use expand::ExpansionError;
 pub use parser::parse;
 pub use variables::{
     AssignmentTarget, MessageLimitVariable, VariablePolicy, VariableSource, variable_policy,
@@ -29,6 +31,10 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn expand(self) -> Result<Self, ExpansionError> {
+        expand::expand(self)
+    }
+
     pub fn maildir(&self) -> Option<&str> {
         self.statements.iter().rev().find_map(|statement| {
             let Statement::Assignment(assignment) = statement else {
@@ -55,6 +61,8 @@ pub struct Assignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recipe {
+    pub line: usize,
+    pub action_line: usize,
     pub flags: String,
     pub lock: Option<String>,
     pub conditions: Vec<Condition>,

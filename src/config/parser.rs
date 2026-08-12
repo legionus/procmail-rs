@@ -220,6 +220,8 @@ fn parse_recipe(
     };
 
     let recipe = Recipe {
+        line: start + 1,
+        action_line: index + 1,
         flags,
         lock,
         conditions,
@@ -398,6 +400,8 @@ mod tests {
         assert_eq!(
             config.statements[1],
             Statement::Recipe(Recipe {
+                line: 3,
+                action_line: 5,
                 flags: "Bc".into(),
                 lock: Some(String::new()),
                 conditions: vec![Condition {

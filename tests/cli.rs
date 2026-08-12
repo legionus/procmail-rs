@@ -89,6 +89,7 @@ fn invalid_configuration_does_not_consume_stdin() {
         ":0\n| unsupported\n",
         "LIMIT_MSG_BODY=10KB\n:0\ninbox/\n",
         ":0 B\n* body\ninbox/\n",
+        ":0\nmaildir:$UNDEFINED\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
@@ -187,6 +188,38 @@ fn maildir_resolves_relative_delivery_paths() {
     )
     .unwrap();
     let input = b"Subject: relative\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&inbox), [input.to_vec()]);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_expands_assignment_and_destination_variables() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("mail");
+    let inbox = maildir.join("inbox");
+    create_maildir(&maildir);
+    create_maildir(&inbox);
+    fs::write(
+        &path,
+        format!(
+            "ROOT={}\nBOX=inbox\nMAILDIR=$ROOT\n:0\nmaildir:${{BOX}}\n",
+            maildir.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: expanded\n\nbody";
     let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["filter", "--config"])
         .arg(&path)
