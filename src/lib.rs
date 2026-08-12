@@ -12,6 +12,7 @@ pub mod eval;
 pub mod limits;
 pub mod message;
 pub mod runtime;
+pub mod trace;
 
 #[allow(unsafe_code)]
 mod mapped_file;
