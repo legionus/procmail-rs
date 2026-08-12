@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::ops::Range;
 
 use crate::limits::MessageLimits;
@@ -9,6 +9,18 @@ pub struct Message {
     raw: Vec<u8>,
     header: Range<usize>,
     body: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageHead {
+    raw: Vec<u8>,
+    limits: MessageLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamedMessage {
+    header: Vec<u8>,
+    len: usize,
 }
 
 impl Message {
@@ -47,13 +59,18 @@ impl Message {
         reader: &mut impl BufRead,
         limits: MessageLimits,
     ) -> Result<Self, MessageReadError> {
-        let mut raw = Vec::with_capacity(limits.message_size.min(64 * 1024));
+        Self::read_headers(reader, limits)?.read_body(reader)
+    }
+
+    pub fn read_headers(
+        reader: &mut impl BufRead,
+        limits: MessageLimits,
+    ) -> Result<MessageHead, MessageReadError> {
+        let mut raw = Vec::with_capacity(limits.headers_size.min(64 * 1024));
         let mut field_size = 0usize;
-        let body_start;
 
         loop {
             let Some(line) = read_header_line(reader, &limits, raw.len())? else {
-                body_start = raw.len();
                 break;
             };
             let is_separator = line == b"\n" || line == b"\r\n";
@@ -76,18 +93,72 @@ impl Message {
 
             raw.extend_from_slice(&line);
             if is_separator {
-                body_start = raw.len();
                 break;
             }
         }
 
-        read_body(reader, &limits, body_start, &mut raw)?;
+        Ok(MessageHead { raw, limits })
+    }
+}
 
-        Ok(Self {
+impl MessageHead {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.raw
+    }
+
+    pub fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    pub fn read_body(mut self, reader: &mut impl BufRead) -> Result<Message, MessageReadError> {
+        let body_start = self.raw.len();
+        read_body(reader, &self.limits, body_start, &mut self.raw, None)?;
+        let body_end = self.raw.len();
+
+        Ok(Message {
             header: 0..body_start,
-            body: body_start..raw.len(),
-            raw,
+            body: body_start..body_end,
+            raw: self.raw,
         })
+    }
+
+    pub fn stream_to(
+        self,
+        reader: &mut impl BufRead,
+        writer: &mut impl Write,
+    ) -> Result<StreamedMessage, MessageReadError> {
+        writer.write_all(&self.raw)?;
+        let mut total = self.raw.len();
+        read_body(
+            reader,
+            &self.limits,
+            self.raw.len(),
+            &mut Vec::new(),
+            Some((&mut total, writer)),
+        )?;
+
+        Ok(StreamedMessage {
+            header: self.raw,
+            len: total,
+        })
+    }
+}
+
+impl StreamedMessage {
+    pub fn header(&self) -> &[u8] {
+        &self.header
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -204,26 +275,33 @@ fn read_body(
     limits: &MessageLimits,
     body_start: usize,
     raw: &mut Vec<u8>,
+    mut stream: Option<(&mut usize, &mut dyn Write)>,
 ) -> Result<(), MessageReadError> {
+    let mut body_size = 0usize;
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
             return Ok(());
         }
-        let body_size = raw.len() - body_start;
-        check_size(
-            body_size + available.len(),
-            limits.body_size,
-            MessageLimit::Body,
-        )?;
-        check_size(
-            raw.len() + available.len(),
-            limits.message_size,
-            MessageLimit::Message,
-        )?;
+        let total_size = stream.as_ref().map_or(raw.len(), |(total, _)| **total);
+        let next_body_size = body_size
+            .checked_add(available.len())
+            .ok_or_else(|| MessageReadError::limit(MessageLimit::Body, limits.body_size))?;
+        let next_total_size = total_size
+            .checked_add(available.len())
+            .ok_or_else(|| MessageReadError::limit(MessageLimit::Message, limits.message_size))?;
+        check_size(next_body_size, limits.body_size, MessageLimit::Body)?;
+        check_size(next_total_size, limits.message_size, MessageLimit::Message)?;
 
         let consumed = available.len();
-        raw.extend_from_slice(available);
+        if let Some((total, writer)) = stream.as_mut() {
+            writer.write_all(available)?;
+            **total = next_total_size;
+        } else {
+            debug_assert_eq!(raw.len().saturating_sub(body_start), body_size);
+            raw.extend_from_slice(available);
+        }
+        body_size = next_body_size;
         reader.consume(consumed);
     }
 }
@@ -250,7 +328,7 @@ fn find_body_start(raw: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, BufReader, Cursor, Read};
+    use std::io::{self, BufReader, Cursor, Read, Write};
 
     use super::{Message, MessageLimit, MessageReadError};
     use crate::limits::MessageLimits;
@@ -398,5 +476,71 @@ mod tests {
             limit_kind(Message::read_from(&mut reader, limits).unwrap_err()),
             MessageLimit::HeaderLine
         );
+    }
+
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: usize,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(input.len())
+                .ok_or_else(|| io::Error::other("counter overflow"))?;
+            Ok(input.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn streams_body_without_retaining_it() {
+        let raw = b"Subject: test\n\nbody";
+        let mut reader = Cursor::new(raw);
+        let head = Message::read_headers(&mut reader, MessageLimits::default()).unwrap();
+        let header_len = head.len();
+        let mut writer = CountingWriter::default();
+
+        let streamed = head.stream_to(&mut reader, &mut writer).unwrap();
+
+        assert_eq!(streamed.header(), &raw[..header_len]);
+        assert_eq!(streamed.len(), raw.len());
+        assert_eq!(writer.bytes, raw.len());
+    }
+
+    #[test]
+    fn header_phase_leaves_body_unconsumed() {
+        let raw = b"Subject: test\n\nbody";
+        let mut reader = Cursor::new(raw);
+
+        let head = Message::read_headers(&mut reader, MessageLimits::default()).unwrap();
+
+        assert_eq!(head.as_bytes(), b"Subject: test\n\n");
+        assert_eq!(reader.position(), head.len() as u64);
+    }
+
+    #[test]
+    fn bounded_streaming_stops_an_infinite_body() {
+        let input = Cursor::new(b"\n".to_vec()).chain(io::repeat(b'x'));
+        let mut reader = BufReader::with_capacity(8, input);
+        let limits = MessageLimits {
+            message_size: 32,
+            headers_size: 8,
+            body_size: 64,
+            header_line_size: 8,
+            header_field_size: 8,
+        };
+        let head = Message::read_headers(&mut reader, limits).unwrap();
+        let mut writer = CountingWriter::default();
+
+        assert_eq!(
+            limit_kind(head.stream_to(&mut reader, &mut writer).unwrap_err()),
+            MessageLimit::Message
+        );
+        assert!(writer.bytes <= 32);
     }
 }

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use procmail_rs::config;
+use procmail_rs::eval::{ExecutionPlan, HeaderEvaluation};
 use procmail_rs::limits::{MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 
@@ -34,15 +35,41 @@ fn run() -> Result<(), String> {
     let config = config::parse(&source).map_err(|error| format!("{}:{error}", path.display()))?;
     let limits = MessageLimits::from_config(&config)
         .map_err(|error| format!("{}:{error}", path.display()))?;
+    let plan = ExecutionPlan::compile(&config)
+        .map_err(|error| format!("cannot compile {}: {error}", path.display()))?;
 
     match command {
         Command::Check { .. } => Ok(()),
         Command::Filter { .. } => {
-            let message = Message::read_from(&mut io::stdin().lock(), limits)
-                .map_err(|error| format!("cannot read message from stdin: {error}"))?;
+            let mut stdin = io::stdin().lock();
+            let head = Message::read_headers(&mut stdin, limits)
+                .map_err(|error| format!("cannot read message headers from stdin: {error}"))?;
+            let delivery = match plan.evaluate_headers(&head) {
+                HeaderEvaluation::Decided(delivery) => {
+                    head.stream_to(&mut stdin, &mut io::sink())
+                        .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
+                    delivery
+                }
+                HeaderEvaluation::NeedsMessage(continuation)
+                    if continuation.requirements().needs_body_contents =>
+                {
+                    let message = head
+                        .read_body(&mut stdin)
+                        .map_err(|error| format!("cannot read message body from stdin: {error}"))?;
+                    plan.resume_buffered(continuation, &message)
+                        .map_err(|error| format!("cannot evaluate message: {error}"))?
+                }
+                HeaderEvaluation::NeedsMessage(continuation) => {
+                    let message = head
+                        .stream_to(&mut stdin, &mut io::sink())
+                        .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
+                    plan.resume_streamed(continuation, &message)
+                        .map_err(|error| format!("cannot evaluate message: {error}"))?
+                }
+            };
             Err(format!(
-                "delivery is not implemented yet (read {} message bytes)",
-                message.len()
+                "delivery is not implemented yet (selected {} destination(s))",
+                delivery.destinations().len()
             ))
         }
     }
