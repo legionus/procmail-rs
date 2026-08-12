@@ -22,6 +22,10 @@ use procmail_rs::eval::{DeliveryPlan, ExecutionPlan, HeaderEvaluation};
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::runtime::RuntimeVariables;
+use procmail_rs::trace::{
+    DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, NoTrace, TraceEvent,
+    TraceSink,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
@@ -80,12 +84,13 @@ fn run() -> Result<(), String> {
         Action::Check => Ok(()),
         Action::Filter => {
             let mut runtime = RuntimeVariables::default();
+            let mut trace = NoTrace;
             let mut stdin = io::stdin().lock();
             let head = Message::read_headers(&mut stdin, limits)
                 .map_err(|error| format!("cannot read message headers from stdin: {error}"))?;
-            match plan.evaluate_headers_with_runtime(&head, &mut runtime) {
+            match plan.evaluate_headers_with_trace(&head, &mut runtime, &mut trace) {
                 HeaderEvaluation::Decided(delivery) => {
-                    deliver_decided(head, &mut stdin, &delivery, &mut runtime)
+                    deliver_decided(head, &mut stdin, &delivery, &mut runtime, &mut trace)
                 }
                 HeaderEvaluation::NeedsMessage(continuation) => {
                     let staging_directory = staging_directory.as_deref().ok_or_else(|| {
@@ -98,6 +103,7 @@ fn run() -> Result<(), String> {
                         continuation,
                         staging_directory,
                         &mut runtime,
+                        &mut trace,
                     )
                 }
                 HeaderEvaluation::Error(error) => Err(format!("cannot evaluate message: {error}")),
@@ -132,13 +138,14 @@ fn deliver_decided(
     reader: &mut impl io::BufRead,
     plan: &DeliveryPlan,
     runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
 ) -> Result<(), String> {
-    let sinks = open_sinks(plan.destinations(), runtime)?;
+    let sinks = open_sinks(plan.destinations(), runtime, trace)?;
     let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
     let (validated, _) = pending
         .stream(head, reader)
         .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
-    commit_delivery(validated, runtime)?;
+    commit_delivery(validated, plan.destinations(), runtime, trace)?;
 
     delivery_outcome(plan)
 }
@@ -150,12 +157,13 @@ fn deliver_staged(
     continuation: procmail_rs::eval::Continuation,
     staging_directory: &Path,
     runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
 ) -> Result<(), String> {
     let early_count = continuation.pending_destinations().len();
     let early_sinks = if execution.requires_ordered_delivery() {
         Vec::new()
     } else {
-        open_sinks(continuation.pending_destinations(), runtime)?
+        open_sinks(continuation.pending_destinations(), runtime, trace)?
     };
     let pending = PendingFanout::new(early_sinks).map_err(|error| error.to_string())?;
     let mut staging = StagingFile::create(staging_directory)
@@ -173,26 +181,27 @@ fn deliver_staged(
         .map_err(|error| format!("cannot map staged message: {error}"))?;
 
     let plan = execution
-        .resume_mapped_with_runtime(
+        .resume_mapped_with_trace(
             continuation,
             staged.as_bytes(),
             staged.header_len(),
             runtime,
+            trace,
         )
         .map_err(|error| format!("cannot evaluate message: {error}"))?;
     if execution.requires_ordered_delivery() {
-        deliver_ordered(&plan, staged.as_bytes(), runtime)?;
+        deliver_ordered(&plan, staged.as_bytes(), runtime, trace)?;
         return delivery_outcome(&plan);
     }
     let late_destinations = plan.destinations().get(early_count..).ok_or_else(|| {
         "internal error: deferred delivery discarded an early copy destination".to_owned()
     })?;
-    let late_sinks = open_sinks(late_destinations, runtime)?;
+    let late_sinks = open_sinks(late_destinations, runtime, trace)?;
     let late = PendingFanout::new(late_sinks).map_err(|error| error.to_string())?;
     let validated = validated
         .append_bytes(late, staged.as_bytes())
         .map_err(|error| error.to_string())?;
-    commit_delivery(validated, runtime)?;
+    commit_delivery(validated, plan.destinations(), runtime, trace)?;
 
     delivery_outcome(&plan)
 }
@@ -201,36 +210,60 @@ fn deliver_ordered(
     plan: &DeliveryPlan,
     message: &[u8],
     runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
 ) -> Result<(), String> {
     // A later path may depend on the exact file published by an earlier copy.
     // Publish one complete staged copy at a time and update runtime values
     // before resolving the next expression.
     for destination in plan.destinations() {
-        let mut sinks = open_sinks(std::slice::from_ref(destination), runtime)?;
+        let mut sinks = open_sinks(std::slice::from_ref(destination), runtime, trace)?;
         let mut sink = sinks
             .pop()
             .ok_or_else(|| "internal error: destination produced no sink".to_owned())?;
         sink.write_all(message)
             .map_err(|error| format!("cannot write staged delivery: {error}"))?;
-        let published = sink
-            .commit()
-            .map_err(|error| format!("cannot publish Maildir delivery: {error}"))?;
-        runtime.record_delivery(&published)?;
+        let published = sink.commit().map_err(|error| {
+            record_delivery(
+                destination,
+                DeliveryStage::Failed(FailureClass::Transient),
+                trace,
+            );
+            format!("cannot publish Maildir delivery: {error}")
+        })?;
+        record_delivery(destination, DeliveryStage::Published, trace);
+        runtime.record_delivery_with_trace(&published, trace)?;
     }
     Ok(())
 }
 
 fn commit_delivery(
     validated: procmail_rs::delivery::ValidatedFanout,
+    destinations: &[Destination],
     runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
 ) -> Result<(), String> {
     // Each sink reports the path it actually made visible. Update LASTFOLDER
     // from that report, including the last successful sink in a partial
     // fan-out, instead of guessing from the requested destination directory.
     match validated.commit() {
-        Ok(report) => runtime.record_commit(&report),
+        Ok(report) => {
+            for destination in destinations.iter().take(report.published().len()) {
+                record_delivery(destination, DeliveryStage::Published, trace);
+            }
+            runtime.record_commit_with_trace(&report, trace)
+        }
         Err(error) => {
-            runtime.record_partial_commit(&error)?;
+            for destination in destinations.iter().take(error.published().len()) {
+                record_delivery(destination, DeliveryStage::Published, trace);
+            }
+            if let Some(destination) = destinations.get(error.published().len()) {
+                record_delivery(
+                    destination,
+                    DeliveryStage::Failed(FailureClass::Transient),
+                    trace,
+                );
+            }
+            runtime.record_partial_commit_with_trace(&error, trace)?;
             Err(format!("cannot publish Maildir delivery: {error}"))
         }
     }
@@ -239,20 +272,40 @@ fn commit_delivery(
 fn open_sinks(
     destinations: &[Destination],
     runtime: &RuntimeVariables,
+    trace: &mut impl TraceSink,
 ) -> Result<Vec<Box<dyn PendingSink>>, String> {
     let mut sinks: Vec<Box<dyn PendingSink>> = Vec::with_capacity(destinations.len());
     for unresolved in destinations {
+        record_delivery(unresolved, DeliveryStage::Preparing, trace);
         let destination = unresolved
             .resolve_with(|name| runtime.get(name).map(str::to_owned))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                record_delivery(
+                    unresolved,
+                    DeliveryStage::Failed(FailureClass::Permanent),
+                    trace,
+                );
+                error.to_string()
+            })?;
         match &destination {
             Destination::Maildir(expression) => {
                 let path = Path::new(expression.source());
-                let sink = MaildirSink::create(path)
-                    .map_err(|error| format!("cannot open Maildir {}: {error}", path.display()))?;
+                let sink = MaildirSink::create(path).map_err(|error| {
+                    record_delivery(
+                        unresolved,
+                        DeliveryStage::Failed(FailureClass::Transient),
+                        trace,
+                    );
+                    format!("cannot open Maildir {}: {error}", path.display())
+                })?;
                 sinks.push(Box::new(sink));
             }
             Destination::Mbox(expression) => {
+                record_delivery(
+                    unresolved,
+                    DeliveryStage::Failed(FailureClass::Permanent),
+                    trace,
+                );
                 return Err(format!(
                     "mbox delivery is not implemented yet: {}",
                     expression.source()
@@ -261,6 +314,18 @@ fn open_sinks(
         }
     }
     Ok(sinks)
+}
+
+fn record_delivery(destination: &Destination, stage: DeliveryStage, trace: &mut impl TraceSink) {
+    let (line, destination) = match destination {
+        Destination::Maildir(expression) => (expression.line(), TraceDestinationKind::Maildir),
+        Destination::Mbox(expression) => (expression.line(), TraceDestinationKind::Mbox),
+    };
+    trace.record(TraceEvent::Delivery {
+        recipe_line: line,
+        destination,
+        stage,
+    });
 }
 
 fn validate_maildir_path(path: &Path) -> Result<(), String> {

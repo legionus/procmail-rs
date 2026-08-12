@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::delivery::{CommitError, CommitReport, PublishedDelivery};
+use crate::trace::{NoTrace, TraceEvent, TraceSink};
 
 #[derive(Debug, Default)]
 pub struct RuntimeVariables {
@@ -25,18 +26,46 @@ impl RuntimeVariables {
     }
 
     pub fn record_commit(&mut self, report: &CommitReport) -> Result<(), String> {
-        self.record_last_folder(report.last_folder())
+        self.record_commit_with_trace(report, &mut NoTrace)
+    }
+
+    pub fn record_commit_with_trace(
+        &mut self,
+        report: &CommitReport,
+        trace: &mut impl TraceSink,
+    ) -> Result<(), String> {
+        self.record_last_folder(report.last_folder(), trace)
     }
 
     pub fn record_partial_commit(&mut self, error: &CommitError) -> Result<(), String> {
-        self.record_last_folder(error.last_folder())
+        self.record_partial_commit_with_trace(error, &mut NoTrace)
+    }
+
+    pub fn record_partial_commit_with_trace(
+        &mut self,
+        error: &CommitError,
+        trace: &mut impl TraceSink,
+    ) -> Result<(), String> {
+        self.record_last_folder(error.last_folder(), trace)
     }
 
     pub fn record_delivery(&mut self, delivery: &PublishedDelivery) -> Result<(), String> {
-        self.record_last_folder(Some(delivery.last_folder()))
+        self.record_delivery_with_trace(delivery, &mut NoTrace)
     }
 
-    fn record_last_folder(&mut self, path: Option<&Path>) -> Result<(), String> {
+    pub fn record_delivery_with_trace(
+        &mut self,
+        delivery: &PublishedDelivery,
+        trace: &mut impl TraceSink,
+    ) -> Result<(), String> {
+        self.record_last_folder(Some(delivery.last_folder()), trace)
+    }
+
+    fn record_last_folder(
+        &mut self,
+        path: Option<&Path>,
+        trace: &mut impl TraceSink,
+    ) -> Result<(), String> {
         let Some(path) = path else {
             return Ok(());
         };
@@ -48,6 +77,7 @@ impl RuntimeVariables {
         })?;
         self.values
             .insert("LASTFOLDER".to_owned(), value.to_owned());
+        trace.record(TraceEvent::LastFolderUpdated);
         Ok(())
     }
 }

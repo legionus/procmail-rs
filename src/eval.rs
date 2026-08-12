@@ -8,6 +8,10 @@ use regex::bytes::Regex;
 use crate::config::{ConditionKind, Config, Destination, Recipe, Statement};
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::runtime::RuntimeVariables;
+use crate::trace::{
+    ConditionKind as TraceConditionKind, NoTrace, RecipeDecision, TraceEvent, TraceName, TraceSink,
+    VariableSource as TraceVariableSource,
+};
 
 pub trait Delivery {
     fn deliver(&mut self, destination: &Destination, message: &Message) -> Result<(), String>;
@@ -41,10 +45,18 @@ pub struct ExecutionPlan {
 #[derive(Debug)]
 struct CompiledRecipe {
     line: usize,
-    assignments: Vec<(String, String)>,
+    assignments: Vec<CompiledAssignment>,
     conditions: Vec<CompiledCondition>,
     destination: Destination,
     copy: bool,
+}
+
+#[derive(Debug)]
+struct CompiledAssignment {
+    name: String,
+    value: String,
+    line: Option<usize>,
+    source: TraceVariableSource,
 }
 
 #[derive(Debug)]
@@ -232,11 +244,25 @@ impl std::error::Error for EvalError {}
 impl ExecutionPlan {
     pub fn compile(config: &Config) -> Self {
         let mut recipes = Vec::new();
-        let mut assignments = config.initial_variables().to_vec();
+        let mut assignments = config
+            .initial_variables()
+            .iter()
+            .map(|(name, value)| CompiledAssignment {
+                name: name.clone(),
+                value: value.clone(),
+                line: None,
+                source: TraceVariableSource::CommandLine,
+            })
+            .collect::<Vec<_>>();
         for statement in &config.statements {
             match statement {
                 Statement::Assignment(assignment) => {
-                    assignments.push((assignment.name.clone(), assignment.value.clone()));
+                    assignments.push(CompiledAssignment {
+                        name: assignment.name.clone(),
+                        value: assignment.value.clone(),
+                        line: Some(assignment.line),
+                        source: TraceVariableSource::RcFile,
+                    });
                 }
                 Statement::Recipe(recipe) => {
                     recipes.push(CompiledRecipe::compile(
@@ -302,13 +328,32 @@ impl ExecutionPlan {
         head: &MessageHead,
         runtime: &mut RuntimeVariables,
     ) -> HeaderEvaluation {
+        self.evaluate_headers_with_trace(head, runtime, &mut NoTrace)
+    }
+
+    pub fn evaluate_headers_with_trace(
+        &self,
+        head: &MessageHead,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+    ) -> HeaderEvaluation {
         let mut destinations = Vec::new();
 
         for (index, recipe) in self.recipes.iter().enumerate() {
-            recipe.apply_assignments(runtime);
-            match recipe.matches_headers(head) {
-                PartialMatch::False => continue,
+            recipe.apply_assignments(runtime, trace);
+            match recipe.matches_headers(head, trace) {
+                PartialMatch::False => {
+                    trace.record(TraceEvent::RecipeEvaluated {
+                        line: recipe.line,
+                        decision: RecipeDecision::Skipped,
+                    });
+                    continue;
+                }
                 PartialMatch::Deferred => {
+                    trace.record(TraceEvent::RecipeEvaluated {
+                        line: recipe.line,
+                        decision: RecipeDecision::Deferred,
+                    });
                     return HeaderEvaluation::NeedsMessage(Continuation {
                         recipe_index: index,
                         destinations,
@@ -316,6 +361,10 @@ impl ExecutionPlan {
                     });
                 }
                 PartialMatch::True => {
+                    trace.record(TraceEvent::RecipeEvaluated {
+                        line: recipe.line,
+                        decision: RecipeDecision::Selected,
+                    });
                     let destination = match recipe
                         .destination
                         .bind_with(|name| runtime.get(name).map(str::to_owned))
@@ -380,6 +429,17 @@ impl ExecutionPlan {
         header_len: usize,
         runtime: &mut RuntimeVariables,
     ) -> Result<DeliveryPlan, EvalError> {
+        self.resume_mapped_with_trace(continuation, raw, header_len, runtime, &mut NoTrace)
+    }
+
+    pub fn resume_mapped_with_trace(
+        &self,
+        continuation: Continuation,
+        raw: &[u8],
+        header_len: usize,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+    ) -> Result<DeliveryPlan, EvalError> {
         if header_len > raw.len() {
             return Err(EvalError::BodyWasNotBuffered);
         }
@@ -388,6 +448,7 @@ impl ExecutionPlan {
             CompleteMessage::Mapped { raw, header_len },
             runtime,
             true,
+            trace,
         )
     }
 
@@ -401,6 +462,7 @@ impl ExecutionPlan {
             CompleteMessage::Buffered(message),
             &mut RuntimeVariables::default(),
             false,
+            &mut NoTrace,
         )
     }
 
@@ -414,6 +476,7 @@ impl ExecutionPlan {
             message,
             &mut RuntimeVariables::default(),
             true,
+            &mut NoTrace,
         )
     }
 
@@ -423,16 +486,25 @@ impl ExecutionPlan {
         message: CompleteMessage<'_>,
         runtime: &mut RuntimeVariables,
         first_assignments_applied: bool,
+        trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
         let mut destinations = continuation.destinations;
 
         for (offset, recipe) in self.recipes[continuation.recipe_index..].iter().enumerate() {
             if offset != 0 || !first_assignments_applied {
-                recipe.apply_assignments(runtime);
+                recipe.apply_assignments(runtime, trace);
             }
-            if !recipe.matches_complete(message)? {
+            if !recipe.matches_complete(message, trace)? {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
                 continue;
             }
+            trace.record(TraceEvent::RecipeEvaluated {
+                line: recipe.line,
+                decision: RecipeDecision::Selected,
+            });
             destinations.push(
                 recipe
                     .destination
@@ -455,7 +527,7 @@ impl ExecutionPlan {
 }
 
 impl CompiledRecipe {
-    fn compile(recipe: &Recipe, assignments: Vec<(String, String)>) -> Self {
+    fn compile(recipe: &Recipe, assignments: Vec<CompiledAssignment>) -> Self {
         let area = match (recipe.has_flag('H'), recipe.has_flag('B')) {
             (false, true) => RegexArea::Body,
             (true, true) => RegexArea::Message,
@@ -495,9 +567,16 @@ impl CompiledRecipe {
         }
     }
 
-    fn apply_assignments(&self, runtime: &mut RuntimeVariables) {
-        for (name, value) in &self.assignments {
-            runtime.set(name.clone(), value.clone());
+    fn apply_assignments(&self, runtime: &mut RuntimeVariables, trace: &mut impl TraceSink) {
+        for assignment in &self.assignments {
+            runtime.set(assignment.name.clone(), assignment.value.clone());
+            if let Ok(name) = TraceName::new(&assignment.name) {
+                trace.record(TraceEvent::VariableAssigned {
+                    line: assignment.line,
+                    name,
+                    source: assignment.source,
+                });
+            }
         }
     }
 
@@ -529,13 +608,19 @@ impl CompiledRecipe {
             })
     }
 
-    fn matches_headers(&self, head: &MessageHead) -> PartialMatch {
+    fn matches_headers(&self, head: &MessageHead, trace: &mut impl TraceSink) -> PartialMatch {
         let mut deferred = false;
-        for condition in &self.conditions {
-            match condition.matches_headers(head) {
-                PartialMatch::False => return PartialMatch::False,
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let result = condition.matches_headers(head);
+            match result {
+                PartialMatch::False => {
+                    condition.trace_result(self.line, index, result, trace);
+                    return PartialMatch::False;
+                }
                 PartialMatch::Deferred => deferred = true,
-                PartialMatch::True => {}
+                PartialMatch::True => {
+                    condition.trace_result(self.line, index, result, trace);
+                }
             }
         }
         if deferred || self.destination.needs_runtime_variables() {
@@ -545,9 +630,15 @@ impl CompiledRecipe {
         }
     }
 
-    fn matches_complete(&self, message: CompleteMessage<'_>) -> Result<bool, EvalError> {
-        for condition in &self.conditions {
-            if !condition.matches_complete(message)? {
+    fn matches_complete(
+        &self,
+        message: CompleteMessage<'_>,
+        trace: &mut impl TraceSink,
+    ) -> Result<bool, EvalError> {
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let matched = condition.matches_complete(message)?;
+            condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
+            if !matched {
                 return Ok(false);
             }
         }
@@ -556,6 +647,34 @@ impl CompiledRecipe {
 }
 
 impl CompiledCondition {
+    fn trace_result(
+        &self,
+        recipe_line: usize,
+        condition_index: usize,
+        result: PartialMatch,
+        trace: &mut impl TraceSink,
+    ) {
+        let matched = match result {
+            PartialMatch::True => true,
+            PartialMatch::False => false,
+            PartialMatch::Deferred => return,
+        };
+        let kind = match &self.kind {
+            CompiledConditionKind::HeaderRegex(_) => TraceConditionKind::HeaderRegex,
+            CompiledConditionKind::BodyRegex(_) => TraceConditionKind::BodyRegex,
+            CompiledConditionKind::MessageRegex(_) => TraceConditionKind::MessageRegex,
+            CompiledConditionKind::SmallerThan(_) => TraceConditionKind::SmallerThan,
+            CompiledConditionKind::LargerThan(_) => TraceConditionKind::LargerThan,
+        };
+        trace.record(TraceEvent::ConditionEvaluated {
+            recipe_line,
+            condition_index,
+            kind,
+            negated: self.negated,
+            matched,
+        });
+    }
+
     fn explain(&self) -> ConditionExplanation {
         let kind = match &self.kind {
             CompiledConditionKind::HeaderRegex(_) => ConditionKindExplanation::HeaderRegex,
@@ -741,6 +860,25 @@ mod tests {
     use super::*;
     use crate::config;
     use crate::limits::MessageLimits;
+    use crate::trace::{TraceEvent, TraceSink};
+
+    #[derive(Default)]
+    struct EventCounter {
+        assignments: usize,
+        conditions: usize,
+        recipes: usize,
+    }
+
+    impl TraceSink for EventCounter {
+        fn record(&mut self, event: TraceEvent) {
+            match event {
+                TraceEvent::VariableAssigned { .. } => self.assignments += 1,
+                TraceEvent::ConditionEvaluated { .. } => self.conditions += 1,
+                TraceEvent::RecipeEvaluated { .. } => self.recipes += 1,
+                _ => {}
+            }
+        }
+    }
 
     #[derive(Default)]
     struct Recorder {
@@ -789,6 +927,28 @@ mod tests {
         let size = compile(":0\n* < 100\ninbox/\n");
         assert!(!size.requirements().needs_body_contents);
         assert!(size.requirements().needs_end_of_message);
+    }
+
+    #[test]
+    fn forwards_evaluation_events_to_the_selected_sink() {
+        let config = config::parse("BOX=inbox\n:0\n* ^Subject: wanted$\nmaildir:$BOX\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        let plan = ExecutionPlan::compile(&config);
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = EventCounter::default();
+
+        let result = plan.evaluate_headers_with_trace(
+            &head(b"Subject: wanted\n\nbody"),
+            &mut runtime,
+            &mut trace,
+        );
+
+        assert!(matches!(result, HeaderEvaluation::Decided(_)));
+        assert_eq!(trace.assignments, 1);
+        assert_eq!(trace.conditions, 1);
+        assert_eq!(trace.recipes, 1);
     }
 
     #[test]

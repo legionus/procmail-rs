@@ -7,6 +7,17 @@ use std::fmt;
 
 use crate::config::MAX_ASSIGNMENT_NAME_LEN;
 
+pub trait TraceSink {
+    fn record(&mut self, event: TraceEvent);
+}
+
+#[derive(Debug, Default)]
+pub struct NoTrace;
+
+impl TraceSink for NoTrace {
+    fn record(&mut self, _: TraceEvent) {}
+}
+
 /// One filtering event in execution order.
 ///
 /// Events intentionally contain no message bytes, variable values, regular
