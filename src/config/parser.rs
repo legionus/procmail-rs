@@ -1,9 +1,9 @@
 use regex::bytes::RegexBuilder;
 
 use super::{
-    Assignment, Condition, ConditionKind, Config, Destination, MAX_CONDITIONS_PER_RECIPE,
-    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, ParseError,
-    Recipe, Statement,
+    Assignment, Condition, ConditionKind, Config, Destination, MAX_ASSIGNMENT_NAME_LEN,
+    MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_RC_CONDITIONS, MAX_RC_RECIPES,
+    MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, ParseError, Recipe, Statement,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -38,7 +38,7 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
             continue;
         }
 
-        if let Some(assignment) = parse_assignment(line, line_number) {
+        if let Some(assignment) = parse_assignment(line, line_number)? {
             statements.push(Statement::Assignment(assignment));
             index += 1;
             continue;
@@ -73,22 +73,37 @@ fn check_statement_limit(count: usize, line: usize) -> Result<(), ParseError> {
     Ok(())
 }
 
-fn parse_assignment(line: &str, line_number: usize) -> Option<Assignment> {
-    let (name, value) = line.split_once('=')?;
+fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>, ParseError> {
+    let Some((name, value)) = line.split_once('=') else {
+        return Ok(None);
+    };
     let name = name.trim();
+    if name.len() > MAX_ASSIGNMENT_NAME_LEN {
+        return Err(ParseError::new(
+            line_number,
+            format!("assignment name exceeds the hard limit of {MAX_ASSIGNMENT_NAME_LEN} bytes"),
+        ));
+    }
     if name.is_empty()
         || !name.bytes().enumerate().all(|(index, byte)| {
             byte == b'_' || byte.is_ascii_alphanumeric() && (index > 0 || !byte.is_ascii_digit())
         })
     {
-        return None;
+        return Ok(None);
+    }
+    let value = strip_comment(value.trim()).trim();
+    if value.len() > MAX_ASSIGNMENT_VALUE_LEN {
+        return Err(ParseError::new(
+            line_number,
+            format!("assignment value exceeds the hard limit of {MAX_ASSIGNMENT_VALUE_LEN} bytes"),
+        ));
     }
 
-    Some(Assignment {
+    Ok(Some(Assignment {
         line: line_number,
         name: name.to_owned(),
-        value: strip_comment(value.trim()).trim().to_owned(),
-    })
+        value: value.to_owned(),
+    }))
 }
 
 fn parse_recipe(
@@ -382,6 +397,78 @@ mod tests {
 
         assert_eq!(error.line, 2);
         assert!(error.message.starts_with("invalid regular expression:"));
+    }
+
+    #[test]
+    fn enforces_assignment_name_length_at_the_boundary() {
+        for length in [
+            MAX_ASSIGNMENT_NAME_LEN - 1,
+            MAX_ASSIGNMENT_NAME_LEN,
+            MAX_ASSIGNMENT_NAME_LEN + 1,
+        ] {
+            let source = format!("{}=value\n", "A".repeat(length));
+            let result = parse(&source);
+
+            if length <= MAX_ASSIGNMENT_NAME_LEN {
+                let config = result.unwrap();
+                let Statement::Assignment(assignment) = &config.statements[0] else {
+                    panic!("expected assignment");
+                };
+                assert_eq!(assignment.name.len(), length);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 1);
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "assignment name exceeds the hard limit of {MAX_ASSIGNMENT_NAME_LEN} bytes"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enforces_assignment_value_length_at_the_boundary() {
+        for length in [
+            MAX_ASSIGNMENT_VALUE_LEN - 1,
+            MAX_ASSIGNMENT_VALUE_LEN,
+            MAX_ASSIGNMENT_VALUE_LEN + 1,
+        ] {
+            let source = format!("VALUE={}\n", "x".repeat(length));
+            let result = parse(&source);
+
+            if length <= MAX_ASSIGNMENT_VALUE_LEN {
+                let config = result.unwrap();
+                let Statement::Assignment(assignment) = &config.statements[0] else {
+                    panic!("expected assignment");
+                };
+                assert_eq!(assignment.value.len(), length);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 1);
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "assignment value exceeds the hard limit of {MAX_ASSIGNMENT_VALUE_LEN} bytes"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn excludes_assignment_formatting_from_value_length() {
+        let source = format!(
+            "VALUE=  {}  # ignored\n",
+            "x".repeat(MAX_ASSIGNMENT_VALUE_LEN)
+        );
+        let config = parse(&source).unwrap();
+        let Statement::Assignment(assignment) = &config.statements[0] else {
+            panic!("expected assignment");
+        };
+
+        assert_eq!(assignment.value.len(), MAX_ASSIGNMENT_VALUE_LEN);
     }
 
     #[test]
