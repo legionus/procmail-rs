@@ -2,8 +2,9 @@ use regex::bytes::RegexBuilder;
 
 use super::{
     Assignment, Condition, ConditionKind, Config, Destination, MAX_ASSIGNMENT_NAME_LEN,
-    MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_RC_CONDITIONS, MAX_RC_RECIPES,
-    MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, ParseError, Recipe, Statement,
+    MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
+    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, ParseError,
+    Recipe, Statement,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -98,6 +99,9 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
             format!("assignment value exceeds the hard limit of {MAX_ASSIGNMENT_VALUE_LEN} bytes"),
         ));
     }
+    if name == "MAILDIR" {
+        check_path_length(value, line_number, "MAILDIR path")?;
+    }
 
     Ok(Some(Assignment {
         line: line_number,
@@ -172,13 +176,13 @@ fn parse_recipe(
     }
 
     let destination = if let Some(path) = action.strip_prefix("mbox:") {
-        Destination::Mbox(required_path(path, index + 1)?)
+        Destination::Mbox(required_path(path, index + 1, "destination path")?)
     } else if let Some(path) = action.strip_prefix("maildir:") {
-        Destination::Maildir(required_path(path, index + 1)?)
+        Destination::Maildir(required_path(path, index + 1, "destination path")?)
     } else if action.ends_with('/') {
-        Destination::Maildir(action.to_owned())
+        Destination::Maildir(required_path(action, index + 1, "destination path")?)
     } else {
-        Destination::Auto(action.to_owned())
+        Destination::Auto(required_path(action, index + 1, "destination path")?)
     };
 
     let recipe = Recipe {
@@ -218,6 +222,7 @@ fn parse_recipe_header(rest: &str, line: usize) -> Result<(String, Option<String
     let (flag_text, lock) = match rest.split_once(':') {
         Some((flags, lock)) => {
             let lock = lock.trim();
+            check_path_length(lock, line, "lockfile path")?;
             (flags.trim(), Some(lock.to_owned()))
         }
         None => (rest, None),
@@ -287,13 +292,24 @@ pub(crate) fn build_regex(
         .build()
 }
 
-fn required_path(path: &str, line: usize) -> Result<String, ParseError> {
+fn required_path(path: &str, line: usize, description: &str) -> Result<String, ParseError> {
     let path = path.trim();
     if path.is_empty() {
         Err(ParseError::new(line, "destination path is empty"))
     } else {
+        check_path_length(path, line, description)?;
         Ok(path.to_owned())
     }
+}
+
+fn check_path_length(path: &str, line: usize, description: &str) -> Result<(), ParseError> {
+    if path.len() > MAX_PATH_EXPRESSION_LEN {
+        return Err(ParseError::new(
+            line,
+            format!("{description} exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes"),
+        ));
+    }
+    Ok(())
 }
 
 fn strip_comment(value: &str) -> &str {
@@ -469,6 +485,82 @@ mod tests {
         };
 
         assert_eq!(assignment.value.len(), MAX_ASSIGNMENT_VALUE_LEN);
+    }
+
+    #[test]
+    fn enforces_destination_path_length_at_the_boundary() {
+        for length in [
+            MAX_PATH_EXPRESSION_LEN - 1,
+            MAX_PATH_EXPRESSION_LEN,
+            MAX_PATH_EXPRESSION_LEN + 1,
+        ] {
+            let source = format!(":0\nmaildir:{}\n", "x".repeat(length));
+            let result = parse(&source);
+
+            if length <= MAX_PATH_EXPRESSION_LEN {
+                let config = result.unwrap();
+                let Statement::Recipe(recipe) = &config.statements[0] else {
+                    panic!("expected recipe");
+                };
+                let Destination::Maildir(path) = &recipe.destination else {
+                    panic!("expected Maildir destination");
+                };
+                assert_eq!(path.len(), length);
+            } else {
+                assert_path_limit_error(result.unwrap_err(), 2, "destination path");
+            }
+        }
+    }
+
+    #[test]
+    fn applies_path_limit_to_every_destination_form() {
+        let oversized = "x".repeat(MAX_PATH_EXPRESSION_LEN + 1);
+        for action in [
+            format!("mbox:{oversized}"),
+            oversized.clone(),
+            format!("{oversized}/"),
+        ] {
+            let error = parse(&format!(":0\n{action}\n")).unwrap_err();
+            assert_path_limit_error(error, 2, "destination path");
+        }
+    }
+
+    #[test]
+    fn enforces_lockfile_path_length_at_the_boundary() {
+        for length in [
+            MAX_PATH_EXPRESSION_LEN - 1,
+            MAX_PATH_EXPRESSION_LEN,
+            MAX_PATH_EXPRESSION_LEN + 1,
+        ] {
+            let source = format!(":0 :{}\ninbox/\n", "x".repeat(length));
+            let result = parse(&source);
+
+            if length <= MAX_PATH_EXPRESSION_LEN {
+                let config = result.unwrap();
+                let Statement::Recipe(recipe) = &config.statements[0] else {
+                    panic!("expected recipe");
+                };
+                assert_eq!(recipe.lock.as_ref().unwrap().len(), length);
+            } else {
+                assert_path_limit_error(result.unwrap_err(), 1, "lockfile path");
+            }
+        }
+    }
+
+    #[test]
+    fn applies_path_limit_to_maildir_assignment() {
+        let source = format!("MAILDIR={}\n", "x".repeat(MAX_PATH_EXPRESSION_LEN + 1));
+        let error = parse(&source).unwrap_err();
+
+        assert_path_limit_error(error, 1, "MAILDIR path");
+    }
+
+    fn assert_path_limit_error(error: ParseError, line: usize, description: &str) {
+        assert_eq!(error.line, line);
+        assert_eq!(
+            error.message,
+            format!("{description} exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes")
+        );
     }
 
     #[test]

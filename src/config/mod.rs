@@ -8,6 +8,7 @@ pub use parser::parse;
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;
 pub const MAX_ASSIGNMENT_VALUE_LEN: usize = 64 * 1024;
 pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
+pub const MAX_PATH_EXPRESSION_LEN: usize = 4096;
 pub const MAX_RECIPE_NESTING_DEPTH: usize = 0;
 pub const MAX_RC_CONDITIONS: usize = 4096;
 pub const MAX_RC_RECIPES: usize = 1024;
