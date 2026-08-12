@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::{
     AssignmentTarget, Config, Destination, MAX_ASSIGNMENT_VALUE_LEN, MAX_PATH_EXPRESSION_LEN,
-    Statement, VariablePolicy, variable_policy,
+    Statement, SuppliedVariable, VariablePolicy, variable_policy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,8 +30,14 @@ impl fmt::Display for ExpansionError {
 
 impl std::error::Error for ExpansionError {}
 
-pub(super) fn expand(mut config: Config) -> Result<Config, ExpansionError> {
-    let mut variables = BTreeMap::<String, String>::new();
+pub(super) fn expand(
+    mut config: Config,
+    supplied: &[SuppliedVariable],
+) -> Result<Config, ExpansionError> {
+    let mut variables = supplied
+        .iter()
+        .map(|variable| (variable.name().to_owned(), variable.value().to_owned()))
+        .collect::<BTreeMap<String, String>>();
     let mut maildir: Option<String> = None;
 
     for statement in &mut config.statements {
@@ -250,6 +256,23 @@ mod tests {
             recipe.destination,
             Destination::Maildir("/srv/mail/mail/inbox".into())
         );
+    }
+
+    #[test]
+    fn expands_supplied_variables_before_rc_assignments() {
+        let supplied = [
+            SuppliedVariable::parse("BOX=old".into()).unwrap(),
+            SuppliedVariable::parse("BOX=cli".into()).unwrap(),
+        ];
+        let config = parse("FIRST=$BOX\nBOX=rc\nSECOND=$BOX\n:0\nmaildir:$FIRST-$SECOND\n")
+            .unwrap()
+            .expand_with(&supplied)
+            .unwrap();
+
+        let Statement::Recipe(recipe) = &config.statements[3] else {
+            panic!("expected recipe");
+        };
+        assert_eq!(recipe.destination, Destination::Maildir("cli-rc".into()));
     }
 
     #[test]

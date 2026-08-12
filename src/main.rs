@@ -9,7 +9,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use procmail_rs::config::{self, Destination};
+use procmail_rs::config::{self, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
 use procmail_rs::delivery::maildir::MaildirSink;
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{PendingFanout, PendingSink};
@@ -18,9 +18,16 @@ use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::runtime::RuntimeVariables;
 
-enum Command {
-    Check { config: PathBuf },
-    Filter { config: PathBuf },
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Check,
+    Filter,
+}
+
+struct Command {
+    action: Action,
+    config: PathBuf,
+    supplied: Vec<SuppliedVariable>,
 }
 
 fn main() -> ExitCode {
@@ -35,13 +42,11 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let command = parse_args()?;
-    let path = match &command {
-        Command::Check { config } | Command::Filter { config } => config,
-    };
+    let path = &command.config;
     let source = read_config(path)?;
     let config = config::parse(&source)
         .map_err(|error| format!("{}:{error}", path.display()))?
-        .expand()
+        .expand_with(&command.supplied)
         .map_err(|error| format!("{}:{error}", path.display()))?;
     let staging_directory = config.maildir().map(PathBuf::from);
     if let Some(maildir) = &staging_directory {
@@ -55,7 +60,7 @@ fn run() -> Result<(), String> {
     // A deferred decision needs a replayable private copy of stdin. Requiring
     // MAILDIR before reading headers prevents a configuration failure from
     // consuming part of a message that the caller may need to retry.
-    if matches!(command, Command::Filter { .. })
+    if command.action == Action::Filter
         && plan.requirements().needs_end_of_message
         && staging_directory.is_none()
     {
@@ -65,9 +70,9 @@ fn run() -> Result<(), String> {
         ));
     }
 
-    match command {
-        Command::Check { .. } => Ok(()),
-        Command::Filter { .. } => {
+    match command.action {
+        Action::Check => Ok(()),
+        Action::Filter => {
             let mut runtime = RuntimeVariables::default();
             let mut stdin = io::stdin().lock();
             let head = Message::read_headers(&mut stdin, limits)
@@ -233,29 +238,53 @@ fn read_config(path: &Path) -> Result<String, String> {
 
 fn parse_args() -> Result<Command, String> {
     let mut args = env::args_os().skip(1);
-    let command = args
+    let action = args
         .next()
         .and_then(|arg| arg.into_string().ok())
         .ok_or_else(usage)?;
-    let option = args
-        .next()
-        .and_then(|arg| arg.into_string().ok())
-        .ok_or_else(usage)?;
-    if option != "--config" {
-        return Err(usage());
-    }
-    let config = args.next().map(PathBuf::from).ok_or_else(usage)?;
-    if args.next().is_some() {
-        return Err(usage());
+    let action = match action.as_str() {
+        "check" => Action::Check,
+        "filter" => Action::Filter,
+        _ => return Err(usage()),
+    };
+    let mut config = None;
+    let mut supplied = Vec::new();
+
+    // Parse every option before opening the rc file or stdin. This keeps bad
+    // or excessive caller-controlled assignments from affecting filtering or
+    // consuming any part of a message.
+    while let Some(option) = args.next() {
+        match option.to_str() {
+            Some("--config") => {
+                if config.is_some() {
+                    return Err("--config may only be specified once".into());
+                }
+                config = Some(PathBuf::from(args.next().ok_or_else(usage)?));
+            }
+            Some("--set") => {
+                if supplied.len() == MAX_COMMAND_LINE_VARIABLES {
+                    return Err(format!(
+                        "too many --set values; hard limit is {MAX_COMMAND_LINE_VARIABLES}"
+                    ));
+                }
+                let value = args
+                    .next()
+                    .ok_or_else(usage)?
+                    .into_string()
+                    .map_err(|_| "--set value is not valid UTF-8".to_owned())?;
+                supplied.push(SuppliedVariable::parse(value).map_err(|error| error.to_string())?);
+            }
+            _ => return Err(usage()),
+        }
     }
 
-    match command.as_str() {
-        "check" => Ok(Command::Check { config }),
-        "filter" => Ok(Command::Filter { config }),
-        _ => Err(usage()),
-    }
+    Ok(Command {
+        action,
+        config: config.ok_or_else(usage)?,
+        supplied,
+    })
 }
 
 fn usage() -> String {
-    "usage: procmail-rs <check|filter> --config PATH".into()
+    "usage: procmail-rs <check|filter> --config PATH [--set NAME=VALUE]...".into()
 }

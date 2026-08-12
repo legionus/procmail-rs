@@ -9,7 +9,8 @@ use regex::bytes::Regex;
 pub use expand::ExpansionError;
 pub use parser::parse;
 pub use variables::{
-    AssignmentTarget, MessageLimitVariable, VariablePolicy, VariableSource, variable_policy,
+    AssignmentTarget, MAX_COMMAND_LINE_VARIABLES, MessageLimitVariable, SuppliedVariable,
+    SuppliedVariableError, VariablePolicy, VariableSource, variable_policy,
 };
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;
@@ -32,7 +33,11 @@ pub struct Config {
 
 impl Config {
     pub fn expand(self) -> Result<Self, ExpansionError> {
-        expand::expand(self)
+        expand::expand(self, &[])
+    }
+
+    pub fn expand_with(self, supplied: &[SuppliedVariable]) -> Result<Self, ExpansionError> {
+        expand::expand(self, supplied)
     }
 
     pub fn maildir(&self) -> Option<&str> {

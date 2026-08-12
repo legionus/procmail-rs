@@ -237,6 +237,76 @@ fn filter_expands_assignment_and_destination_variables() {
 }
 
 #[test]
+fn filter_expands_explicit_command_line_variables() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("inbox");
+    create_maildir(&maildir);
+    fs::write(&path, ":0\nmaildir:$DESTINATION\n").unwrap();
+    let input = b"Subject: supplied\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--set"])
+        .arg(format!("DESTINATION={}", maildir.display()))
+        .args(["--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&maildir), [input.to_vec()]);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn invalid_command_line_variable_does_not_consume_stdin() {
+    let config = config_file(":0\nmaildir:unused\n");
+    let input_path = config.parent().unwrap().join("message.eml");
+    fs::write(&input_path, b"Subject: must remain unread\n\nbody").unwrap();
+    let mut input = fs::File::open(&input_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .args(["--set", "LASTFOLDER=forged"])
+        .stdin(Stdio::from(input.try_clone().unwrap()))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("variable LASTFOLDER cannot be supplied with --set")
+    );
+    assert_eq!(input.stream_position().unwrap(), 0);
+    fs::remove_dir_all(config.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn check_rejects_too_many_command_line_variables() {
+    let config = config_file(":0\nmaildir:unused\n");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_procmail-rs"));
+    command.args(["check", "--config"]).arg(&config);
+    for index in 0..=256 {
+        command.args(["--set", &format!("V{index}=value")]);
+    }
+
+    let output = command.output().unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("too many --set values; hard limit is 256")
+    );
+    fs::remove_dir_all(config.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn filter_streams_early_copy_while_buffering_for_body_rule() {
     let path = config_file("");
     let copy = path.parent().unwrap().join("copy");
