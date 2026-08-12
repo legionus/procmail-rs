@@ -10,10 +10,26 @@ use crate::config::{AssignmentTarget, Config, Statement};
 
 pub const MAX_MEMORY_TRACE_EVENTS: usize = 16 * 1024;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFailurePolicy {
+    Advisory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceConfig {
     verbose: bool,
     logfile: Option<String>,
+    failure_policy: LogFailurePolicy,
+}
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self {
+            verbose: false,
+            logfile: None,
+            failure_policy: LogFailurePolicy::Advisory,
+        }
+    }
 }
 
 impl TraceConfig {
@@ -54,6 +70,10 @@ impl TraceConfig {
 
     pub fn enabled(&self) -> bool {
         self.verbose
+    }
+
+    pub fn failure_policy(&self) -> LogFailurePolicy {
+        self.failure_policy
     }
 }
 
@@ -370,6 +390,12 @@ mod tests {
         assert_eq!(
             TraceConfig::from_config(&logfile_only).unwrap().logfile(),
             Some("/mail/filter.log")
+        );
+        assert_eq!(
+            TraceConfig::from_config(&logfile_only)
+                .unwrap()
+                .failure_policy(),
+            LogFailurePolicy::Advisory
         );
     }
 
