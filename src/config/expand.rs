@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 
 use super::{
     AssignmentTarget, Config, Destination, MAX_ASSIGNMENT_VALUE_LEN, MAX_PATH_EXPRESSION_LEN,
@@ -31,6 +32,7 @@ impl std::error::Error for ExpansionError {}
 
 pub(super) fn expand(mut config: Config) -> Result<Config, ExpansionError> {
     let mut variables = BTreeMap::<String, String>::new();
+    let mut maildir: Option<String> = None;
 
     for statement in &mut config.statements {
         match statement {
@@ -43,11 +45,22 @@ pub(super) fn expand(mut config: Config) -> Result<Config, ExpansionError> {
                 };
                 assignment.value =
                     expand_text(&assignment.value, assignment.line, limit, &variables)?;
+                if assignment.target == AssignmentTarget::Maildir {
+                    assignment.value = resolve_relative_path(
+                        &assignment.value,
+                        maildir.as_deref(),
+                        assignment.line,
+                    )?;
+                    maildir = Some(assignment.value.clone());
+                }
                 variables.insert(assignment.name.clone(), assignment.value.clone());
             }
             Statement::Recipe(recipe) => {
                 if let Some(lock) = &mut recipe.lock {
                     *lock = expand_text(lock, recipe.line, MAX_PATH_EXPRESSION_LEN, &variables)?;
+                    if !lock.is_empty() {
+                        *lock = resolve_relative_path(lock, maildir.as_deref(), recipe.line)?;
+                    }
                 }
                 let path = match &mut recipe.destination {
                     Destination::Mbox(path)
@@ -60,11 +73,37 @@ pub(super) fn expand(mut config: Config) -> Result<Config, ExpansionError> {
                     MAX_PATH_EXPRESSION_LEN,
                     &variables,
                 )?;
+                *path = resolve_relative_path(path, maildir.as_deref(), recipe.action_line)?;
             }
         }
     }
 
     Ok(config)
+}
+
+fn resolve_relative_path(
+    path: &str,
+    base: Option<&str>,
+    line: usize,
+) -> Result<String, ExpansionError> {
+    let Some(base) = base.filter(|base| !base.is_empty()) else {
+        return Ok(path.to_owned());
+    };
+    if path.is_empty() || Path::new(path).is_absolute() {
+        return Ok(path.to_owned());
+    }
+
+    // Join through the same bounded builder used for expansion. PathBuf::join
+    // would allocate the complete result before we could reject an oversized
+    // base and relative path supplied by the rc file.
+    let mut output = Vec::with_capacity(MAX_PATH_EXPRESSION_LEN.min(base.len()));
+    push_bounded(&mut output, base.as_bytes(), MAX_PATH_EXPRESSION_LEN, line)?;
+    if !base.ends_with('/') {
+        push_bounded(&mut output, b"/", MAX_PATH_EXPRESSION_LEN, line)?;
+    }
+    push_bounded(&mut output, path.as_bytes(), MAX_PATH_EXPRESSION_LEN, line)?;
+    String::from_utf8(output)
+        .map_err(|_| ExpansionError::new(line, "resolved path is not valid UTF-8"))
 }
 
 fn expand_text(
@@ -206,11 +245,35 @@ mod tests {
         let Statement::Recipe(recipe) = &config.statements[3] else {
             panic!("expected recipe");
         };
-        assert_eq!(recipe.lock.as_deref(), Some("lock-mail/inbox"));
+        assert_eq!(recipe.lock.as_deref(), Some("/srv/mail/lock-mail/inbox"));
         assert_eq!(
             recipe.destination,
-            Destination::Maildir("mail/inbox".into())
+            Destination::Maildir("/srv/mail/mail/inbox".into())
         );
+    }
+
+    #[test]
+    fn resolves_paths_against_maildir_active_at_each_recipe() {
+        let config = parse("MAILDIR=/srv/first\n:0 c\none/\nMAILDIR=second\n:0\nmaildir:two\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+
+        let Statement::Recipe(first) = &config.statements[1] else {
+            panic!("expected first recipe");
+        };
+        let Statement::Recipe(second) = &config.statements[3] else {
+            panic!("expected second recipe");
+        };
+        assert_eq!(
+            first.destination,
+            Destination::Maildir("/srv/first/one/".into())
+        );
+        assert_eq!(
+            second.destination,
+            Destination::Maildir("/srv/first/second/two".into())
+        );
+        assert_eq!(config.maildir(), Some("/srv/first/second"));
     }
 
     #[test]
@@ -244,6 +307,21 @@ mod tests {
         let error = parse(&source).unwrap().expand().unwrap_err();
 
         assert_eq!(error.line, 4);
+        assert_eq!(
+            error.message,
+            format!("expanded value exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes")
+        );
+    }
+
+    #[test]
+    fn bounds_maildir_path_join_before_allocation_growth() {
+        let source = format!(
+            "MAILDIR=/{}\n:0\nmaildir:child\n",
+            "a".repeat(MAX_PATH_EXPRESSION_LEN - 1)
+        );
+        let error = parse(&source).unwrap().expand().unwrap_err();
+
+        assert_eq!(error.line, 3);
         assert_eq!(
             error.message,
             format!("expanded value exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes")

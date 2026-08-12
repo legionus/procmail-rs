@@ -71,9 +71,7 @@ fn run() -> Result<(), String> {
             let head = Message::read_headers(&mut stdin, limits)
                 .map_err(|error| format!("cannot read message headers from stdin: {error}"))?;
             match plan.evaluate_headers(&head) {
-                HeaderEvaluation::Decided(delivery) => {
-                    deliver_decided(head, &mut stdin, &delivery, staging_directory.as_deref())
-                }
+                HeaderEvaluation::Decided(delivery) => deliver_decided(head, &mut stdin, &delivery),
                 HeaderEvaluation::NeedsMessage(continuation) => {
                     let staging_directory = staging_directory.as_deref().ok_or_else(|| {
                         "internal error: deferred evaluation has no staging directory".to_owned()
@@ -89,9 +87,8 @@ fn deliver_decided(
     head: procmail_rs::message::MessageHead,
     reader: &mut impl io::BufRead,
     plan: &DeliveryPlan,
-    maildir: Option<&Path>,
 ) -> Result<(), String> {
-    let sinks = open_sinks(plan.destinations(), maildir)?;
+    let sinks = open_sinks(plan.destinations())?;
     let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
     let (validated, _) = pending
         .stream(head, reader)
@@ -111,7 +108,7 @@ fn deliver_staged(
     staging_directory: &Path,
 ) -> Result<(), String> {
     let early_count = continuation.pending_destinations().len();
-    let early_sinks = open_sinks(continuation.pending_destinations(), Some(staging_directory))?;
+    let early_sinks = open_sinks(continuation.pending_destinations())?;
     let pending = PendingFanout::new(early_sinks).map_err(|error| error.to_string())?;
     let mut staging = StagingFile::create(staging_directory)
         .map_err(|error| format!("cannot create private staging file: {error}"))?;
@@ -133,7 +130,7 @@ fn deliver_staged(
     let late_destinations = plan.destinations().get(early_count..).ok_or_else(|| {
         "internal error: deferred delivery discarded an early copy destination".to_owned()
     })?;
-    let late_sinks = open_sinks(late_destinations, Some(staging_directory))?;
+    let late_sinks = open_sinks(late_destinations)?;
     let late = PendingFanout::new(late_sinks).map_err(|error| error.to_string())?;
     let validated = validated
         .append_bytes(late, staged.as_bytes())
@@ -145,21 +142,13 @@ fn deliver_staged(
     delivery_outcome(&plan)
 }
 
-fn open_sinks(
-    destinations: &[Destination],
-    maildir: Option<&Path>,
-) -> Result<Vec<Box<dyn PendingSink>>, String> {
+fn open_sinks(destinations: &[Destination]) -> Result<Vec<Box<dyn PendingSink>>, String> {
     let mut sinks: Vec<Box<dyn PendingSink>> = Vec::with_capacity(destinations.len());
     for destination in destinations {
         match destination {
             Destination::Maildir(path) => {
                 let path = Path::new(path);
-                let resolved = if path.is_relative() {
-                    maildir.map_or_else(|| path.to_owned(), |base| base.join(path))
-                } else {
-                    path.to_owned()
-                };
-                let sink = MaildirSink::create(&resolved)
+                let sink = MaildirSink::create(path)
                     .map_err(|error| format!("cannot open Maildir {}: {error}", path.display()))?;
                 sinks.push(Box::new(sink));
             }
