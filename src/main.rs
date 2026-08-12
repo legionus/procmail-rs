@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+compile_error!("procmail-rs currently supports only 64-bit Linux targets");
+
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
@@ -8,9 +11,10 @@ use std::process::ExitCode;
 
 use procmail_rs::config::{self, Destination};
 use procmail_rs::delivery::maildir::MaildirSink;
+use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{PendingFanout, PendingSink};
 use procmail_rs::eval::{DeliveryPlan, ExecutionPlan, HeaderEvaluation};
-use procmail_rs::limits::{MAX_RC_SIZE, MessageLimits};
+use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 
 enum Command {
@@ -35,10 +39,28 @@ fn run() -> Result<(), String> {
     };
     let source = read_config(path)?;
     let config = config::parse(&source).map_err(|error| format!("{}:{error}", path.display()))?;
+    let staging_directory = config.maildir().map(PathBuf::from);
+    if let Some(maildir) = &staging_directory {
+        validate_maildir_path(maildir)
+            .map_err(|error| format!("{}: invalid MAILDIR: {error}", path.display()))?;
+    }
     let limits = MessageLimits::from_config(&config)
         .map_err(|error| format!("{}:{error}", path.display()))?;
     let plan = ExecutionPlan::compile(&config)
         .map_err(|error| format!("cannot compile {}: {error}", path.display()))?;
+
+    // A deferred decision needs a replayable private copy of stdin. Requiring
+    // MAILDIR before reading headers prevents a configuration failure from
+    // consuming part of a message that the caller may need to retry.
+    if matches!(command, Command::Filter { .. })
+        && plan.requirements().needs_end_of_message
+        && staging_directory.is_none()
+    {
+        return Err(format!(
+            "{}: MAILDIR is required when a recipe needs the body or final message size",
+            path.display()
+        ));
+    }
 
     match command {
         Command::Check { .. } => Ok(()),
@@ -46,27 +68,17 @@ fn run() -> Result<(), String> {
             let mut stdin = io::stdin().lock();
             let head = Message::read_headers(&mut stdin, limits)
                 .map_err(|error| format!("cannot read message headers from stdin: {error}"))?;
-            let delivery = match plan.evaluate_headers(&head) {
+            match plan.evaluate_headers(&head) {
                 HeaderEvaluation::Decided(delivery) => {
-                    return deliver_decided(head, &mut stdin, &delivery);
-                }
-                HeaderEvaluation::NeedsMessage(continuation)
-                    if continuation.requirements().needs_body_contents =>
-                {
-                    return deliver_buffered(head, &mut stdin, &plan, continuation);
+                    deliver_decided(head, &mut stdin, &delivery, staging_directory.as_deref())
                 }
                 HeaderEvaluation::NeedsMessage(continuation) => {
-                    let message = head
-                        .stream_to(&mut stdin, &mut io::sink())
-                        .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
-                    plan.resume_streamed(continuation, &message)
-                        .map_err(|error| format!("cannot evaluate message: {error}"))?
+                    let staging_directory = staging_directory.as_deref().ok_or_else(|| {
+                        "internal error: deferred evaluation has no staging directory".to_owned()
+                    })?;
+                    deliver_staged(head, &mut stdin, &plan, continuation, staging_directory)
                 }
-            };
-            Err(format!(
-                "delivery is not implemented yet (selected {} destination(s))",
-                delivery.destinations().len()
-            ))
+            }
         }
     }
 }
@@ -75,8 +87,9 @@ fn deliver_decided(
     head: procmail_rs::message::MessageHead,
     reader: &mut impl io::BufRead,
     plan: &DeliveryPlan,
+    maildir: Option<&Path>,
 ) -> Result<(), String> {
-    let sinks = open_sinks(plan.destinations())?;
+    let sinks = open_sinks(plan.destinations(), maildir)?;
     let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
     let (validated, _) = pending
         .stream(head, reader)
@@ -88,28 +101,40 @@ fn deliver_decided(
     delivery_outcome(plan)
 }
 
-fn deliver_buffered(
+fn deliver_staged(
     head: procmail_rs::message::MessageHead,
     reader: &mut impl io::BufRead,
     execution: &ExecutionPlan,
     continuation: procmail_rs::eval::Continuation,
+    staging_directory: &Path,
 ) -> Result<(), String> {
     let early_count = continuation.pending_destinations().len();
-    let early_sinks = open_sinks(continuation.pending_destinations())?;
+    let early_sinks = open_sinks(continuation.pending_destinations(), Some(staging_directory))?;
     let pending = PendingFanout::new(early_sinks).map_err(|error| error.to_string())?;
-    let (validated, message) = pending
-        .buffer(head, reader)
-        .map_err(|error| format!("cannot read message body from stdin: {error}"))?;
+    let mut staging = StagingFile::create(staging_directory)
+        .map_err(|error| format!("cannot create private staging file: {error}"))?;
+    let header_len = head.len();
+
+    // Early copies and staging receive identical bytes in one pass over stdin.
+    // Neither side is published yet, so any failure drops both private outputs
+    // before the caller can observe a partial message.
+    let (validated, _) = pending
+        .stage(head, reader, &mut staging)
+        .map_err(|error| format!("cannot stage message from stdin: {error}"))?;
+    let staged = staging
+        .map(MAX_MESSAGE_SIZE, header_len)
+        .map_err(|error| format!("cannot map staged message: {error}"))?;
+
     let plan = execution
-        .resume_buffered(continuation, &message)
+        .resume_mapped(continuation, staged.as_bytes(), staged.header_len())
         .map_err(|error| format!("cannot evaluate message: {error}"))?;
     let late_destinations = plan.destinations().get(early_count..).ok_or_else(|| {
         "internal error: deferred delivery discarded an early copy destination".to_owned()
     })?;
-    let late_sinks = open_sinks(late_destinations)?;
+    let late_sinks = open_sinks(late_destinations, Some(staging_directory))?;
     let late = PendingFanout::new(late_sinks).map_err(|error| error.to_string())?;
     let validated = validated
-        .append_buffered(late, &message)
+        .append_bytes(late, staged.as_bytes())
         .map_err(|error| error.to_string())?;
     validated
         .commit()
@@ -118,13 +143,22 @@ fn deliver_buffered(
     delivery_outcome(&plan)
 }
 
-fn open_sinks(destinations: &[Destination]) -> Result<Vec<Box<dyn PendingSink>>, String> {
+fn open_sinks(
+    destinations: &[Destination],
+    maildir: Option<&Path>,
+) -> Result<Vec<Box<dyn PendingSink>>, String> {
     let mut sinks: Vec<Box<dyn PendingSink>> = Vec::with_capacity(destinations.len());
     for destination in destinations {
         match destination {
             Destination::Maildir(path) => {
-                let sink = MaildirSink::create(Path::new(path))
-                    .map_err(|error| format!("cannot open Maildir {path}: {error}"))?;
+                let path = Path::new(path);
+                let resolved = if path.is_relative() {
+                    maildir.map_or_else(|| path.to_owned(), |base| base.join(path))
+                } else {
+                    path.to_owned()
+                };
+                let sink = MaildirSink::create(&resolved)
+                    .map_err(|error| format!("cannot open Maildir {}: {error}", path.display()))?;
                 sinks.push(Box::new(sink));
             }
             Destination::Mbox(path) => {
@@ -138,6 +172,19 @@ fn open_sinks(destinations: &[Destination]) -> Result<Vec<Box<dyn PendingSink>>,
         }
     }
     Ok(sinks)
+}
+
+fn validate_maildir_path(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("path is empty".into());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("path must not contain '..'".into());
+    }
+    Ok(())
 }
 
 fn delivery_outcome(plan: &DeliveryPlan) -> Result<(), String> {

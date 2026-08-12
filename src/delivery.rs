@@ -5,6 +5,8 @@ use crate::message::{Message, MessageHead, MessageReadError, StreamedMessage};
 
 #[cfg(target_os = "linux")]
 pub mod maildir;
+#[cfg(target_os = "linux")]
+pub mod staging;
 
 pub const MAX_PENDING_SINKS: usize = 256;
 
@@ -114,6 +116,34 @@ impl PendingFanout {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn stage(
+        mut self,
+        head: MessageHead,
+        reader: &mut impl BufRead,
+        staging: &mut staging::StagingFile,
+    ) -> Result<(ValidatedFanout, StreamedMessage), StreamDeliveryError> {
+        let mut writer = TeeWriter {
+            fanout: &mut self,
+            staging,
+        };
+        match head.stream_to(reader, &mut writer) {
+            Ok(message) => Ok((
+                ValidatedFanout {
+                    sinks: std::mem::take(&mut self.sinks),
+                },
+                message,
+            )),
+            Err(source) => {
+                let abort_failures = self.abort_all();
+                Err(StreamDeliveryError {
+                    source,
+                    abort_failures,
+                })
+            }
+        }
+    }
+
     fn abort_all(&mut self) -> usize {
         let mut failures = 0usize;
         while let Some(sink) = self.sinks.pop() {
@@ -122,6 +152,26 @@ impl PendingFanout {
             }
         }
         failures
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct TeeWriter<'a> {
+    fanout: &'a mut PendingFanout,
+    staging: &'a mut staging::StagingFile,
+}
+
+#[cfg(target_os = "linux")]
+impl Write for TeeWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.fanout.write_all(bytes)?;
+        self.staging.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.fanout.flush()?;
+        self.staging.flush()
     }
 }
 
@@ -149,9 +199,17 @@ impl Drop for PendingFanout {
 
 impl ValidatedFanout {
     pub fn append_buffered(
+        self,
+        pending: PendingFanout,
+        message: &Message,
+    ) -> Result<Self, AppendError> {
+        self.append_bytes(pending, message.as_bytes())
+    }
+
+    pub fn append_bytes(
         mut self,
         mut pending: PendingFanout,
-        message: &Message,
+        message: &[u8],
     ) -> Result<Self, AppendError> {
         let count = self.sinks.len().saturating_add(pending.sinks.len());
         if count > MAX_PENDING_SINKS {
@@ -169,7 +227,7 @@ impl ValidatedFanout {
             });
         }
 
-        if let Err(source) = pending.write_all(message.as_bytes()) {
+        if let Err(source) = pending.write_all(message) {
             let abort_failures = pending.abort_all().saturating_add(self.abort_all());
             return Err(AppendError {
                 source,

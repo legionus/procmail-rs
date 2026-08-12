@@ -6,4 +6,4 @@ license = "Artistic-1.0-Perl"
 
 [dependencies]
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf-literal"] }
-rustix = { version = "1.1.4", default-features = false, features = ["fs"] }
+rustix = { version = "1.1.4", default-features = false, features = ["fs", "mm"] }

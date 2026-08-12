@@ -147,6 +147,35 @@ fn filter_streams_header_decided_message_to_maildir() {
 }
 
 #[test]
+fn maildir_resolves_relative_delivery_paths() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("mail");
+    let inbox = maildir.join("inbox");
+    fs::create_dir(&maildir).unwrap();
+    create_maildir(&inbox);
+    fs::write(
+        &path,
+        format!("MAILDIR={}\n:0\nmaildir:inbox\n", maildir.display()),
+    )
+    .unwrap();
+    let input = b"Subject: relative\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&inbox), [input.to_vec()]);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn filter_streams_early_copy_while_buffering_for_body_rule() {
     let path = config_file("");
     let copy = path.parent().unwrap().join("copy");
@@ -156,7 +185,8 @@ fn filter_streams_early_copy_while_buffering_for_body_rule() {
     fs::write(
         &path,
         format!(
-            ":0c\n* ^Subject: selected\nmaildir:{}\n:0B\n* needle\nmaildir:{}\n",
+            "MAILDIR={}\n:0c\n* ^Subject: selected\nmaildir:{}\n:0B\n* needle\nmaildir:{}\n",
+            path.parent().unwrap().display(),
             copy.display(),
             final_maildir.display()
         ),
@@ -192,7 +222,8 @@ fn body_limit_aborts_early_copy_before_publication() {
     fs::write(
         &path,
         format!(
-            "LIMIT_MSG_BODY=3\n:0c\n* ^Subject: selected\nmaildir:{}\n:0B\n* body\nmaildir:{}\n",
+            "MAILDIR={}\nLIMIT_MSG_BODY=3\n:0c\n* ^Subject: selected\nmaildir:{}\n:0B\n* body\nmaildir:{}\n",
+            path.parent().unwrap().display(),
             copy.display(),
             final_maildir.display()
         ),
@@ -218,5 +249,42 @@ fn body_limit_aborts_early_copy_before_publication() {
     assert!(delivered_messages(&copy).is_empty());
     assert!(delivered_messages(&final_maildir).is_empty());
     assert_eq!(fs::read_dir(copy.join("tmp")).unwrap().count(), 0);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn size_only_rule_replays_staged_message_to_late_destination() {
+    let path = config_file("");
+    let final_maildir = path.parent().unwrap().join("final");
+    create_maildir(&final_maildir);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n* < 4096\nmaildir:{}\n",
+            path.parent().unwrap().display(),
+            final_maildir.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: size\n\nbinary:\xff\x00body";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&final_maildir), [input.to_vec()]);
+    assert_eq!(
+        fs::read_dir(path.parent().unwrap().join(".procmail-rs-staging"))
+            .unwrap()
+            .count(),
+        0
+    );
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

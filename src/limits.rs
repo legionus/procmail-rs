@@ -7,6 +7,7 @@ const MIB: usize = 1024 * KIB;
 const GIB: usize = 1024 * MIB;
 
 pub const MAX_RC_SIZE: usize = MIB;
+pub const MAX_MESSAGE_SIZE: usize = 256 * MIB;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageLimits {
@@ -80,9 +81,9 @@ impl std::error::Error for LimitConfigError {}
 
 fn limit_target<'a>(limits: &'a mut MessageLimits, name: &str) -> Option<(&'a mut usize, usize)> {
     match name {
-        "LIMIT_MSG_SIZE" => Some((&mut limits.message_size, GIB)),
+        "LIMIT_MSG_SIZE" => Some((&mut limits.message_size, MAX_MESSAGE_SIZE)),
         "LIMIT_MSG_HEADERS" => Some((&mut limits.headers_size, 16 * MIB)),
-        "LIMIT_MSG_BODY" => Some((&mut limits.body_size, GIB)),
+        "LIMIT_MSG_BODY" => Some((&mut limits.body_size, MAX_MESSAGE_SIZE)),
         "LIMIT_HEADER_LINE" => Some((&mut limits.header_line_size, MIB)),
         "LIMIT_HEADER_FIELD" => Some((&mut limits.header_field_size, 16 * MIB)),
         _ => None,
@@ -150,6 +151,17 @@ mod tests {
 
         assert_eq!(error.line, 1);
         assert!(error.reason.contains("hard ceiling"));
+    }
+
+    #[test]
+    fn caps_message_and_body_for_32_bit_address_space() {
+        for name in ["LIMIT_MSG_SIZE", "LIMIT_MSG_BODY"] {
+            let at_limit = config::parse(&format!("{name}=256M\n")).unwrap();
+            assert!(MessageLimits::from_config(&at_limit).is_ok());
+
+            let above_limit = config::parse(&format!("{name}=256M\n{name}=268435457\n")).unwrap();
+            assert!(MessageLimits::from_config(&above_limit).is_err());
+        }
     }
 
     #[test]

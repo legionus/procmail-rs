@@ -118,7 +118,7 @@ impl Drop for MaildirSink {
     }
 }
 
-fn open_directory_path(path: &Path) -> io::Result<OwnedFd> {
+pub(crate) fn open_directory_path(path: &Path) -> io::Result<OwnedFd> {
     if path.as_os_str().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -174,7 +174,7 @@ fn open_directory_path(path: &Path) -> io::Result<OwnedFd> {
     Ok(directory)
 }
 
-fn open_directory_at(dir: impl rustix::fd::AsFd, name: &OsStr) -> io::Result<OwnedFd> {
+pub(crate) fn open_directory_at(dir: impl rustix::fd::AsFd, name: &OsStr) -> io::Result<OwnedFd> {
     openat(
         dir,
         name.as_encoded_bytes(),

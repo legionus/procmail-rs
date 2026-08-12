@@ -220,6 +220,18 @@ impl ExecutionPlan {
         self.resume(continuation, CompleteMessage::Streamed(message))
     }
 
+    pub fn resume_mapped(
+        &self,
+        continuation: Continuation,
+        raw: &[u8],
+        header_len: usize,
+    ) -> Result<DeliveryPlan, EvalError> {
+        if header_len > raw.len() {
+            return Err(EvalError::BodyWasNotBuffered);
+        }
+        self.resume(continuation, CompleteMessage::Mapped { raw, header_len })
+    }
+
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
         self.resume(
             Continuation {
@@ -401,6 +413,7 @@ impl CompiledCondition {
 enum CompleteMessage<'a> {
     Buffered(&'a Message),
     Streamed(&'a StreamedMessage),
+    Mapped { raw: &'a [u8], header_len: usize },
 }
 
 impl<'a> CompleteMessage<'a> {
@@ -408,6 +421,7 @@ impl<'a> CompleteMessage<'a> {
         match self {
             Self::Buffered(message) => message.header(),
             Self::Streamed(message) => message.header(),
+            Self::Mapped { raw, header_len } => &raw[..header_len],
         }
     }
 
@@ -415,6 +429,7 @@ impl<'a> CompleteMessage<'a> {
         match self {
             Self::Buffered(message) => Some(message.body()),
             Self::Streamed(_) => None,
+            Self::Mapped { raw, header_len } => Some(&raw[header_len..]),
         }
     }
 
@@ -422,6 +437,7 @@ impl<'a> CompleteMessage<'a> {
         match self {
             Self::Buffered(message) => Some(message.as_bytes()),
             Self::Streamed(_) => None,
+            Self::Mapped { raw, .. } => Some(raw),
         }
     }
 
@@ -429,6 +445,7 @@ impl<'a> CompleteMessage<'a> {
         match self {
             Self::Buffered(message) => message.len(),
             Self::Streamed(message) => message.len(),
+            Self::Mapped { raw, .. } => raw.len(),
         }
     }
 }

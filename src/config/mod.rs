@@ -10,6 +10,17 @@ pub struct Config {
     pub statements: Vec<Statement>,
 }
 
+impl Config {
+    pub fn maildir(&self) -> Option<&str> {
+        self.statements.iter().rev().find_map(|statement| {
+            let Statement::Assignment(assignment) = statement else {
+                return None;
+            };
+            (assignment.name == "MAILDIR").then_some(assignment.value.as_str())
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     Assignment(Assignment),
@@ -79,3 +90,15 @@ impl fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn later_maildir_assignment_selects_staging_base() {
+        let config = parse("MAILDIR=old\nMAILDIR=/srv/mail\n").unwrap();
+
+        assert_eq!(config.maildir(), Some("/srv/mail"));
+    }
+}
