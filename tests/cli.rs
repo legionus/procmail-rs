@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
@@ -81,6 +81,34 @@ fn check_rejects_invalid_message_limit() {
             .contains("rules.rc:line 1: invalid LIMIT_MSG_BODY")
     );
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn invalid_configuration_does_not_consume_stdin() {
+    for rules in [
+        ":0\n| unsupported\n",
+        "LIMIT_MSG_BODY=10KB\n:0\ninbox/\n",
+        ":0 B\n* body\ninbox/\n",
+    ] {
+        let config = config_file(rules);
+        let input_path = config.parent().unwrap().join("message.eml");
+        fs::write(&input_path, b"Subject: must remain unread\n\nbody").unwrap();
+        let mut input = fs::File::open(&input_path).unwrap();
+
+        // File::try_clone and the descriptor inherited by the child share a
+        // file position on Linux. Observing offset zero after exit proves the
+        // filter rejected configuration before issuing any stdin read.
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        assert_eq!(input.stream_position().unwrap(), 0, "rules: {rules:?}");
+        fs::remove_dir_all(config.parent().unwrap()).unwrap();
+    }
 }
 
 #[test]
