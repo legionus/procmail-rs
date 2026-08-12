@@ -3,9 +3,15 @@ use std::fmt;
 use std::path::Path;
 
 use super::{
-    AssignmentTarget, Config, Destination, MAX_ASSIGNMENT_VALUE_LEN, MAX_PATH_EXPRESSION_LEN,
-    Statement, SuppliedVariable, VariablePolicy, variable_policy,
+    AssignmentTarget, Config, Destination, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
+    MAX_PATH_EXPRESSION_LEN, Statement, SuppliedVariable, VariablePolicy, variable_policy,
 };
+
+#[derive(Debug, Clone)]
+struct ExpandedValue {
+    text: String,
+    depth: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpansionError {
@@ -24,7 +30,11 @@ impl ExpansionError {
 
 impl fmt::Display for ExpansionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "line {}: {}", self.line, self.message)
+        if self.line == 0 {
+            write!(formatter, "command line: {}", self.message)
+        } else {
+            write!(formatter, "line {}: {}", self.line, self.message)
+        }
     }
 }
 
@@ -34,10 +44,11 @@ pub(super) fn expand(
     mut config: Config,
     supplied: &[SuppliedVariable],
 ) -> Result<Config, ExpansionError> {
-    let mut variables = supplied
-        .iter()
-        .map(|variable| (variable.name().to_owned(), variable.value().to_owned()))
-        .collect::<BTreeMap<String, String>>();
+    let mut variables = BTreeMap::<String, ExpandedValue>::new();
+    for variable in supplied {
+        let value = expand_text(variable.value(), 0, MAX_ASSIGNMENT_VALUE_LEN, &variables)?;
+        variables.insert(variable.name().to_owned(), value);
+    }
     let mut maildir: Option<String> = None;
 
     for statement in &mut config.statements {
@@ -49,8 +60,8 @@ pub(super) fn expand(
                         MAX_ASSIGNMENT_VALUE_LEN
                     }
                 };
-                assignment.value =
-                    expand_text(&assignment.value, assignment.line, limit, &variables)?;
+                let expanded = expand_text(&assignment.value, assignment.line, limit, &variables)?;
+                assignment.value = expanded.text;
                 if assignment.target == AssignmentTarget::Maildir {
                     assignment.value = resolve_relative_path(
                         &assignment.value,
@@ -59,11 +70,18 @@ pub(super) fn expand(
                     )?;
                     maildir = Some(assignment.value.clone());
                 }
-                variables.insert(assignment.name.clone(), assignment.value.clone());
+                variables.insert(
+                    assignment.name.clone(),
+                    ExpandedValue {
+                        text: assignment.value.clone(),
+                        depth: expanded.depth,
+                    },
+                );
             }
             Statement::Recipe(recipe) => {
                 if let Some(lock) = &mut recipe.lock {
-                    *lock = expand_text(lock, recipe.line, MAX_PATH_EXPRESSION_LEN, &variables)?;
+                    *lock =
+                        expand_text(lock, recipe.line, MAX_PATH_EXPRESSION_LEN, &variables)?.text;
                     if !lock.is_empty() {
                         *lock = resolve_relative_path(lock, maildir.as_deref(), recipe.line)?;
                     }
@@ -78,7 +96,8 @@ pub(super) fn expand(
                     recipe.action_line,
                     MAX_PATH_EXPRESSION_LEN,
                     &variables,
-                )?;
+                )?
+                .text;
                 *path = resolve_relative_path(path, maildir.as_deref(), recipe.action_line)?;
             }
         }
@@ -116,11 +135,12 @@ fn expand_text(
     input: &str,
     line: usize,
     limit: usize,
-    variables: &BTreeMap<String, String>,
-) -> Result<String, ExpansionError> {
+    variables: &BTreeMap<String, ExpandedValue>,
+) -> Result<ExpandedValue, ExpansionError> {
     let bytes = input.as_bytes();
     let mut output = Vec::with_capacity(input.len().min(limit));
     let mut index = 0;
+    let mut depth = 0usize;
 
     while index < bytes.len() {
         let Some(relative_dollar) = bytes[index..].iter().position(|byte| *byte == b'$') else {
@@ -140,12 +160,24 @@ fn expand_text(
                 ),
                 _ => ExpansionError::new(line, format!("variable {name} is not defined")),
             })?;
-        push_bounded(&mut output, value.as_bytes(), limit, line)?;
+        let candidate_depth = value
+            .depth
+            .checked_add(1)
+            .ok_or_else(|| ExpansionError::new(line, "variable expansion depth overflows"))?;
+        if candidate_depth > MAX_EXPANSION_DEPTH {
+            return Err(ExpansionError::new(
+                line,
+                format!("variable expansion exceeds the hard depth limit of {MAX_EXPANSION_DEPTH}"),
+            ));
+        }
+        depth = depth.max(candidate_depth);
+        push_bounded(&mut output, value.text.as_bytes(), limit, line)?;
         index = next;
     }
 
-    String::from_utf8(output)
-        .map_err(|_| ExpansionError::new(line, "expanded value is not valid UTF-8"))
+    let text = String::from_utf8(output)
+        .map_err(|_| ExpansionError::new(line, "expanded value is not valid UTF-8"))?;
+    Ok(ExpandedValue { text, depth })
 }
 
 fn parse_reference(
@@ -261,8 +293,9 @@ mod tests {
     #[test]
     fn expands_supplied_variables_before_rc_assignments() {
         let supplied = [
-            SuppliedVariable::parse("BOX=old".into()).unwrap(),
-            SuppliedVariable::parse("BOX=cli".into()).unwrap(),
+            SuppliedVariable::parse("ROOT=old".into()).unwrap(),
+            SuppliedVariable::parse("ROOT=cli".into()).unwrap(),
+            SuppliedVariable::parse("BOX=$ROOT".into()).unwrap(),
         ];
         let config = parse("FIRST=$BOX\nBOX=rc\nSECOND=$BOX\n:0\nmaildir:$FIRST-$SECOND\n")
             .unwrap()
@@ -273,6 +306,41 @@ mod tests {
             panic!("expected recipe");
         };
         assert_eq!(recipe.destination, Destination::Maildir("cli-rc".into()));
+    }
+
+    #[test]
+    fn rejects_self_references_and_cycles_without_recursive_scanning() {
+        for source in ["A=$A\n", "A=$B\nB=$A\n"] {
+            let error = parse(source).unwrap().expand().unwrap_err();
+            assert_eq!(error.line, 1);
+            assert!(error.message.contains("is not defined"));
+        }
+
+        let supplied = [SuppliedVariable::parse("A=$A".into()).unwrap()];
+        let error = parse("").unwrap().expand_with(&supplied).unwrap_err();
+        assert_eq!(error.line, 0);
+        assert_eq!(error.to_string(), "command line: variable A is not defined");
+    }
+
+    #[test]
+    fn enforces_expansion_depth_at_the_boundary() {
+        let mut source = String::from("V0=value\n");
+        for depth in 1..=MAX_EXPANSION_DEPTH {
+            source.push_str(&format!("V{depth}=$V{}\n", depth - 1));
+        }
+        assert!(parse(&source).unwrap().expand().is_ok());
+
+        source.push_str(&format!(
+            "V{}=$V{}\n",
+            MAX_EXPANSION_DEPTH + 1,
+            MAX_EXPANSION_DEPTH
+        ));
+        let error = parse(&source).unwrap().expand().unwrap_err();
+        assert_eq!(error.line, MAX_EXPANSION_DEPTH + 2);
+        assert_eq!(
+            error.message,
+            format!("variable expansion exceeds the hard depth limit of {MAX_EXPANSION_DEPTH}")
+        );
     }
 
     #[test]

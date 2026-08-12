@@ -16,6 +16,7 @@ pub use variables::{
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;
 pub const MAX_ASSIGNMENT_VALUE_LEN: usize = 64 * 1024;
 pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
+pub const MAX_EXPANSION_DEPTH: usize = 32;
 pub const MAX_PATH_EXPRESSION_LEN: usize = 4096;
 pub const MAX_RECIPE_NESTING_DEPTH: usize = 0;
 pub const MAX_REGEX_COMPILED_SIZE: usize = 8 * 1024 * 1024;
