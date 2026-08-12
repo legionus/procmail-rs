@@ -90,6 +90,8 @@ fn invalid_configuration_does_not_consume_stdin() {
         "LIMIT_MSG_BODY=10KB\n:0\ninbox/\n",
         ":0 B\n* body\ninbox/\n",
         ":0\nmaildir:$UNDEFINED\n",
+        ":0\nmbox:unsupported\n",
+        ":0\nambiguous\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
@@ -109,6 +111,31 @@ fn invalid_configuration_does_not_consume_stdin() {
         assert!(!output.status.success());
         assert_eq!(input.stream_position().unwrap(), 0, "rules: {rules:?}");
         fs::remove_dir_all(config.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn check_rejects_unresolved_destination_types() {
+    for (action, expected) in [
+        (
+            "mbox:unsupported",
+            "line 2: mbox delivery is not implemented",
+        ),
+        (
+            "ambiguous",
+            "line 2: destination type is ambiguous; use an explicit maildir: or mbox: prefix",
+        ),
+    ] {
+        let path = config_file(&format!(":0\n{action}\n"));
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["check", "--config"])
+            .arg(&path)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stderr).unwrap().contains(expected));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
 

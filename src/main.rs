@@ -9,7 +9,9 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use procmail_rs::config::{self, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
+use procmail_rs::config::{
+    self, Destination, MAX_COMMAND_LINE_VARIABLES, Statement, SuppliedVariable,
+};
 use procmail_rs::delivery::maildir::MaildirSink;
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{PendingFanout, PendingSink};
@@ -48,6 +50,7 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("{}:{error}", path.display()))?
         .expand_with(&command.supplied)
         .map_err(|error| format!("{}:{error}", path.display()))?;
+    validate_destination_types(&config, path)?;
     let staging_directory = config.maildir().map(PathBuf::from);
     if let Some(maildir) = &staging_directory {
         validate_maildir_path(maildir)
@@ -97,6 +100,30 @@ fn run() -> Result<(), String> {
             }
         }
     }
+}
+
+fn validate_destination_types(config: &config::Config, rc_path: &Path) -> Result<(), String> {
+    // Recipe selection depends on hostile message data, so every reachable
+    // backend must be known before stdin is touched. Validate the complete rc
+    // file here instead of waiting until a selected recipe opens its sink.
+    for statement in &config.statements {
+        let Statement::Recipe(recipe) = statement else {
+            continue;
+        };
+        let message = match &recipe.destination {
+            Destination::Maildir(_) => continue,
+            Destination::Mbox(_) => "mbox delivery is not implemented",
+            Destination::Auto(_) => {
+                "destination type is ambiguous; use an explicit maildir: or mbox: prefix"
+            }
+        };
+        return Err(format!(
+            "{}:line {}: {message}",
+            rc_path.display(),
+            recipe.action_line
+        ));
+    }
+    Ok(())
 }
 
 fn deliver_decided(
