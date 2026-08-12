@@ -5,7 +5,7 @@ use super::{
     MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
     MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS,
     MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, ParseError, Recipe,
-    RegexCondition, Statement,
+    RegexCondition, Statement, VariableSource, variable_policy,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -115,11 +115,20 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
     if name == "MAILDIR" {
         check_path_length(value, line_number, "MAILDIR path")?;
     }
+    let target = variable_policy(name)
+        .assignment_target(VariableSource::RcFile)
+        .ok_or_else(|| {
+            ParseError::new(
+                line_number,
+                format!("variable {name} cannot be assigned in an rc file"),
+            )
+        })?;
 
     Ok(Some(Assignment {
         line: line_number,
         name: name.to_owned(),
         value: value.to_owned(),
+        target,
     }))
 }
 
@@ -383,6 +392,7 @@ mod tests {
                 line: 1,
                 name: "MAILDIR".into(),
                 value: "/srv/mail".into(),
+                target: crate::config::AssignmentTarget::Maildir,
             })
         );
         assert_eq!(
@@ -410,6 +420,27 @@ mod tests {
         };
 
         assert_eq!(recipe.destination, Destination::Maildir("inbox/".into()));
+    }
+
+    #[test]
+    fn classifies_user_assignments_for_future_expansion() {
+        let config = parse("USER_VALUE=text\n").unwrap();
+        let Statement::Assignment(assignment) = &config.statements[0] else {
+            panic!("expected assignment");
+        };
+
+        assert_eq!(assignment.target, crate::config::AssignmentTarget::User);
+    }
+
+    #[test]
+    fn rejects_runtime_variable_assignment() {
+        let error = parse("LASTFOLDER=forged\n").unwrap_err();
+
+        assert_eq!(error.line, 1);
+        assert_eq!(
+            error.message,
+            "variable LASTFOLDER cannot be assigned in an rc file"
+        );
     }
 
     #[test]

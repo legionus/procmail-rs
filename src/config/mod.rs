@@ -1,10 +1,14 @@
 mod parser;
+mod variables;
 
 use std::fmt;
 
 use regex::bytes::Regex;
 
 pub use parser::parse;
+pub use variables::{
+    AssignmentTarget, MessageLimitVariable, VariablePolicy, VariableSource, variable_policy,
+};
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;
 pub const MAX_ASSIGNMENT_VALUE_LEN: usize = 64 * 1024;
@@ -30,7 +34,7 @@ impl Config {
             let Statement::Assignment(assignment) = statement else {
                 return None;
             };
-            (assignment.name == "MAILDIR").then_some(assignment.value.as_str())
+            (assignment.target == AssignmentTarget::Maildir).then_some(assignment.value.as_str())
         })
     }
 }
@@ -46,6 +50,7 @@ pub struct Assignment {
     pub line: usize,
     pub name: String,
     pub value: String,
+    pub target: AssignmentTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

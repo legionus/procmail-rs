@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::config::{Config, Statement};
+use crate::config::{AssignmentTarget, Config, MessageLimitVariable, Statement};
 
 pub use crate::config::MAX_RC_SIZE;
 
@@ -39,9 +39,10 @@ impl MessageLimits {
             let Statement::Assignment(assignment) = statement else {
                 continue;
             };
-            let Some((target, ceiling)) = limit_target(&mut limits, &assignment.name) else {
+            let AssignmentTarget::MessageLimit(variable) = assignment.target else {
                 continue;
             };
+            let (target, ceiling) = limit_target(&mut limits, variable);
             let value = parse_size(&assignment.value).map_err(|reason| LimitConfigError {
                 line: assignment.line,
                 name: assignment.name.clone(),
@@ -80,14 +81,13 @@ impl fmt::Display for LimitConfigError {
 
 impl std::error::Error for LimitConfigError {}
 
-fn limit_target<'a>(limits: &'a mut MessageLimits, name: &str) -> Option<(&'a mut usize, usize)> {
-    match name {
-        "LIMIT_MSG_SIZE" => Some((&mut limits.message_size, MAX_MESSAGE_SIZE)),
-        "LIMIT_MSG_HEADERS" => Some((&mut limits.headers_size, 16 * MIB)),
-        "LIMIT_MSG_BODY" => Some((&mut limits.body_size, MAX_MESSAGE_SIZE)),
-        "LIMIT_HEADER_LINE" => Some((&mut limits.header_line_size, MIB)),
-        "LIMIT_HEADER_FIELD" => Some((&mut limits.header_field_size, 16 * MIB)),
-        _ => None,
+fn limit_target(limits: &mut MessageLimits, variable: MessageLimitVariable) -> (&mut usize, usize) {
+    match variable {
+        MessageLimitVariable::MessageSize => (&mut limits.message_size, MAX_MESSAGE_SIZE),
+        MessageLimitVariable::HeadersSize => (&mut limits.headers_size, 16 * MIB),
+        MessageLimitVariable::BodySize => (&mut limits.body_size, MAX_MESSAGE_SIZE),
+        MessageLimitVariable::HeaderLineSize => (&mut limits.header_line_size, MIB),
+        MessageLimitVariable::HeaderFieldSize => (&mut limits.header_field_size, 16 * MIB),
     }
 }
 
