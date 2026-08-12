@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
+//! Delivery into an existing Maildir directory structure.
+//!
+//! This backend never creates, changes ownership of, or changes permissions
+//! on the Maildir directories. A pending message is created with the process's
+//! filesystem identity and requests mode `0600`; the process umask may remove
+//! owner permissions but cannot grant access to group or other users.
+
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
@@ -14,6 +21,7 @@ use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, openat, renameat_with,
 use super::{PendingSink, PublishedDelivery};
 
 const MAX_NAME_ATTEMPTS: u64 = 128;
+const MAILDIR_FILE_MODE: u32 = 0o600;
 static NEXT_NAME: AtomicU64 = AtomicU64::new(0);
 
 /// A pending delivery into an existing Maildir.
@@ -48,7 +56,7 @@ impl MaildirSink {
                 &tmp_dir,
                 name.as_str(),
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::from_raw_mode(0o600),
+                Mode::from_raw_mode(MAILDIR_FILE_MODE),
             ) {
                 Ok(fd) => {
                     return Ok(Self {
@@ -297,12 +305,12 @@ mod tests {
     }
 
     #[test]
-    fn creates_private_file_mode() {
+    fn creates_a_file_without_group_or_other_access() {
         let maildir = TestMaildir::create();
         let sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
         let metadata = fs::metadata(maildir.path().join("tmp").join(&sink.name)).unwrap();
 
-        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.mode() & 0o777 & !MAILDIR_FILE_MODE, 0);
         PendingSink::abort(sink).unwrap();
     }
 
