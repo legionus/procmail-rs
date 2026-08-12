@@ -40,6 +40,7 @@ pub struct ExecutionPlan {
 
 #[derive(Debug)]
 struct CompiledRecipe {
+    line: usize,
     assignments: Vec<(String, String)>,
     conditions: Vec<CompiledCondition>,
     destination: Destination,
@@ -59,6 +60,94 @@ enum CompiledConditionKind {
     MessageRegex(Regex),
     SmallerThan(usize),
     LargerThan(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanExplanation {
+    requirements: InputRequirements,
+    requires_ordered_delivery: bool,
+    recipes: Vec<RecipeExplanation>,
+}
+
+impl PlanExplanation {
+    pub fn requirements(&self) -> InputRequirements {
+        self.requirements
+    }
+
+    pub fn requires_ordered_delivery(&self) -> bool {
+        self.requires_ordered_delivery
+    }
+
+    pub fn recipes(&self) -> &[RecipeExplanation] {
+        &self.recipes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeExplanation {
+    line: usize,
+    assignment_count: usize,
+    conditions: Vec<ConditionExplanation>,
+    destination: DestinationKind,
+    copy: bool,
+    defers_destination: bool,
+}
+
+impl RecipeExplanation {
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    pub fn assignment_count(&self) -> usize {
+        self.assignment_count
+    }
+
+    pub fn conditions(&self) -> &[ConditionExplanation] {
+        &self.conditions
+    }
+
+    pub fn destination(&self) -> DestinationKind {
+        self.destination
+    }
+
+    pub fn is_copy(&self) -> bool {
+        self.copy
+    }
+
+    pub fn defers_destination(&self) -> bool {
+        self.defers_destination
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConditionExplanation {
+    negated: bool,
+    kind: ConditionKindExplanation,
+}
+
+impl ConditionExplanation {
+    pub fn is_negated(self) -> bool {
+        self.negated
+    }
+
+    pub fn kind(self) -> ConditionKindExplanation {
+        self.kind
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionKindExplanation {
+    HeaderRegex,
+    BodyRegex,
+    MessageRegex,
+    SmallerThan,
+    LargerThan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationKind {
+    Maildir,
+    Mbox,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +279,18 @@ impl ExecutionPlan {
 
     pub fn requires_ordered_delivery(&self) -> bool {
         self.requires_ordered_delivery
+    }
+
+    pub fn explain(&self) -> PlanExplanation {
+        // Explain only execution shape. Values, patterns, thresholds, and
+        // paths can contain private configuration data and are unnecessary
+        // for deciding which message sections and delivery phases are used.
+        let recipes = self.recipes.iter().map(CompiledRecipe::explain).collect();
+        PlanExplanation {
+            requirements: self.requirements(),
+            requires_ordered_delivery: self.requires_ordered_delivery,
+            recipes,
+        }
     }
 
     pub fn evaluate_headers(&self, head: &MessageHead) -> HeaderEvaluation {
@@ -386,6 +487,7 @@ impl CompiledRecipe {
         }
 
         Self {
+            line: recipe.line,
             assignments,
             conditions,
             destination: recipe.destination.clone(),
@@ -396,6 +498,26 @@ impl CompiledRecipe {
     fn apply_assignments(&self, runtime: &mut RuntimeVariables) {
         for (name, value) in &self.assignments {
             runtime.set(name.clone(), value.clone());
+        }
+    }
+
+    fn explain(&self) -> RecipeExplanation {
+        let conditions = self
+            .conditions
+            .iter()
+            .map(CompiledCondition::explain)
+            .collect();
+        let destination = match &self.destination {
+            Destination::Maildir(_) => DestinationKind::Maildir,
+            Destination::Mbox(_) => DestinationKind::Mbox,
+        };
+        RecipeExplanation {
+            line: self.line,
+            assignment_count: self.assignments.len(),
+            conditions,
+            destination,
+            copy: self.copy,
+            defers_destination: self.destination.needs_runtime_variables(),
         }
     }
 
@@ -434,6 +556,20 @@ impl CompiledRecipe {
 }
 
 impl CompiledCondition {
+    fn explain(&self) -> ConditionExplanation {
+        let kind = match &self.kind {
+            CompiledConditionKind::HeaderRegex(_) => ConditionKindExplanation::HeaderRegex,
+            CompiledConditionKind::BodyRegex(_) => ConditionKindExplanation::BodyRegex,
+            CompiledConditionKind::MessageRegex(_) => ConditionKindExplanation::MessageRegex,
+            CompiledConditionKind::SmallerThan(_) => ConditionKindExplanation::SmallerThan,
+            CompiledConditionKind::LargerThan(_) => ConditionKindExplanation::LargerThan,
+        };
+        ConditionExplanation {
+            negated: self.negated,
+            kind,
+        }
+    }
+
     fn requirements(&self) -> InputRequirements {
         match self.kind {
             CompiledConditionKind::HeaderRegex(_) => InputRequirements {
@@ -653,6 +789,47 @@ mod tests {
         let size = compile(":0\n* < 100\ninbox/\n");
         assert!(!size.requirements().needs_body_contents);
         assert!(size.requirements().needs_end_of_message);
+    }
+
+    #[test]
+    fn explains_plan_shape_without_private_configuration_values() {
+        let config = config::parse(
+            "PRIVATE_TOKEN=do-not-print\n:0 HBc\n* ! private-pattern\nmaildir:${LASTFOLDER:-private-path}\n",
+        )
+        .unwrap()
+        .expand()
+        .unwrap();
+        let explanation = ExecutionPlan::compile(&config).explain();
+
+        assert!(explanation.requirements().needs_headers);
+        assert!(explanation.requirements().needs_body_contents);
+        assert!(explanation.requirements().needs_end_of_message);
+        assert!(explanation.requires_ordered_delivery());
+        let [recipe] = explanation.recipes() else {
+            panic!("expected one recipe");
+        };
+        assert_eq!(recipe.line(), 2);
+        assert_eq!(recipe.assignment_count(), 1);
+        assert_eq!(recipe.destination(), DestinationKind::Maildir);
+        assert!(recipe.is_copy());
+        assert!(recipe.defers_destination());
+        assert_eq!(
+            recipe.conditions(),
+            [ConditionExplanation {
+                negated: true,
+                kind: ConditionKindExplanation::MessageRegex,
+            }]
+        );
+
+        let rendered = format!("{explanation:?}");
+        for private in [
+            "PRIVATE_TOKEN",
+            "do-not-print",
+            "private-pattern",
+            "private-path",
+        ] {
+            assert!(!rendered.contains(private), "leaked {private:?}");
+        }
     }
 
     #[test]
