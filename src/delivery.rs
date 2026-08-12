@@ -3,6 +3,9 @@ use std::io::{self, BufRead, Write};
 
 use crate::message::{MessageHead, MessageReadError, StreamedMessage};
 
+#[cfg(target_os = "linux")]
+pub mod maildir;
+
 pub const MAX_PENDING_SINKS: usize = 256;
 
 /// A destination which keeps written bytes private until `commit` succeeds.

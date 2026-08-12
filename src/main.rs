@@ -6,8 +6,10 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use procmail_rs::config;
-use procmail_rs::eval::{ExecutionPlan, HeaderEvaluation};
+use procmail_rs::config::{self, Destination};
+use procmail_rs::delivery::maildir::MaildirSink;
+use procmail_rs::delivery::{PendingFanout, PendingSink};
+use procmail_rs::eval::{DeliveryPlan, ExecutionPlan, HeaderEvaluation};
 use procmail_rs::limits::{MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 
@@ -46,9 +48,7 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("cannot read message headers from stdin: {error}"))?;
             let delivery = match plan.evaluate_headers(&head) {
                 HeaderEvaluation::Decided(delivery) => {
-                    head.stream_to(&mut stdin, &mut io::sink())
-                        .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
-                    delivery
+                    return deliver_decided(head, &mut stdin, &delivery);
                 }
                 HeaderEvaluation::NeedsMessage(continuation)
                     if continuation.requirements().needs_body_contents =>
@@ -72,6 +72,48 @@ fn run() -> Result<(), String> {
                 delivery.destinations().len()
             ))
         }
+    }
+}
+
+fn deliver_decided(
+    head: procmail_rs::message::MessageHead,
+    reader: &mut impl io::BufRead,
+    plan: &DeliveryPlan,
+) -> Result<(), String> {
+    let mut sinks: Vec<Box<dyn PendingSink>> = Vec::with_capacity(plan.destinations().len());
+    for destination in plan.destinations() {
+        match destination {
+            Destination::Maildir(path) => {
+                let sink = MaildirSink::create(Path::new(path))
+                    .map_err(|error| format!("cannot open Maildir {path}: {error}"))?;
+                sinks.push(Box::new(sink));
+            }
+            Destination::Mbox(path) => {
+                return Err(format!("mbox delivery is not implemented yet: {path}"));
+            }
+            Destination::Auto(path) => {
+                return Err(format!(
+                    "automatic destination detection is not implemented yet: {path}"
+                ));
+            }
+        }
+    }
+
+    let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
+    let validated = pending
+        .stream(head, reader)
+        .map_err(|error| format!("cannot stream message from stdin: {error}"))?;
+    validated
+        .commit()
+        .map_err(|error| format!("cannot publish Maildir delivery: {error}"))?;
+
+    if plan.original_delivered() {
+        Ok(())
+    } else {
+        Err(format!(
+            "original message was not delivered (published {} copy destination(s))",
+            plan.copies()
+        ))
     }
 }
 

@@ -18,6 +18,13 @@ fn config_file(contents: &str) -> PathBuf {
     path
 }
 
+fn create_maildir(path: &std::path::Path) {
+    fs::create_dir(path).unwrap();
+    fs::create_dir(path.join("tmp")).unwrap();
+    fs::create_dir(path.join("new")).unwrap();
+    fs::create_dir(path.join("cur")).unwrap();
+}
+
 #[test]
 fn check_accepts_valid_config() {
     let path = config_file(":0\nmaildir:inbox\n");
@@ -71,7 +78,14 @@ fn check_rejects_invalid_message_limit() {
 
 #[test]
 fn filter_reports_body_limit() {
-    let path = config_file("LIMIT_MSG_BODY=3\n:0\ninbox/\n");
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("inbox");
+    create_maildir(&maildir);
+    fs::write(
+        &path,
+        format!("LIMIT_MSG_BODY=3\n:0\nmaildir:{}\n", maildir.display()),
+    )
+    .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["filter", "--config"])
         .arg(&path)
@@ -89,5 +103,38 @@ fn filter_reports_body_limit() {
             .unwrap()
             .contains("message exceeds LIMIT_MSG_BODY (3 bytes)")
     );
+    assert_eq!(fs::read_dir(maildir.join("tmp")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(maildir.join("new")).unwrap().count(), 0);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_streams_header_decided_message_to_maildir() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("inbox");
+    create_maildir(&maildir);
+    fs::write(&path, format!(":0\nmaildir:{}\n", maildir.display())).unwrap();
+    let input = b"Subject: selected\n\nbinary:\xff\x00body";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read_dir(maildir.join("tmp")).unwrap().count(), 0);
+    let files: Vec<_> = fs::read_dir(maildir.join("new"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(fs::read(&files[0]).unwrap(), input);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
