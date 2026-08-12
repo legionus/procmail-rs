@@ -7,6 +7,8 @@ use std::fmt;
 
 use crate::config::MAX_ASSIGNMENT_NAME_LEN;
 
+pub const MAX_MEMORY_TRACE_EVENTS: usize = 16 * 1024;
+
 pub trait TraceSink {
     fn record(&mut self, event: TraceEvent);
 }
@@ -16,6 +18,35 @@ pub struct NoTrace;
 
 impl TraceSink for NoTrace {
     fn record(&mut self, _: TraceEvent) {}
+}
+
+#[derive(Debug, Default)]
+pub struct MemoryTrace {
+    events: Vec<TraceEvent>,
+    truncated: bool,
+}
+
+impl MemoryTrace {
+    pub fn events(&self) -> &[TraceEvent] {
+        &self.events
+    }
+
+    pub fn was_truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+impl TraceSink for MemoryTrace {
+    fn record(&mut self, event: TraceEvent) {
+        // Test traces still consume configuration-controlled events. Stop at
+        // a fixed count instead of allowing a forgotten test sink to grow
+        // without a limit during adversarial or fuzz-style execution.
+        if self.events.len() < MAX_MEMORY_TRACE_EVENTS {
+            self.events.push(event);
+        } else {
+            self.truncated = true;
+        }
+    }
 }
 
 /// One filtering event in execution order.
@@ -192,5 +223,33 @@ mod tests {
         ];
 
         assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn memory_trace_preserves_order_and_stops_at_its_limit() {
+        let mut trace = MemoryTrace::default();
+        for line in 0..=MAX_MEMORY_TRACE_EVENTS {
+            trace.record(TraceEvent::RecipeEvaluated {
+                line,
+                decision: RecipeDecision::Skipped,
+            });
+        }
+
+        assert_eq!(trace.events().len(), MAX_MEMORY_TRACE_EVENTS);
+        assert_eq!(
+            trace.events().first(),
+            Some(&TraceEvent::RecipeEvaluated {
+                line: 0,
+                decision: RecipeDecision::Skipped,
+            })
+        );
+        assert_eq!(
+            trace.events().last(),
+            Some(&TraceEvent::RecipeEvaluated {
+                line: MAX_MEMORY_TRACE_EVENTS - 1,
+                decision: RecipeDecision::Skipped,
+            })
+        );
+        assert!(trace.was_truncated());
     }
 }

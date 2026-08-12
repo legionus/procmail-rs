@@ -860,25 +860,10 @@ mod tests {
     use super::*;
     use crate::config;
     use crate::limits::MessageLimits;
-    use crate::trace::{TraceEvent, TraceSink};
-
-    #[derive(Default)]
-    struct EventCounter {
-        assignments: usize,
-        conditions: usize,
-        recipes: usize,
-    }
-
-    impl TraceSink for EventCounter {
-        fn record(&mut self, event: TraceEvent) {
-            match event {
-                TraceEvent::VariableAssigned { .. } => self.assignments += 1,
-                TraceEvent::ConditionEvaluated { .. } => self.conditions += 1,
-                TraceEvent::RecipeEvaluated { .. } => self.recipes += 1,
-                _ => {}
-            }
-        }
-    }
+    use crate::trace::{
+        ConditionKind as TraceConditionKind, MemoryTrace, RecipeDecision, TraceEvent, TraceName,
+        VariableSource as TraceVariableSource,
+    };
 
     #[derive(Default)]
     struct Recorder {
@@ -937,7 +922,7 @@ mod tests {
             .unwrap();
         let plan = ExecutionPlan::compile(&config);
         let mut runtime = RuntimeVariables::default();
-        let mut trace = EventCounter::default();
+        let mut trace = MemoryTrace::default();
 
         let result = plan.evaluate_headers_with_trace(
             &head(b"Subject: wanted\n\nbody"),
@@ -946,9 +931,28 @@ mod tests {
         );
 
         assert!(matches!(result, HeaderEvaluation::Decided(_)));
-        assert_eq!(trace.assignments, 1);
-        assert_eq!(trace.conditions, 1);
-        assert_eq!(trace.recipes, 1);
+        assert_eq!(
+            trace.events(),
+            [
+                TraceEvent::VariableAssigned {
+                    line: Some(1),
+                    name: TraceName::new("BOX").unwrap(),
+                    source: TraceVariableSource::RcFile,
+                },
+                TraceEvent::ConditionEvaluated {
+                    recipe_line: 2,
+                    condition_index: 0,
+                    kind: TraceConditionKind::HeaderRegex,
+                    negated: false,
+                    matched: true,
+                },
+                TraceEvent::RecipeEvaluated {
+                    line: 2,
+                    decision: RecipeDecision::Selected,
+                },
+            ]
+        );
+        assert!(!trace.was_truncated());
     }
 
     #[test]
