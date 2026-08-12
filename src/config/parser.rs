@@ -2,7 +2,8 @@ use regex::bytes::RegexBuilder;
 
 use super::{
     Assignment, Condition, ConditionKind, Config, Destination, MAX_CONDITIONS_PER_RECIPE,
-    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_STATEMENTS, ParseError, Recipe, Statement,
+    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, ParseError,
+    Recipe, Statement,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -136,10 +137,16 @@ fn parse_recipe(
             "forward actions are not supported",
         ));
     }
-    if action.starts_with('{') || action == "}" {
+    if action.starts_with('{') {
         return Err(ParseError::new(
             index + 1,
-            "recipe blocks are not supported yet",
+            format!("recipe nesting depth 1 exceeds the hard limit of {MAX_RECIPE_NESTING_DEPTH}"),
+        ));
+    }
+    if action == "}" {
+        return Err(ParseError::new(
+            index + 1,
+            "closing recipe block has no matching opening block",
         ));
     }
     if action.starts_with(':') {
@@ -342,6 +349,31 @@ mod tests {
 
         assert_eq!(error.line, 1);
         assert_eq!(error.message, "recipe flag 'f' is not supported yet");
+    }
+
+    #[test]
+    fn enforces_zero_recipe_nesting_depth() {
+        assert_eq!(MAX_RECIPE_NESTING_DEPTH, 0);
+        assert!(parse(":0\ninbox/\n").is_ok());
+
+        let error = parse(":0\n{\n:0\ninbox/\n}\n").unwrap_err();
+
+        assert_eq!(error.line, 2);
+        assert_eq!(
+            error.message,
+            "recipe nesting depth 1 exceeds the hard limit of 0"
+        );
+    }
+
+    #[test]
+    fn rejects_unmatched_closing_recipe_block() {
+        let error = parse(":0\n}\n").unwrap_err();
+
+        assert_eq!(error.line, 2);
+        assert_eq!(
+            error.message,
+            "closing recipe block has no matching opening block"
+        );
     }
 
     #[test]
