@@ -1,13 +1,14 @@
 use regex::bytes::RegexBuilder;
 
 use super::{
-    Assignment, Condition, ConditionKind, Config, Destination, MAX_RC_STATEMENTS, ParseError,
-    Recipe, Statement,
+    Assignment, Condition, ConditionKind, Config, Destination, MAX_RC_RECIPES, MAX_RC_STATEMENTS,
+    ParseError, Recipe, Statement,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
     let lines: Vec<&str> = input.lines().collect();
     let mut statements = Vec::new();
+    let mut recipe_count = 0;
     let mut index = 0;
 
     while index < lines.len() {
@@ -22,8 +23,12 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
         check_statement_limit(statements.len(), line_number)?;
 
         if line.starts_with(':') {
+            check_recipe_limit(recipe_count, line_number)?;
             let (recipe, next) = parse_recipe(&lines, index)?;
             statements.push(Statement::Recipe(recipe));
+            recipe_count = recipe_count
+                .checked_add(1)
+                .ok_or_else(|| ParseError::new(line_number, "rc recipe count overflows"))?;
             index = next;
             continue;
         }
@@ -41,6 +46,16 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
     }
 
     Ok(Config { statements })
+}
+
+fn check_recipe_limit(count: usize, line: usize) -> Result<(), ParseError> {
+    if count >= MAX_RC_RECIPES {
+        return Err(ParseError::new(
+            line,
+            format!("rc recipe count exceeds the hard limit of {MAX_RC_RECIPES}"),
+        ));
+    }
+    Ok(())
 }
 
 fn check_statement_limit(count: usize, line: usize) -> Result<(), ParseError> {
@@ -330,5 +345,32 @@ mod tests {
         source.push_str("# comment\n\n");
 
         assert_eq!(parse(&source).unwrap().statements.len(), MAX_RC_STATEMENTS);
+    }
+
+    #[test]
+    fn enforces_recipe_count_at_the_boundary() {
+        for count in [MAX_RC_RECIPES - 1, MAX_RC_RECIPES, MAX_RC_RECIPES + 1] {
+            let source = ":0\ninbox/\n".repeat(count);
+            let result = parse(&source);
+
+            if count <= MAX_RC_RECIPES {
+                assert_eq!(result.unwrap().statements.len(), count);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 2 * MAX_RC_RECIPES + 1);
+                assert_eq!(
+                    error.message,
+                    format!("rc recipe count exceeds the hard limit of {MAX_RC_RECIPES}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn assignments_do_not_count_as_recipes() {
+        let mut source = ":0\ninbox/\n".repeat(MAX_RC_RECIPES);
+        source.push_str("MAILDIR=mail\n");
+
+        assert_eq!(parse(&source).unwrap().statements.len(), MAX_RC_RECIPES + 1);
     }
 }
