@@ -1,7 +1,8 @@
 use regex::bytes::RegexBuilder;
 
 use super::{
-    Assignment, Condition, ConditionKind, Config, Destination, ParseError, Recipe, Statement,
+    Assignment, Condition, ConditionKind, Config, Destination, MAX_RC_STATEMENTS, ParseError,
+    Recipe, Statement,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -17,6 +18,8 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
             index += 1;
             continue;
         }
+
+        check_statement_limit(statements.len(), line_number)?;
 
         if line.starts_with(':') {
             let (recipe, next) = parse_recipe(&lines, index)?;
@@ -38,6 +41,16 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
     }
 
     Ok(Config { statements })
+}
+
+fn check_statement_limit(count: usize, line: usize) -> Result<(), ParseError> {
+    if count >= MAX_RC_STATEMENTS {
+        return Err(ParseError::new(
+            line,
+            format!("rc statement count exceeds the hard limit of {MAX_RC_STATEMENTS}"),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_assignment(line: &str, line_number: usize) -> Option<Assignment> {
@@ -286,5 +299,36 @@ mod tests {
 
         assert_eq!(error.line, 2);
         assert!(error.message.starts_with("invalid regular expression:"));
+    }
+
+    #[test]
+    fn enforces_statement_count_at_the_boundary() {
+        for count in [
+            MAX_RC_STATEMENTS - 1,
+            MAX_RC_STATEMENTS,
+            MAX_RC_STATEMENTS + 1,
+        ] {
+            let source = "A=\n".repeat(count);
+            let result = parse(&source);
+
+            if count <= MAX_RC_STATEMENTS {
+                assert_eq!(result.unwrap().statements.len(), count);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, MAX_RC_STATEMENTS + 1);
+                assert_eq!(
+                    error.message,
+                    format!("rc statement count exceeds the hard limit of {MAX_RC_STATEMENTS}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn comments_and_blank_lines_do_not_count_as_statements() {
+        let mut source = "A=\n".repeat(MAX_RC_STATEMENTS);
+        source.push_str("# comment\n\n");
+
+        assert_eq!(parse(&source).unwrap().statements.len(), MAX_RC_STATEMENTS);
     }
 }

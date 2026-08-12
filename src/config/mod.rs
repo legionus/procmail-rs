@@ -5,6 +5,8 @@ use std::fmt;
 pub(crate) use parser::build_regex;
 pub use parser::parse;
 
+pub const MAX_RC_STATEMENTS: usize = 4096;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub statements: Vec<Statement>,
