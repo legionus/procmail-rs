@@ -13,6 +13,7 @@ use crate::config::{AssignmentTarget, Config, Statement};
 pub const MAX_TRACE_EVENT_SIZE: usize = 1024;
 pub const MAX_TRACE_EVENTS: usize = 16 * 1024;
 pub const MAX_TRACE_BYTES: usize = 1024 * 1024;
+pub const MAX_TRACE_VALUE_SIZE: usize = 256;
 pub const MAX_MEMORY_TRACE_EVENTS: usize = MAX_TRACE_EVENTS;
 
 pub struct EscapedBytes<'a>(&'a [u8]);
@@ -54,6 +55,7 @@ pub enum LogFailurePolicy {
 pub struct TraceConfig {
     verbose: bool,
     logfile: Option<String>,
+    detail: TraceDetail,
     failure_policy: LogFailurePolicy,
 }
 
@@ -62,6 +64,7 @@ impl Default for TraceConfig {
         Self {
             verbose: false,
             logfile: None,
+            detail: TraceDetail::Metadata,
             failure_policy: LogFailurePolicy::Advisory,
         }
     }
@@ -89,6 +92,19 @@ impl TraceConfig {
                     settings.logfile =
                         (!assignment.value.is_empty()).then(|| assignment.value.clone());
                 }
+                AssignmentTarget::LogDetail => {
+                    settings.detail = match assignment.value.as_str() {
+                        "metadata" => TraceDetail::Metadata,
+                        "values" => TraceDetail::Values,
+                        _ => {
+                            return Err(TraceConfigError {
+                                line: assignment.line,
+                                name: assignment.name.clone(),
+                                reason: "expected 'metadata' or 'values'".to_owned(),
+                            });
+                        }
+                    };
+                }
                 _ => {}
             }
         }
@@ -109,6 +125,10 @@ impl TraceConfig {
 
     pub fn failure_policy(&self) -> LogFailurePolicy {
         self.failure_policy
+    }
+
+    pub fn detail(&self) -> TraceDetail {
+        self.detail
     }
 }
 
@@ -151,7 +171,24 @@ fn parse_procmail_boolean(value: &str) -> Option<bool> {
 }
 
 pub trait TraceSink {
+    fn detail(&self) -> TraceDetail {
+        TraceDetail::Metadata
+    }
+
     fn record(&mut self, event: TraceEvent);
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TraceDetail {
+    #[default]
+    Metadata,
+    Values,
+}
+
+impl TraceDetail {
+    pub fn includes_variable_values(self) -> bool {
+        self == Self::Values
+    }
 }
 
 #[derive(Debug, Default)]
@@ -167,6 +204,7 @@ pub struct BoundedTraceWriter<W> {
     events: usize,
     bytes: usize,
     stopped: Option<TraceStopReason>,
+    detail: TraceDetail,
 }
 
 impl<W> BoundedTraceWriter<W> {
@@ -176,6 +214,17 @@ impl<W> BoundedTraceWriter<W> {
             events: 0,
             bytes: 0,
             stopped: None,
+            detail: TraceDetail::Metadata,
+        }
+    }
+
+    pub fn with_detail(writer: W, detail: TraceDetail) -> Self {
+        Self {
+            writer,
+            events: 0,
+            bytes: 0,
+            stopped: None,
+            detail,
         }
     }
 
@@ -197,6 +246,10 @@ impl<W> BoundedTraceWriter<W> {
 }
 
 impl<W: Write> TraceSink for BoundedTraceWriter<W> {
+    fn detail(&self) -> TraceDetail {
+        self.detail
+    }
+
     fn record(&mut self, event: TraceEvent) {
         if self.stopped.is_some() {
             return;
@@ -278,12 +331,28 @@ impl fmt::Write for BoundedText {
 
 fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
     match event {
-        TraceEvent::VariableAssigned { line, name, source } => write!(
-            output,
-            "event=variable-assigned line={} name=\"{}\" source={source:?}",
-            line.map_or(0, |value| value),
-            EscapedBytes::new(name.as_str().as_bytes())
-        ),
+        TraceEvent::VariableAssigned {
+            line,
+            name,
+            source,
+            value,
+        } => {
+            write!(
+                output,
+                "event=variable-assigned line={} name=\"{}\" source={source:?}",
+                line.map_or(0, |value| value),
+                EscapedBytes::new(name.as_str().as_bytes())
+            )?;
+            if let Some(value) = value {
+                write!(
+                    output,
+                    " value=\"{}\" value_truncated={}",
+                    EscapedBytes::new(value.as_bytes()),
+                    value.was_truncated()
+                )?;
+            }
+            Ok(())
+        }
         TraceEvent::LastFolderUpdated => output.write_str("event=last-folder-updated"),
         TraceEvent::ConditionEvaluated {
             recipe_line,
@@ -354,6 +423,7 @@ pub enum TraceEvent {
         line: Option<usize>,
         name: TraceName,
         source: VariableSource,
+        value: Option<TraceValue>,
     },
     LastFolderUpdated,
     ConditionEvaluated {
@@ -376,6 +446,30 @@ pub enum TraceEvent {
         recipe_line: usize,
         stage: ExternalCommandStage,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceValue {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl TraceValue {
+    pub fn new(value: &[u8]) -> Self {
+        let length = value.len().min(MAX_TRACE_VALUE_SIZE);
+        Self {
+            bytes: value[..length].to_vec(),
+            truncated: value.len() > length,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn was_truncated(&self) -> bool {
+        self.truncated
+    }
 }
 
 /// A bounded variable name taken from already validated configuration.
@@ -474,6 +568,7 @@ mod tests {
             line: Some(7),
             name: TraceName::new(name).unwrap(),
             source: VariableSource::RcFile,
+            value: None,
         }
     }
 
@@ -620,7 +715,7 @@ mod tests {
     #[test]
     fn reads_procmail_style_trace_controls_in_statement_order() {
         let config = crate::config::parse(
-            "MAILDIR=/mail\nVERBOSE=off\nLOGFILE=logs/first\nVERBOSE=YesPlease\nLOGFILE=$MAILDIR/log\n",
+            "MAILDIR=/mail\nVERBOSE=off\nLOGFILE=logs/first\nLOGDETAIL=metadata\nVERBOSE=YesPlease\nLOGFILE=$MAILDIR/log\nLOGDETAIL=values\n",
         )
         .unwrap()
         .expand()
@@ -630,6 +725,7 @@ mod tests {
         assert!(settings.enabled());
         assert!(settings.verbose());
         assert_eq!(settings.logfile(), Some("/mail/log"));
+        assert_eq!(settings.detail(), TraceDetail::Values);
     }
 
     #[test]
@@ -680,5 +776,34 @@ mod tests {
         let error = TraceConfig::from_config(&config).unwrap_err();
         assert_eq!(error.line, 1);
         assert_eq!(error.name, "VERBOSE");
+    }
+
+    #[test]
+    fn rejects_unknown_log_detail_with_its_source_line() {
+        let config = crate::config::parse("LOGDETAIL=everything\n:0\nmaildir:inbox\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+
+        let error = TraceConfig::from_config(&config).unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(error.name, "LOGDETAIL");
+    }
+
+    #[test]
+    fn high_detail_writer_escapes_and_truncates_variable_values() {
+        let mut trace = BoundedTraceWriter::with_detail(Vec::new(), TraceDetail::Values);
+        let value = [b"secret\n".as_slice(), &vec![b'x'; MAX_TRACE_VALUE_SIZE]].concat();
+        trace.record(TraceEvent::VariableAssigned {
+            line: Some(1),
+            name: TraceName::new("TOKEN").unwrap(),
+            source: VariableSource::RcFile,
+            value: Some(TraceValue::new(&value)),
+        });
+
+        let rendered = String::from_utf8(trace.into_inner()).unwrap();
+        assert!(rendered.contains("value=\"secret\\n"));
+        assert!(rendered.contains("value_truncated=true"));
+        assert_eq!(rendered.lines().count(), 1);
     }
 }

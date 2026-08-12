@@ -10,7 +10,7 @@ use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::runtime::RuntimeVariables;
 use crate::trace::{
     ConditionKind as TraceConditionKind, NoTrace, RecipeDecision, TraceEvent, TraceName, TraceSink,
-    VariableSource as TraceVariableSource,
+    TraceValue, VariableSource as TraceVariableSource,
 };
 
 pub trait Delivery {
@@ -575,6 +575,10 @@ impl CompiledRecipe {
                     line: assignment.line,
                     name,
                     source: assignment.source,
+                    value: trace
+                        .detail()
+                        .includes_variable_values()
+                        .then(|| TraceValue::new(assignment.value.as_bytes())),
                 });
             }
         }
@@ -938,6 +942,7 @@ mod tests {
                     line: Some(1),
                     name: TraceName::new("BOX").unwrap(),
                     source: TraceVariableSource::RcFile,
+                    value: None,
                 },
                 TraceEvent::ConditionEvaluated {
                     recipe_line: 2,
@@ -988,6 +993,28 @@ mod tests {
         assert!(rendered.contains("name=\"TOKEN\""));
         assert!(rendered.contains("event=condition"));
         assert!(rendered.contains("event=recipe"));
+    }
+
+    #[test]
+    fn variable_values_require_an_explicit_high_detail_sink() {
+        let config = config::parse("TOKEN=secret-value\n:0\nmaildir:inbox\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        let plan = ExecutionPlan::compile(&config);
+        let mut runtime = RuntimeVariables::default();
+        let mut trace =
+            BoundedTraceWriter::with_detail(Vec::new(), crate::trace::TraceDetail::Values);
+
+        let result = plan.evaluate_headers_with_trace(
+            &head(b"Subject: test\n\nbody"),
+            &mut runtime,
+            &mut trace,
+        );
+        assert!(matches!(result, HeaderEvaluation::Decided(_)));
+
+        let rendered = String::from_utf8(trace.into_inner()).unwrap();
+        assert!(rendered.contains("value=\"secret-value\""));
     }
 
     #[test]

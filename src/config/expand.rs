@@ -146,6 +146,7 @@ pub(super) fn expand(
                         MAX_PATH_EXPRESSION_LEN
                     }
                     AssignmentTarget::Verbose
+                    | AssignmentTarget::LogDetail
                     | AssignmentTarget::MessageLimit(_)
                     | AssignmentTarget::User => MAX_ASSIGNMENT_VALUE_LEN,
                 };
