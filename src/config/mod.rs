@@ -5,6 +5,8 @@ use std::fmt;
 pub(crate) use parser::build_regex;
 pub use parser::parse;
 
+pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
+pub const MAX_RC_CONDITIONS: usize = 4096;
 pub const MAX_RC_RECIPES: usize = 1024;
 pub const MAX_RC_STATEMENTS: usize = 4096;
 
