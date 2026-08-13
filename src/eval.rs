@@ -2,7 +2,6 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use std::fmt;
-use std::sync::Arc;
 
 use regex::bytes::Regex;
 
@@ -41,9 +40,6 @@ impl InputRequirements {
 #[derive(Debug)]
 pub struct ExecutionPlan {
     root: CompiledSequence,
-    recipes: Vec<CompiledRecipe>,
-    condition_group_count: usize,
-    suffix_requirements: Vec<InputRequirements>,
     requires_ordered_delivery: bool,
 }
 
@@ -68,42 +64,6 @@ enum CompiledAction {
         continuation: ContinuationMode,
     },
     Block(CompiledSequence),
-}
-
-#[derive(Debug)]
-struct CompiledRecipe {
-    line: usize,
-    assignments: Vec<CompiledAssignment>,
-    condition_groups: Vec<Arc<CompiledConditionGroup>>,
-    destination: Destination,
-    copy: bool,
-    requires_successful_predecessor: bool,
-    after_error: bool,
-    has_error_handler: bool,
-}
-
-#[derive(Debug)]
-struct CompiledConditionGroup {
-    id: usize,
-    line: usize,
-    conditions: Vec<CompiledCondition>,
-    prerequisite: Option<Arc<CompiledConditionGroup>>,
-    prerequisite_kind: PrerequisiteKind,
-    impossible: bool,
-    requirements: InputRequirements,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PrerequisiteKind {
-    None,
-    Matched,
-    ElseOpen,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct GroupResult<T> {
-    matched: T,
-    else_handled: T,
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +97,7 @@ struct SequenceExecution {
     pending_error: Option<EvalError>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PlanningExecution {
     destinations: Vec<Destination>,
     after_error: Vec<bool>,
@@ -146,12 +106,19 @@ struct PlanningExecution {
 }
 
 #[derive(Debug, Default)]
+struct HeaderPlanning {
+    execution: PlanningExecution,
+    frames: Vec<ContinuationFrame>,
+    requirements: InputRequirements,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct SequenceState {
     previous: Option<RecipeExecution>,
     chain_base_matched: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecipeExecution {
     conditions_matched: bool,
     else_handled: bool,
@@ -169,6 +136,13 @@ enum ActionExecution {
 enum SequenceControl {
     Continue,
     Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderControl {
+    Continue,
+    Stop,
+    Deferred,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,11 +278,16 @@ pub enum HeaderEvaluation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Continuation {
-    recipe_index: usize,
-    destinations: Vec<Destination>,
-    after_error: Vec<bool>,
-    copies: Vec<bool>,
+    frames: Vec<ContinuationFrame>,
+    execution: PlanningExecution,
+    runtime: RuntimeVariables,
     requirements: InputRequirements,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContinuationFrame {
+    recipe_index: usize,
+    state: SequenceState,
 }
 
 impl Continuation {
@@ -317,7 +296,7 @@ impl Continuation {
     }
 
     pub fn pending_destinations(&self) -> &[Destination] {
-        &self.destinations
+        &self.execution.destinations
     }
 }
 
@@ -531,11 +510,206 @@ impl CompiledSequence {
 
         Ok(SequenceControl::Continue)
     }
+
+    fn plan_headers(
+        &self,
+        head: &MessageHead,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        planning: &mut HeaderPlanning,
+        following: InputRequirements,
+    ) -> Result<HeaderControl, EvalError> {
+        let mut state = SequenceState::default();
+
+        for (index, recipe) in self.recipes.iter().enumerate() {
+            apply_assignments(&recipe.assignments, runtime, trace);
+            let gate = recipe.planning_gate(state);
+            let matched = if gate {
+                recipe.matches_headers(head, trace)
+            } else {
+                PartialMatch::False
+            };
+            if matched == PartialMatch::Deferred {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Deferred,
+                });
+                planning.frames.push(ContinuationFrame {
+                    recipe_index: index,
+                    state,
+                });
+                planning.requirements = self.requirements_from(index).union(following);
+                return Ok(HeaderControl::Deferred);
+            }
+
+            let conditions_matched = matched == PartialMatch::True;
+            let else_handled = recipe.else_handled(state, conditions_matched);
+            let has_error_handler = self.has_error_handler(index);
+            if conditions_matched && recipe.delivery_defers_header() {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Deferred,
+                });
+                planning.frames.push(ContinuationFrame {
+                    recipe_index: index,
+                    state,
+                });
+                planning.requirements = self.requirements_from(index).union(following);
+                return Ok(HeaderControl::Deferred);
+            }
+            let control = if conditions_matched {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Selected,
+                });
+                match &recipe.action {
+                    CompiledAction::Deliver { .. } => {
+                        let control = recipe.plan_delivery(
+                            runtime,
+                            &mut planning.execution,
+                            has_error_handler,
+                        )?;
+                        HeaderControl::from(control)
+                    }
+                    CompiledAction::Block(children) => {
+                        // Store the parent before descending so the path is
+                        // ordered from the root and never exceeds the parser's
+                        // recipe nesting limit.
+                        planning.frames.push(ContinuationFrame {
+                            recipe_index: index,
+                            state,
+                        });
+                        let child_following = self.requirements_from(index + 1).union(following);
+                        let child = children.plan_headers(
+                            head,
+                            runtime,
+                            trace,
+                            planning,
+                            child_following,
+                        )?;
+                        if child != HeaderControl::Deferred {
+                            planning.frames.pop();
+                        }
+                        child
+                    }
+                }
+            } else {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
+                HeaderControl::Continue
+            };
+            if control == HeaderControl::Deferred {
+                return Ok(control);
+            }
+            state.record(
+                recipe.control,
+                conditions_matched,
+                ActionExecution::Succeeded,
+                else_handled,
+            );
+            if control == HeaderControl::Stop {
+                return Ok(control);
+            }
+        }
+
+        Ok(HeaderControl::Continue)
+    }
+
+    fn requirements_from(&self, start: usize) -> InputRequirements {
+        let recipes = &self.recipes[start..];
+        let requirements = recipes
+            .iter()
+            .fold(InputRequirements::default(), |requirements, recipe| {
+                requirements.union(recipe.requirements())
+            });
+        if recipes.iter().any(CompiledNode::requires_ordered_delivery) {
+            requirements.union(InputRequirements {
+                needs_end_of_message: true,
+                ..InputRequirements::default()
+            })
+        } else {
+            requirements
+        }
+    }
+
+    fn has_error_handler(&self, index: usize) -> bool {
+        self.recipes
+            .get(index + 1)
+            .is_some_and(|next| next.control == ControlFlow::AfterPreviousError)
+    }
+
+    fn collect_explanations(
+        &self,
+        inherited_conditions: &[ConditionExplanation],
+        inherited_assignments: usize,
+        explanations: &mut Vec<RecipeExplanation>,
+    ) {
+        for recipe in &self.recipes {
+            let mut conditions = inherited_conditions.to_vec();
+            conditions.extend(recipe.conditions.iter().map(CompiledCondition::explain));
+            let assignment_count = inherited_assignments + recipe.assignments.len();
+            match &recipe.action {
+                CompiledAction::Deliver {
+                    destination,
+                    continuation,
+                } => {
+                    let destination_kind = match destination {
+                        Destination::Maildir(_) => DestinationKind::Maildir,
+                        Destination::Mbox(_) => DestinationKind::Mbox,
+                    };
+                    explanations.push(RecipeExplanation {
+                        line: recipe.line,
+                        assignment_count,
+                        conditions,
+                        destination: destination_kind,
+                        copy: *continuation == ContinuationMode::Continue,
+                        defers_destination: destination.needs_runtime_variables(),
+                    });
+                }
+                CompiledAction::Block(children) => {
+                    children.collect_explanations(&conditions, assignment_count, explanations);
+                }
+            }
+        }
+    }
+}
+
+impl From<SequenceControl> for HeaderControl {
+    fn from(control: SequenceControl) -> Self {
+        match control {
+            SequenceControl::Continue => Self::Continue,
+            SequenceControl::Stop => Self::Stop,
+        }
+    }
+}
+
+impl SequenceState {
+    fn record(
+        &mut self,
+        control: ControlFlow,
+        conditions_matched: bool,
+        action: ActionExecution,
+        else_handled: bool,
+    ) {
+        self.previous = Some(RecipeExecution {
+            conditions_matched,
+            else_handled,
+            action,
+        });
+        if !matches!(
+            control,
+            ControlFlow::AfterChainMatch | ControlFlow::AfterPreviousSuccess
+        ) {
+            self.chain_base_matched = Some(conditions_matched);
+        }
+    }
 }
 
 impl CompiledNode {
     fn compile(recipe: &Recipe, assignments: Vec<CompiledAssignment>) -> Self {
-        let conditions = CompiledRecipe::compile_conditions(recipe);
+        let conditions = compile_conditions(recipe);
         let action = match &recipe.action {
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
                 destination: destination.clone(),
@@ -611,6 +785,55 @@ impl CompiledNode {
         Ok(true)
     }
 
+    fn matches_headers(&self, head: &MessageHead, trace: &mut impl TraceSink) -> PartialMatch {
+        let mut result = PartialMatch::True;
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let matched = condition.matches_headers(head);
+            if matched != PartialMatch::Deferred {
+                condition.trace_result(self.line, index, matched, trace);
+            }
+            match matched {
+                PartialMatch::False => return PartialMatch::False,
+                PartialMatch::Deferred => result = PartialMatch::Deferred,
+                PartialMatch::True => {}
+            }
+        }
+        result
+    }
+
+    fn planning_gate(&self, state: SequenceState) -> bool {
+        match self.control {
+            ControlFlow::Independent => true,
+            ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
+            ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError => state
+                .previous
+                .is_some_and(|result| result.conditions_matched),
+            ControlFlow::Else => state.previous.is_none_or(|result| !result.else_handled),
+        }
+    }
+
+    fn else_handled(&self, state: SequenceState, conditions_matched: bool) -> bool {
+        if self.control == ControlFlow::Else {
+            state.previous.is_some_and(|result| result.else_handled) || conditions_matched
+        } else {
+            conditions_matched
+        }
+    }
+
+    fn delivery_defers_header(&self) -> bool {
+        match &self.action {
+            CompiledAction::Deliver { destination, .. } => {
+                destination.needs_runtime_variables()
+                    || matches!(destination, Destination::Mbox(_))
+                    || matches!(
+                        self.control,
+                        ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
+                    )
+            }
+            CompiledAction::Block(_) => false,
+        }
+    }
+
     fn execute_action(
         &self,
         message: &Message,
@@ -677,30 +900,43 @@ impl CompiledNode {
         has_error_handler: bool,
     ) -> Result<SequenceControl, EvalError> {
         match &self.action {
-            CompiledAction::Deliver {
-                destination,
-                continuation,
-            } => {
-                execution.destinations.push(
-                    destination
-                        .bind_with(|name| runtime.get(name).map(str::to_owned))
-                        .map_err(EvalError::Expansion)?,
-                );
-                execution
-                    .after_error
-                    .push(self.control == ControlFlow::AfterPreviousError);
-                let copy = *continuation == ContinuationMode::Continue;
-                execution.copies.push(copy);
-                execution.original_delivered |= !copy;
-                if copy || has_error_handler {
-                    Ok(SequenceControl::Continue)
-                } else {
-                    Ok(SequenceControl::Stop)
-                }
+            CompiledAction::Deliver { .. } => {
+                self.plan_delivery(runtime, execution, has_error_handler)
             }
             CompiledAction::Block(children) => {
                 children.plan_complete(message, runtime, trace, execution)
             }
+        }
+    }
+
+    fn plan_delivery(
+        &self,
+        runtime: &RuntimeVariables,
+        execution: &mut PlanningExecution,
+        has_error_handler: bool,
+    ) -> Result<SequenceControl, EvalError> {
+        let CompiledAction::Deliver {
+            destination,
+            continuation,
+        } = &self.action
+        else {
+            return Ok(SequenceControl::Continue);
+        };
+        execution.destinations.push(
+            destination
+                .bind_with(|name| runtime.get(name).map(str::to_owned))
+                .map_err(EvalError::Expansion)?,
+        );
+        execution
+            .after_error
+            .push(self.control == ControlFlow::AfterPreviousError);
+        let copy = *continuation == ContinuationMode::Continue;
+        execution.copies.push(copy);
+        execution.original_delivered |= !copy;
+        if copy || has_error_handler {
+            Ok(SequenceControl::Continue)
+        } else {
+            Ok(SequenceControl::Stop)
         }
     }
 }
@@ -739,30 +975,10 @@ impl ExecutionPlan {
             })
             .collect::<Vec<_>>();
         let root = CompiledSequence::compile(&config.statements, &mut initial_assignments.clone());
-        let mut recipes = Vec::new();
-        let mut assignments = initial_assignments;
-        let mut condition_group_count = 0;
-        compile_statements(
-            &config.statements,
-            &mut assignments,
-            &[],
-            &mut recipes,
-            &mut condition_group_count,
-        );
-
-        let mut suffix_requirements = vec![InputRequirements::default(); recipes.len() + 1];
-        for index in (0..recipes.len()).rev() {
-            suffix_requirements[index] = recipes[index]
-                .requirements()
-                .union(suffix_requirements[index + 1]);
-        }
         let requires_ordered_delivery = root.requires_ordered_delivery();
 
         Self {
             root,
-            recipes,
-            condition_group_count,
-            suffix_requirements,
             requires_ordered_delivery,
         }
     }
@@ -786,7 +1002,8 @@ impl ExecutionPlan {
         // Explain only execution shape. Values, patterns, thresholds, and
         // paths can contain private configuration data and are unnecessary
         // for deciding which message sections and delivery phases are used.
-        let recipes = self.recipes.iter().map(CompiledRecipe::explain).collect();
+        let mut recipes = Vec::new();
+        self.root.collect_explanations(&[], 0, &mut recipes);
         PlanExplanation {
             requirements: self.requirements(),
             requires_ordered_delivery: self.requires_ordered_delivery,
@@ -812,67 +1029,30 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> HeaderEvaluation {
-        let mut destinations = Vec::new();
-        let mut after_error = Vec::new();
-        let mut copies = Vec::new();
-        let mut group_results = vec![None; self.condition_group_count];
-
-        for (index, recipe) in self.recipes.iter().enumerate() {
-            recipe.apply_assignments(runtime, trace);
-            match recipe.matches_headers(head, &mut group_results, trace) {
-                PartialMatch::False => {
-                    trace.record(TraceEvent::RecipeEvaluated {
-                        line: recipe.line,
-                        decision: RecipeDecision::Skipped,
-                    });
-                    continue;
-                }
-                PartialMatch::Deferred => {
-                    trace.record(TraceEvent::RecipeEvaluated {
-                        line: recipe.line,
-                        decision: RecipeDecision::Deferred,
-                    });
-                    return HeaderEvaluation::NeedsMessage(Continuation {
-                        recipe_index: index,
-                        destinations,
-                        after_error,
-                        copies,
-                        requirements: self.suffix_requirements[index],
-                    });
-                }
-                PartialMatch::True => {
-                    trace.record(TraceEvent::RecipeEvaluated {
-                        line: recipe.line,
-                        decision: RecipeDecision::Selected,
-                    });
-                    let destination = match recipe
-                        .destination
-                        .bind_with(|name| runtime.get(name).map(str::to_owned))
-                    {
-                        Ok(destination) => destination,
-                        Err(error) => return HeaderEvaluation::Error(EvalError::Expansion(error)),
-                    };
-                    destinations.push(destination);
-                    after_error.push(recipe.after_error);
-                    copies.push(recipe.copy);
-                    if !recipe.copy && !recipe.has_error_handler {
-                        return HeaderEvaluation::Decided(DeliveryPlan {
-                            destinations,
-                            after_error,
-                            copies,
-                            original_delivered: true,
-                        });
-                    }
-                }
+        let mut planning = HeaderPlanning::default();
+        match self.root.plan_headers(
+            head,
+            runtime,
+            trace,
+            &mut planning,
+            InputRequirements::default(),
+        ) {
+            Ok(HeaderControl::Deferred) => HeaderEvaluation::NeedsMessage(Continuation {
+                frames: planning.frames,
+                execution: planning.execution,
+                runtime: runtime.clone(),
+                requirements: planning.requirements,
+            }),
+            Ok(HeaderControl::Continue | HeaderControl::Stop) => {
+                HeaderEvaluation::Decided(DeliveryPlan {
+                    destinations: planning.execution.destinations,
+                    after_error: planning.execution.after_error,
+                    copies: planning.execution.copies,
+                    original_delivered: planning.execution.original_delivered,
+                })
             }
+            Err(error) => HeaderEvaluation::Error(error),
         }
-
-        HeaderEvaluation::Decided(DeliveryPlan {
-            destinations,
-            after_error,
-            copies,
-            original_delivered: false,
-        })
     }
 
     pub fn resume_buffered(
@@ -880,7 +1060,12 @@ impl ExecutionPlan {
         continuation: Continuation,
         message: &Message,
     ) -> Result<DeliveryPlan, EvalError> {
-        self.resume(continuation, CompleteMessage::Buffered(message))
+        self.resume_tree(
+            continuation,
+            CompleteMessage::Buffered(message),
+            &mut RuntimeVariables::default(),
+            &mut NoTrace,
+        )
     }
 
     pub fn resume_streamed(
@@ -891,7 +1076,12 @@ impl ExecutionPlan {
         if continuation.requirements.needs_body_contents {
             return Err(EvalError::BodyWasNotBuffered);
         }
-        self.resume(continuation, CompleteMessage::Streamed(message))
+        self.resume_tree(
+            continuation,
+            CompleteMessage::Streamed(message),
+            &mut RuntimeVariables::default(),
+            &mut NoTrace,
+        )
     }
 
     pub fn resume_mapped(
@@ -929,11 +1119,10 @@ impl ExecutionPlan {
         if header_len > raw.len() {
             return Err(EvalError::BodyWasNotBuffered);
         }
-        self.resume_with_runtime(
+        self.resume_tree(
             continuation,
             CompleteMessage::Mapped { raw, header_len },
             runtime,
-            true,
             trace,
         )
     }
@@ -954,395 +1143,66 @@ impl ExecutionPlan {
         })
     }
 
-    fn resume(
-        &self,
-        continuation: Continuation,
-        message: CompleteMessage<'_>,
-    ) -> Result<DeliveryPlan, EvalError> {
-        self.resume_with_runtime(
-            continuation,
-            message,
-            &mut RuntimeVariables::default(),
-            true,
-            &mut NoTrace,
-        )
-    }
-
-    fn resume_with_runtime(
+    fn resume_tree(
         &self,
         continuation: Continuation,
         message: CompleteMessage<'_>,
         runtime: &mut RuntimeVariables,
-        first_assignments_applied: bool,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
-        let mut destinations = continuation.destinations;
-        let mut after_error = continuation.after_error;
-        let mut copies = continuation.copies;
-        let mut group_results = vec![None; self.condition_group_count];
-
-        for (offset, recipe) in self.recipes[continuation.recipe_index..].iter().enumerate() {
-            if offset != 0 || !first_assignments_applied {
-                recipe.apply_assignments(runtime, trace);
-            }
-            if !recipe.matches_complete(message, &mut group_results, trace)? {
-                trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Skipped,
-                });
-                continue;
-            }
-            trace.record(TraceEvent::RecipeEvaluated {
-                line: recipe.line,
-                decision: RecipeDecision::Selected,
-            });
-            destinations.push(
-                recipe
-                    .destination
-                    .bind_with(|name| runtime.get(name).map(str::to_owned))
-                    .map_err(EvalError::Expansion)?,
-            );
-            after_error.push(recipe.after_error);
-            copies.push(recipe.copy);
-            if !recipe.copy && !recipe.has_error_handler {
-                return Ok(DeliveryPlan {
-                    destinations,
-                    after_error,
-                    copies,
-                    original_delivered: true,
-                });
-            }
-        }
-
+        // Keep the bounded path in the continuation now, while complete
+        // planning temporarily replays the tree. The next refactoring step
+        // will resume directly from these frames and remove duplicate trace
+        // events from the header prefix.
+        debug_assert!(!continuation.frames.is_empty());
+        let early_destinations = continuation.execution.destinations;
+        *runtime = continuation.runtime;
+        let mut execution = PlanningExecution::default();
+        self.root
+            .plan_complete(message, runtime, trace, &mut execution)?;
+        debug_assert!(execution.destinations.starts_with(&early_destinations));
         Ok(DeliveryPlan {
-            destinations,
-            after_error,
-            copies,
-            original_delivered: false,
+            destinations: execution.destinations,
+            after_error: execution.after_error,
+            copies: execution.copies,
+            original_delivered: execution.original_delivered,
         })
     }
 }
 
-fn compile_statements(
-    statements: &[Statement],
-    assignments: &mut Vec<CompiledAssignment>,
-    inherited_groups: &[Arc<CompiledConditionGroup>],
-    recipes: &mut Vec<CompiledRecipe>,
-    condition_group_count: &mut usize,
-) {
-    let mut chain_anchor: Option<Arc<CompiledConditionGroup>> = None;
-    let mut previous: Option<Arc<CompiledConditionGroup>> = None;
-    let mut previous_delivery_index: Option<usize> = None;
-    for statement in statements {
-        match statement {
-            Statement::Assignment(assignment) => assignments.push(CompiledAssignment {
-                name: assignment.name.clone(),
-                value: assignment.value.clone(),
-                line: Some(assignment.line),
-                source: TraceVariableSource::RcFile,
-            }),
-            Statement::Recipe(recipe) => {
-                // A and a refer only to recipes at this nesting level. Keep
-                // their prerequisite as a shared node so a long chain cannot
-                // duplicate compiled regex programs or grow quadratically.
-                let prerequisite = match recipe.options.control {
-                    ControlFlow::AfterPreviousSuccess
-                    | ControlFlow::Else
-                    | ControlFlow::AfterPreviousError => previous.clone(),
-                    ControlFlow::AfterChainMatch => chain_anchor.clone(),
-                    ControlFlow::Independent => None,
-                };
-                let prerequisite_kind = match recipe.options.control {
-                    ControlFlow::Else => PrerequisiteKind::ElseOpen,
-                    ControlFlow::AfterChainMatch
-                    | ControlFlow::AfterPreviousSuccess
-                    | ControlFlow::AfterPreviousError => PrerequisiteKind::Matched,
-                    ControlFlow::Independent => PrerequisiteKind::None,
-                };
-                let impossible = matches!(
-                    recipe.options.control,
-                    ControlFlow::AfterChainMatch
-                        | ControlFlow::AfterPreviousSuccess
-                        | ControlFlow::AfterPreviousError
-                ) && prerequisite.is_none();
-                let conditions = CompiledRecipe::compile_conditions(recipe);
-                let requirements = conditions.iter().fold(
-                    prerequisite
-                        .as_ref()
-                        .map_or(InputRequirements::default(), |group| group.requirements),
-                    |requirements, condition| requirements.union(condition.requirements()),
-                );
-                let group = Arc::new(CompiledConditionGroup {
-                    id: *condition_group_count,
-                    line: recipe.line,
-                    conditions,
-                    prerequisite,
-                    prerequisite_kind,
-                    impossible,
-                    requirements,
-                });
-                *condition_group_count += 1;
-                let mut condition_groups = inherited_groups.to_vec();
-                condition_groups.push(group.clone());
-                match &recipe.action {
-                    RecipeAction::Deliver(destination) => {
-                        if recipe.options.control == ControlFlow::AfterPreviousError
-                            && let Some(index) = previous_delivery_index
-                        {
-                            recipes[index].has_error_handler = true;
-                        }
-                        recipes.push(CompiledRecipe {
-                            line: recipe.line,
-                            assignments: std::mem::take(assignments),
-                            condition_groups,
-                            destination: destination.clone(),
-                            copy: recipe.options.continuation == ContinuationMode::Continue,
-                            requires_successful_predecessor: recipe.options.control
-                                == ControlFlow::AfterPreviousSuccess,
-                            after_error: recipe.options.control == ControlFlow::AfterPreviousError,
-                            has_error_handler: false,
-                        });
-                        previous_delivery_index = Some(recipes.len() - 1);
-                    }
-                    RecipeAction::Block(children) => {
-                        compile_statements(
-                            children,
-                            assignments,
-                            &condition_groups,
-                            recipes,
-                            condition_group_count,
-                        );
-                        previous_delivery_index = None;
-                    }
-                }
-                previous = Some(group.clone());
-                if !matches!(
-                    recipe.options.control,
-                    ControlFlow::AfterChainMatch | ControlFlow::AfterPreviousSuccess
-                ) {
-                    chain_anchor = Some(group);
+fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
+    let area = match recipe.options.condition_input {
+        ConditionInput::Headers => RegexArea::Headers,
+        ConditionInput::Body => RegexArea::Body,
+        ConditionInput::Message => RegexArea::Message,
+    };
+    let mut conditions = Vec::with_capacity(recipe.conditions.len());
+
+    for condition in &recipe.conditions {
+        let kind = match &condition.kind {
+            ConditionKind::SmallerThan(size) => CompiledConditionKind::SmallerThan(*size),
+            ConditionKind::LargerThan(size) => CompiledConditionKind::LargerThan(*size),
+            ConditionKind::Regex(regex) => {
+                // Parsing already validated and compiled this expression.
+                // Cloning Regex shares its read-only compiled program, so
+                // execution planning cannot repeat attacker-controlled
+                // compilation work after configuration validation.
+                let regex = regex.compiled().clone();
+                match area {
+                    RegexArea::Headers => CompiledConditionKind::HeaderRegex(regex),
+                    RegexArea::Body => CompiledConditionKind::BodyRegex(regex),
+                    RegexArea::Message => CompiledConditionKind::MessageRegex(regex),
                 }
             }
-        }
-    }
-}
-
-impl CompiledRecipe {
-    fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
-        let area = match recipe.options.condition_input {
-            ConditionInput::Headers => RegexArea::Headers,
-            ConditionInput::Body => RegexArea::Body,
-            ConditionInput::Message => RegexArea::Message,
         };
-        let mut conditions = Vec::with_capacity(recipe.conditions.len());
-
-        for condition in &recipe.conditions {
-            let kind = match &condition.kind {
-                ConditionKind::SmallerThan(size) => CompiledConditionKind::SmallerThan(*size),
-                ConditionKind::LargerThan(size) => CompiledConditionKind::LargerThan(*size),
-                ConditionKind::Regex(regex) => {
-                    // Parsing already validated and compiled this expression.
-                    // Cloning Regex shares its read-only compiled program, so
-                    // execution planning cannot repeat attacker-controlled
-                    // compilation work after configuration validation.
-                    let regex = regex.compiled().clone();
-                    match area {
-                        RegexArea::Headers => CompiledConditionKind::HeaderRegex(regex),
-                        RegexArea::Body => CompiledConditionKind::BodyRegex(regex),
-                        RegexArea::Message => CompiledConditionKind::MessageRegex(regex),
-                    }
-                }
-            };
-            conditions.push(CompiledCondition {
-                line: condition.line,
-                negated: condition.negated,
-                kind,
-            });
-        }
-
-        conditions
+        conditions.push(CompiledCondition {
+            line: condition.line,
+            negated: condition.negated,
+            kind,
+        });
     }
 
-    fn apply_assignments(&self, runtime: &mut RuntimeVariables, trace: &mut impl TraceSink) {
-        apply_assignments(&self.assignments, runtime, trace);
-    }
-
-    fn explain(&self) -> RecipeExplanation {
-        let mut conditions = Vec::new();
-        for group in &self.condition_groups {
-            let mut chain = condition_group_chain(group);
-            while let Some(dependency) = chain.pop() {
-                conditions.extend(dependency.conditions.iter().map(CompiledCondition::explain));
-            }
-        }
-        let destination = match &self.destination {
-            Destination::Maildir(_) => DestinationKind::Maildir,
-            Destination::Mbox(_) => DestinationKind::Mbox,
-        };
-        RecipeExplanation {
-            line: self.line,
-            assignment_count: self.assignments.len(),
-            conditions,
-            destination,
-            copy: self.copy,
-            defers_destination: self.destination.needs_runtime_variables(),
-        }
-    }
-
-    fn requirements(&self) -> InputRequirements {
-        self.condition_groups
-            .iter()
-            .fold(InputRequirements::default(), |requirements, group| {
-                requirements.union(group.requirements)
-            })
-    }
-
-    fn matches_headers(
-        &self,
-        head: &MessageHead,
-        results: &mut [Option<GroupResult<PartialMatch>>],
-        trace: &mut impl TraceSink,
-    ) -> PartialMatch {
-        let mut deferred = false;
-        for group in &self.condition_groups {
-            let mut chain = condition_group_chain(group);
-            let mut prerequisite = GroupResult {
-                matched: PartialMatch::True,
-                else_handled: PartialMatch::False,
-            };
-            while let Some(dependency) = chain.pop() {
-                let group_result = if let Some(cached) = results[dependency.id] {
-                    cached
-                } else {
-                    let gate = match dependency.prerequisite_kind {
-                        PrerequisiteKind::None => PartialMatch::True,
-                        PrerequisiteKind::Matched => prerequisite.matched,
-                        PrerequisiteKind::ElseOpen => prerequisite.else_handled.not(),
-                    };
-                    let mut matched = if dependency.impossible {
-                        PartialMatch::False
-                    } else {
-                        gate
-                    };
-                    if matched != PartialMatch::False {
-                        for (index, condition) in dependency.conditions.iter().enumerate() {
-                            let condition_result = condition.matches_headers(head);
-                            match condition_result {
-                                PartialMatch::False => {
-                                    condition.trace_result(
-                                        dependency.line,
-                                        index,
-                                        condition_result,
-                                        trace,
-                                    );
-                                    matched = PartialMatch::False;
-                                    break;
-                                }
-                                PartialMatch::Deferred => matched = PartialMatch::Deferred,
-                                PartialMatch::True => condition.trace_result(
-                                    dependency.line,
-                                    index,
-                                    condition_result,
-                                    trace,
-                                ),
-                            }
-                        }
-                    }
-                    let result = GroupResult {
-                        matched,
-                        else_handled: match dependency.prerequisite_kind {
-                            PrerequisiteKind::ElseOpen => prerequisite.else_handled.or(matched),
-                            PrerequisiteKind::None | PrerequisiteKind::Matched => matched,
-                        },
-                    };
-                    results[dependency.id] = Some(result);
-                    result
-                };
-                prerequisite = group_result;
-            }
-            match prerequisite.matched {
-                PartialMatch::False => return PartialMatch::False,
-                PartialMatch::Deferred => deferred = true,
-                PartialMatch::True => {}
-            }
-        }
-        if deferred
-            || self.destination.needs_runtime_variables()
-            || matches!(self.destination, Destination::Mbox(_))
-            || self.requires_successful_predecessor
-            || self.after_error
-        {
-            PartialMatch::Deferred
-        } else {
-            PartialMatch::True
-        }
-    }
-
-    fn matches_complete(
-        &self,
-        message: CompleteMessage<'_>,
-        results: &mut [Option<GroupResult<bool>>],
-        trace: &mut impl TraceSink,
-    ) -> Result<bool, EvalError> {
-        for group in &self.condition_groups {
-            let mut chain = condition_group_chain(group);
-            let mut prerequisite = GroupResult {
-                matched: true,
-                else_handled: false,
-            };
-            while let Some(dependency) = chain.pop() {
-                let group_result = if let Some(cached) = results[dependency.id] {
-                    cached
-                } else {
-                    let gate = match dependency.prerequisite_kind {
-                        PrerequisiteKind::None => true,
-                        PrerequisiteKind::Matched => prerequisite.matched,
-                        PrerequisiteKind::ElseOpen => !prerequisite.else_handled,
-                    };
-                    let mut matched = !dependency.impossible && gate;
-                    if matched {
-                        for (index, condition) in dependency.conditions.iter().enumerate() {
-                            let condition_matched = condition.matches_complete(message)?;
-                            condition.trace_result(
-                                dependency.line,
-                                index,
-                                PartialMatch::from_bool(condition_matched),
-                                trace,
-                            );
-                            if !condition_matched {
-                                matched = false;
-                                break;
-                            }
-                        }
-                    }
-                    let result = GroupResult {
-                        matched,
-                        else_handled: match dependency.prerequisite_kind {
-                            PrerequisiteKind::ElseOpen => prerequisite.else_handled || matched,
-                            PrerequisiteKind::None | PrerequisiteKind::Matched => matched,
-                        },
-                    };
-                    results[dependency.id] = Some(result);
-                    result
-                };
-                prerequisite = group_result;
-            }
-            if !prerequisite.matched {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-}
-
-fn condition_group_chain(group: &Arc<CompiledConditionGroup>) -> Vec<&CompiledConditionGroup> {
-    let mut chain = Vec::new();
-    let mut current = Some(group.as_ref());
-    while let Some(group) = current {
-        chain.push(group);
-        current = group.prerequisite.as_deref();
-    }
-    chain
+    conditions
 }
 
 impl CompiledCondition {
@@ -1504,22 +1364,6 @@ enum PartialMatch {
 impl PartialMatch {
     fn from_bool(value: bool) -> Self {
         if value { Self::True } else { Self::False }
-    }
-
-    fn not(self) -> Self {
-        match self {
-            Self::True => Self::False,
-            Self::False => Self::True,
-            Self::Deferred => Self::Deferred,
-        }
-    }
-
-    fn or(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::True, _) | (_, Self::True) => Self::True,
-            (Self::Deferred, _) | (_, Self::Deferred) => Self::Deferred,
-            (Self::False, Self::False) => Self::False,
-        }
     }
 }
 
@@ -2151,6 +1995,29 @@ mod tests {
         assert_eq!(
             delivery.destinations(),
             [Destination::Maildir("small".into())]
+        );
+    }
+
+    #[test]
+    fn nested_deferred_recipe_records_a_bounded_tree_path() {
+        let plan = compile(":0\n* ^List-Id: wanted$\n{\n:0 B\n* needle\nmaildir:nested\n}\n");
+        let HeaderEvaluation::NeedsMessage(continuation) =
+            plan.evaluate_headers(&head(b"List-Id: wanted\n\nneedle"))
+        else {
+            panic!("expected nested body condition to defer");
+        };
+
+        assert_eq!(continuation.frames.len(), 2);
+        assert!(continuation.requirements().needs_body_contents);
+        let delivery = plan
+            .resume_buffered(
+                continuation,
+                &Message::from_bytes(b"List-Id: wanted\n\nneedle".to_vec()),
+            )
+            .unwrap();
+        assert_eq!(
+            delivery.destinations(),
+            [Destination::Maildir("nested".into())]
         );
     }
 

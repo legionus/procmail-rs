@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::delivery::{CommitError, CommitReport, PublishedDelivery};
 use crate::trace::{NoTrace, TraceEvent, TraceSink};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeVariables {
     values: BTreeMap<String, String>,
 }
