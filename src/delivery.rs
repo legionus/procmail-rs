@@ -511,6 +511,7 @@ mod tests {
         max_write_size: Option<usize>,
         fail_write_at: Option<usize>,
         fail_commit: bool,
+        fail_after_publish: bool,
         fail_abort: bool,
         last_folder: PathBuf,
     }
@@ -523,6 +524,7 @@ mod tests {
                 max_write_size: None,
                 fail_write_at: None,
                 fail_commit: false,
+                fail_after_publish: false,
                 fail_abort: false,
                 last_folder: PathBuf::from("test-folder"),
             })
@@ -535,6 +537,7 @@ mod tests {
                 max_write_size: None,
                 fail_write_at: Some(at),
                 fail_commit: false,
+                fail_after_publish: false,
                 fail_abort: false,
                 last_folder: PathBuf::from("test-folder"),
             })
@@ -547,6 +550,7 @@ mod tests {
                 max_write_size: Some(size),
                 fail_write_at: None,
                 fail_commit: false,
+                fail_after_publish: false,
                 fail_abort: false,
                 last_folder: PathBuf::from("test-folder"),
             })
@@ -559,6 +563,20 @@ mod tests {
                 max_write_size: None,
                 fail_write_at: None,
                 fail_commit: true,
+                fail_after_publish: false,
+                fail_abort: false,
+                last_folder: PathBuf::from("test-folder"),
+            })
+        }
+
+        fn failing_after_publish(state: Rc<RefCell<SinkState>>) -> Box<dyn PendingSink> {
+            Box::new(Self {
+                state,
+                pending: Vec::new(),
+                max_write_size: None,
+                fail_write_at: None,
+                fail_commit: false,
+                fail_after_publish: true,
                 fail_abort: false,
                 last_folder: PathBuf::from("test-folder"),
             })
@@ -596,7 +614,14 @@ mod tests {
                 )));
             }
             self.state.borrow_mut().visible = Some(self.pending.clone());
-            Ok(PublishedDelivery::new(self.last_folder.clone()))
+            let published = PublishedDelivery::new(self.last_folder.clone());
+            if self.fail_after_publish {
+                return Err(SinkCommitError::after_publication(
+                    io::Error::other("injected durability failure"),
+                    published,
+                ));
+            }
+            Ok(published)
         }
 
         fn abort(self: Box<Self>) -> io::Result<()> {
@@ -744,6 +769,21 @@ mod tests {
         assert!(second.borrow().visible.is_none());
         assert!(third.borrow().aborted);
         assert!(third.borrow().visible.is_none());
+    }
+
+    #[test]
+    fn durability_failure_after_publication_is_not_reported_as_success() {
+        let input = b"\nbody";
+        let state = Rc::new(RefCell::new(SinkState::default()));
+        let (head, mut reader) = read_head(input, MessageLimits::default());
+        let pending =
+            PendingFanout::new(vec![TestSink::failing_after_publish(state.clone())]).unwrap();
+        let (validated, _) = pending.stream(head, &mut reader).unwrap();
+
+        let error = validated.commit().unwrap_err();
+        assert_eq!(error.committed(), 1);
+        assert_eq!(error.last_folder(), Some(Path::new("test-folder")));
+        assert_eq!(state.borrow().visible.as_deref(), Some(input.as_slice()));
     }
 
     #[test]
