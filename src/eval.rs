@@ -138,6 +138,14 @@ struct SequenceExecution {
 }
 
 #[derive(Debug, Default)]
+struct PlanningExecution {
+    destinations: Vec<Destination>,
+    after_error: Vec<bool>,
+    copies: Vec<bool>,
+    original_delivered: bool,
+}
+
+#[derive(Debug, Default)]
 struct SequenceState {
     previous: Option<RecipeExecution>,
     chain_base_matched: Option<bool>,
@@ -453,6 +461,76 @@ impl CompiledSequence {
 
         Ok(SequenceControl::Continue)
     }
+
+    fn plan_complete(
+        &self,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut PlanningExecution,
+    ) -> Result<SequenceControl, EvalError> {
+        let mut state = SequenceState::default();
+
+        for (index, recipe) in self.recipes.iter().enumerate() {
+            apply_assignments(&recipe.assignments, runtime, trace);
+
+            // Planning retains actions whose final selection depends on a
+            // preceding delivery. Ordered publication later resolves a/a and
+            // e from the actual result without discarding their destinations.
+            let gate = match recipe.control {
+                ControlFlow::Independent => true,
+                ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
+                ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError => state
+                    .previous
+                    .is_some_and(|result| result.conditions_matched),
+                ControlFlow::Else => state.previous.is_none_or(|result| !result.else_handled),
+            };
+            let conditions_matched = gate && recipe.matches_complete(message, trace)?;
+            let else_handled = if recipe.control == ControlFlow::Else {
+                state.previous.is_some_and(|result| result.else_handled) || conditions_matched
+            } else {
+                conditions_matched
+            };
+            let has_error_handler = self
+                .recipes
+                .get(index + 1)
+                .is_some_and(|next| next.control == ControlFlow::AfterPreviousError);
+
+            let control = if conditions_matched {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Selected,
+                });
+                recipe.plan_action(message, runtime, trace, execution, has_error_handler)?
+            } else {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
+                SequenceControl::Continue
+            };
+            state.previous = Some(RecipeExecution {
+                conditions_matched,
+                else_handled,
+                action: if conditions_matched {
+                    ActionExecution::Succeeded
+                } else {
+                    ActionExecution::NotAttempted
+                },
+            });
+            if !matches!(
+                recipe.control,
+                ControlFlow::AfterChainMatch | ControlFlow::AfterPreviousSuccess
+            ) {
+                state.chain_base_matched = Some(conditions_matched);
+            }
+            if control == SequenceControl::Stop {
+                return Ok(SequenceControl::Stop);
+            }
+        }
+
+        Ok(SequenceControl::Continue)
+    }
 }
 
 impl CompiledNode {
@@ -518,6 +596,21 @@ impl CompiledNode {
         Ok(true)
     }
 
+    fn matches_complete(
+        &self,
+        message: CompleteMessage<'_>,
+        trace: &mut impl TraceSink,
+    ) -> Result<bool, EvalError> {
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let matched = condition.matches_complete(message)?;
+            condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
+            if !matched {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn execute_action(
         &self,
         message: &Message,
@@ -571,6 +664,42 @@ impl CompiledNode {
                     ActionExecution::Succeeded
                 };
                 Ok((action, control))
+            }
+        }
+    }
+
+    fn plan_action(
+        &self,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut PlanningExecution,
+        has_error_handler: bool,
+    ) -> Result<SequenceControl, EvalError> {
+        match &self.action {
+            CompiledAction::Deliver {
+                destination,
+                continuation,
+            } => {
+                execution.destinations.push(
+                    destination
+                        .bind_with(|name| runtime.get(name).map(str::to_owned))
+                        .map_err(EvalError::Expansion)?,
+                );
+                execution
+                    .after_error
+                    .push(self.control == ControlFlow::AfterPreviousError);
+                let copy = *continuation == ContinuationMode::Continue;
+                execution.copies.push(copy);
+                execution.original_delivered |= !copy;
+                if copy || has_error_handler {
+                    Ok(SequenceControl::Continue)
+                } else {
+                    Ok(SequenceControl::Stop)
+                }
+            }
+            CompiledAction::Block(children) => {
+                children.plan_complete(message, runtime, trace, execution)
             }
         }
     }
@@ -810,19 +939,19 @@ impl ExecutionPlan {
     }
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
-        self.resume_with_runtime(
-            Continuation {
-                recipe_index: 0,
-                destinations: Vec::new(),
-                after_error: Vec::new(),
-                copies: Vec::new(),
-                requirements: self.root.requirements(),
-            },
+        let mut execution = PlanningExecution::default();
+        self.root.plan_complete(
             CompleteMessage::Buffered(message),
             &mut RuntimeVariables::default(),
-            false,
             &mut NoTrace,
-        )
+            &mut execution,
+        )?;
+        Ok(DeliveryPlan {
+            destinations: execution.destinations,
+            after_error: execution.after_error,
+            copies: execution.copies,
+            original_delivered: execution.original_delivered,
+        })
     }
 
     fn resume(
@@ -2132,5 +2261,22 @@ mod tests {
                 Destination::Maildir("final".into())
             ]
         );
+    }
+
+    #[test]
+    fn complete_plan_uses_successful_block_for_lowercase_chain() {
+        let plan = compile(":0\n{\n:0 c\nmaildir:copy\n}\n:0 a\nmaildir:final\n");
+        let delivery = plan
+            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody\n".to_vec()))
+            .unwrap();
+
+        assert_eq!(
+            delivery.destinations(),
+            [
+                Destination::Maildir("copy".into()),
+                Destination::Maildir("final".into())
+            ]
+        );
+        assert!(delivery.original_delivered());
     }
 }
