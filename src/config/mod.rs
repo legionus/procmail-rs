@@ -77,16 +77,84 @@ pub struct Assignment {
 pub struct Recipe {
     pub line: usize,
     pub action_line: usize,
-    pub flags: String,
+    pub options: RecipeOptions,
     pub lock: Option<String>,
     pub conditions: Vec<Condition>,
     pub action: RecipeAction,
 }
 
-impl Recipe {
-    pub fn has_flag(&self, flag: char) -> bool {
-        self.flags.contains(flag)
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecipeOptions {
+    pub condition_input: ConditionInput,
+    pub case_mode: CaseMode,
+    pub control: ControlFlow,
+    pub action_input: ActionInput,
+    pub action_mode: ActionMode,
+    pub continuation: ContinuationMode,
+    pub child_status: ChildStatusMode,
+    pub write_errors: WriteErrorMode,
+    pub output_ending: OutputEnding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionInput {
+    Headers,
+    Body,
+    Message,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseMode {
+    Insensitive,
+    Sensitive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlFlow {
+    Independent,
+    AfterChainMatch,
+    AfterPreviousSuccess,
+    Else,
+    AfterPreviousError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionInput {
+    Message,
+    Headers,
+    Body,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionMode {
+    Deliver,
+    Filter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationMode {
+    Stop,
+    Continue,
+    BranchBlock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildStatusMode {
+    Ignore,
+    Wait,
+    WaitQuietly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteErrorMode {
+    Fail,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputEnding {
+    Normalize,
+    Preserve,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use regex::bytes::Regex;
 
-use crate::config::{ConditionKind, Config, Destination, Recipe, RecipeAction, Statement};
+use crate::config::{
+    ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination, Recipe,
+    RecipeAction, Statement,
+};
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::runtime::RuntimeVariables;
 use crate::trace::{
@@ -610,25 +613,26 @@ fn compile_statements(
                 // A and a refer only to recipes at this nesting level. Keep
                 // their prerequisite as a shared node so a long chain cannot
                 // duplicate compiled regex programs or grow quadratically.
-                let prerequisite = if recipe.has_flag('a') {
-                    previous.clone()
-                } else if recipe.has_flag('A') {
-                    chain_anchor.clone()
-                } else if recipe.has_flag('E') || recipe.has_flag('e') {
-                    previous.clone()
-                } else {
-                    None
+                let prerequisite = match recipe.options.control {
+                    ControlFlow::AfterPreviousSuccess
+                    | ControlFlow::Else
+                    | ControlFlow::AfterPreviousError => previous.clone(),
+                    ControlFlow::AfterChainMatch => chain_anchor.clone(),
+                    ControlFlow::Independent => None,
                 };
-                let prerequisite_kind = if recipe.has_flag('E') {
-                    PrerequisiteKind::ElseOpen
-                } else if prerequisite.is_some() {
-                    PrerequisiteKind::Matched
-                } else {
-                    PrerequisiteKind::None
+                let prerequisite_kind = match recipe.options.control {
+                    ControlFlow::Else => PrerequisiteKind::ElseOpen,
+                    ControlFlow::AfterChainMatch
+                    | ControlFlow::AfterPreviousSuccess
+                    | ControlFlow::AfterPreviousError => PrerequisiteKind::Matched,
+                    ControlFlow::Independent => PrerequisiteKind::None,
                 };
-                let impossible =
-                    (recipe.has_flag('A') || recipe.has_flag('a') || recipe.has_flag('e'))
-                        && prerequisite.is_none();
+                let impossible = matches!(
+                    recipe.options.control,
+                    ControlFlow::AfterChainMatch
+                        | ControlFlow::AfterPreviousSuccess
+                        | ControlFlow::AfterPreviousError
+                ) && prerequisite.is_none();
                 let conditions = CompiledRecipe::compile_conditions(recipe);
                 let requirements = conditions.iter().fold(
                     prerequisite
@@ -650,7 +654,7 @@ fn compile_statements(
                 condition_groups.push(group.clone());
                 match &recipe.action {
                     RecipeAction::Deliver(destination) => {
-                        if recipe.has_flag('e')
+                        if recipe.options.control == ControlFlow::AfterPreviousError
                             && let Some(index) = previous_delivery_index
                         {
                             recipes[index].has_error_handler = true;
@@ -660,9 +664,10 @@ fn compile_statements(
                             assignments: std::mem::take(assignments),
                             condition_groups,
                             destination: destination.clone(),
-                            copy: recipe.has_flag('c'),
-                            requires_successful_predecessor: recipe.has_flag('a'),
-                            after_error: recipe.has_flag('e'),
+                            copy: recipe.options.continuation == ContinuationMode::Continue,
+                            requires_successful_predecessor: recipe.options.control
+                                == ControlFlow::AfterPreviousSuccess,
+                            after_error: recipe.options.control == ControlFlow::AfterPreviousError,
                             has_error_handler: false,
                         });
                         previous_delivery_index = Some(recipes.len() - 1);
@@ -679,7 +684,10 @@ fn compile_statements(
                     }
                 }
                 previous = Some(group.clone());
-                if !recipe.has_flag('A') && !recipe.has_flag('a') {
+                if !matches!(
+                    recipe.options.control,
+                    ControlFlow::AfterChainMatch | ControlFlow::AfterPreviousSuccess
+                ) {
                     chain_anchor = Some(group);
                 }
             }
@@ -689,10 +697,10 @@ fn compile_statements(
 
 impl CompiledRecipe {
     fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
-        let area = match (recipe.has_flag('H'), recipe.has_flag('B')) {
-            (false, true) => RegexArea::Body,
-            (true, true) => RegexArea::Message,
-            _ => RegexArea::Headers,
+        let area = match recipe.options.condition_input {
+            ConditionInput::Headers => RegexArea::Headers,
+            ConditionInput::Body => RegexArea::Body,
+            ConditionInput::Message => RegexArea::Message,
         };
         let mut conditions = Vec::with_capacity(recipe.conditions.len());
 

@@ -4,12 +4,13 @@
 use regex::bytes::RegexBuilder;
 
 use super::{
-    Assignment, Condition, ConditionKind, Config, Destination, MAX_ASSIGNMENT_NAME_LEN,
+    ActionInput, ActionMode, Assignment, CaseMode, ChildStatusMode, Condition, ConditionInput,
+    ConditionKind, Config, ContinuationMode, ControlFlow, Destination, MAX_ASSIGNMENT_NAME_LEN,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
     MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS,
-    MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, ParseError,
-    PathExpression, Recipe, RecipeAction, RegexCondition, Statement, VariableSource,
-    variable_policy,
+    MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding,
+    ParseError, PathExpression, Recipe, RecipeAction, RecipeOptions, RegexCondition, Statement,
+    VariableSource, WriteErrorMode, variable_policy,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -37,7 +38,9 @@ fn validate_error_predecessors(statements: &[Statement]) -> Result<(), ParseErro
         let Statement::Recipe(recipe) = statement else {
             continue;
         };
-        if recipe.has_flag('e') && matches!(previous_action, Some(RecipeAction::Block(_))) {
+        if recipe.options.control == ControlFlow::AfterPreviousError
+            && matches!(previous_action, Some(RecipeAction::Block(_)))
+        {
             return Err(ParseError::new(
                 recipe.line,
                 "error flag 'e' after a recipe block is not supported yet",
@@ -218,7 +221,7 @@ fn parse_recipe(
     let rest = header
         .strip_prefix(":0")
         .ok_or_else(|| ParseError::new(start + 1, "only ':0' recipes are supported"))?;
-    let (flags, lock) = parse_recipe_header(rest, start + 1)?;
+    let (options, lock) = parse_recipe_header(rest, start + 1)?;
     let mut conditions = Vec::new();
     let mut regex_count = 0usize;
     let mut index = start + 1;
@@ -238,7 +241,7 @@ fn parse_recipe(
             let (condition, is_regex) = parse_condition(
                 condition,
                 index + 1,
-                flags.contains('D'),
+                options.case_mode == CaseMode::Sensitive,
                 prior_regexes,
                 regex_count,
             )?;
@@ -309,7 +312,7 @@ fn parse_recipe(
                 "local lockfiles on recipe blocks are not supported",
             ));
         }
-        if flags.contains('c') {
+        if options.continuation == ContinuationMode::Continue {
             return Err(ParseError::new(
                 start + 1,
                 "copy flag 'c' on recipe blocks is not supported yet",
@@ -366,7 +369,7 @@ fn parse_recipe(
     let recipe = Recipe {
         line: start + 1,
         action_line: index + 1,
-        flags,
+        options,
         lock,
         conditions,
         action,
@@ -397,7 +400,10 @@ fn check_condition_limits(
     Ok(())
 }
 
-fn parse_recipe_header(rest: &str, line: usize) -> Result<(String, Option<String>), ParseError> {
+fn parse_recipe_header(
+    rest: &str,
+    line: usize,
+) -> Result<(RecipeOptions, Option<String>), ParseError> {
     let rest = strip_comment(rest).trim();
     let (flag_text, lock) = match rest.split_once(':') {
         Some((flags, lock)) => {
@@ -434,7 +440,45 @@ fn parse_recipe_header(rest: &str, line: usize) -> Result<(String, Option<String
         ));
     }
 
-    Ok((flag_text.to_owned(), lock))
+    let condition_input = match (flag_text.contains('H'), flag_text.contains('B')) {
+        (false, true) => ConditionInput::Body,
+        (true, true) => ConditionInput::Message,
+        _ => ConditionInput::Headers,
+    };
+    let control = if flag_text.contains('A') {
+        ControlFlow::AfterChainMatch
+    } else if flag_text.contains('a') {
+        ControlFlow::AfterPreviousSuccess
+    } else if flag_text.contains('E') {
+        ControlFlow::Else
+    } else if flag_text.contains('e') {
+        ControlFlow::AfterPreviousError
+    } else {
+        ControlFlow::Independent
+    };
+    let continuation = if flag_text.contains('c') {
+        ContinuationMode::Continue
+    } else {
+        ContinuationMode::Stop
+    };
+    Ok((
+        RecipeOptions {
+            condition_input,
+            case_mode: if flag_text.contains('D') {
+                CaseMode::Sensitive
+            } else {
+                CaseMode::Insensitive
+            },
+            control,
+            action_input: ActionInput::Message,
+            action_mode: ActionMode::Deliver,
+            continuation,
+            child_status: ChildStatusMode::Ignore,
+            write_errors: WriteErrorMode::Fail,
+            output_ending: OutputEnding::Normalize,
+        },
+        lock,
+    ))
 }
 
 fn parse_condition(
@@ -566,7 +610,17 @@ mod tests {
             Statement::Recipe(Recipe {
                 line: 3,
                 action_line: 5,
-                flags: "Bc".into(),
+                options: RecipeOptions {
+                    condition_input: ConditionInput::Body,
+                    case_mode: CaseMode::Insensitive,
+                    control: ControlFlow::Independent,
+                    action_input: ActionInput::Message,
+                    action_mode: ActionMode::Deliver,
+                    continuation: ContinuationMode::Continue,
+                    child_status: ChildStatusMode::Ignore,
+                    write_errors: WriteErrorMode::Fail,
+                    output_ending: OutputEnding::Normalize,
+                },
                 lock: Some(String::new()),
                 conditions: vec![Condition {
                     line: 4,
