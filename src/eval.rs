@@ -2,6 +2,7 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use std::fmt;
+use std::sync::Arc;
 
 use regex::bytes::Regex;
 
@@ -37,6 +38,7 @@ impl InputRequirements {
 #[derive(Debug)]
 pub struct ExecutionPlan {
     recipes: Vec<CompiledRecipe>,
+    condition_group_count: usize,
     suffix_requirements: Vec<InputRequirements>,
     requirements: InputRequirements,
     requires_ordered_delivery: bool,
@@ -46,9 +48,20 @@ pub struct ExecutionPlan {
 struct CompiledRecipe {
     line: usize,
     assignments: Vec<CompiledAssignment>,
-    conditions: Vec<CompiledCondition>,
+    condition_groups: Vec<Arc<CompiledConditionGroup>>,
     destination: Destination,
     copy: bool,
+    requires_successful_predecessor: bool,
+}
+
+#[derive(Debug)]
+struct CompiledConditionGroup {
+    id: usize,
+    line: usize,
+    conditions: Vec<CompiledCondition>,
+    prerequisite: Option<Arc<CompiledConditionGroup>>,
+    impossible: bool,
+    requirements: InputRequirements,
 }
 
 #[derive(Debug)]
@@ -255,7 +268,14 @@ impl ExecutionPlan {
                 source: TraceVariableSource::CommandLine,
             })
             .collect::<Vec<_>>();
-        compile_statements(&config.statements, &mut assignments, &[], &mut recipes);
+        let mut condition_group_count = 0;
+        compile_statements(
+            &config.statements,
+            &mut assignments,
+            &[],
+            &mut recipes,
+            &mut condition_group_count,
+        );
 
         let mut suffix_requirements = vec![InputRequirements::default(); recipes.len() + 1];
         for index in (0..recipes.len()).rev() {
@@ -267,10 +287,12 @@ impl ExecutionPlan {
         let requires_ordered_delivery = recipes.iter().any(|recipe| {
             recipe.destination.needs_runtime_variables()
                 || matches!(recipe.destination, Destination::Mbox(_))
+                || recipe.requires_successful_predecessor
         });
 
         Self {
             recipes,
+            condition_group_count,
             suffix_requirements,
             requirements,
             requires_ordered_delivery,
@@ -323,10 +345,11 @@ impl ExecutionPlan {
         trace: &mut impl TraceSink,
     ) -> HeaderEvaluation {
         let mut destinations = Vec::new();
+        let mut group_results = vec![None; self.condition_group_count];
 
         for (index, recipe) in self.recipes.iter().enumerate() {
             recipe.apply_assignments(runtime, trace);
-            match recipe.matches_headers(head, trace) {
+            match recipe.matches_headers(head, &mut group_results, trace) {
                 PartialMatch::False => {
                     trace.record(TraceEvent::RecipeEvaluated {
                         line: recipe.line,
@@ -474,12 +497,13 @@ impl ExecutionPlan {
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
         let mut destinations = continuation.destinations;
+        let mut group_results = vec![None; self.condition_group_count];
 
         for (offset, recipe) in self.recipes[continuation.recipe_index..].iter().enumerate() {
             if offset != 0 || !first_assignments_applied {
                 recipe.apply_assignments(runtime, trace);
             }
-            if !recipe.matches_complete(message, trace)? {
+            if !recipe.matches_complete(message, &mut group_results, trace)? {
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Skipped,
@@ -514,9 +538,12 @@ impl ExecutionPlan {
 fn compile_statements(
     statements: &[Statement],
     assignments: &mut Vec<CompiledAssignment>,
-    inherited_conditions: &[CompiledCondition],
+    inherited_groups: &[Arc<CompiledConditionGroup>],
     recipes: &mut Vec<CompiledRecipe>,
+    condition_group_count: &mut usize,
 ) {
+    let mut chain_anchor: Option<Arc<CompiledConditionGroup>> = None;
+    let mut previous: Option<Arc<CompiledConditionGroup>> = None;
     for statement in statements {
         match statement {
             Statement::Assignment(assignment) => assignments.push(CompiledAssignment {
@@ -526,22 +553,58 @@ fn compile_statements(
                 source: TraceVariableSource::RcFile,
             }),
             Statement::Recipe(recipe) => {
-                // A block is compiled into its reachable delivery leaves.
-                // Each leaf carries its ancestors' tests, which preserves the
-                // gating behavior without an unbounded runtime call stack.
-                let mut conditions = inherited_conditions.to_vec();
-                conditions.extend(CompiledRecipe::compile_conditions(recipe));
+                // A and a refer only to recipes at this nesting level. Keep
+                // their prerequisite as a shared node so a long chain cannot
+                // duplicate compiled regex programs or grow quadratically.
+                let prerequisite = if recipe.has_flag('a') {
+                    previous.clone()
+                } else if recipe.has_flag('A') {
+                    chain_anchor.clone()
+                } else {
+                    None
+                };
+                let impossible =
+                    (recipe.has_flag('A') || recipe.has_flag('a')) && prerequisite.is_none();
+                let conditions = CompiledRecipe::compile_conditions(recipe);
+                let requirements = conditions.iter().fold(
+                    prerequisite
+                        .as_ref()
+                        .map_or(InputRequirements::default(), |group| group.requirements),
+                    |requirements, condition| requirements.union(condition.requirements()),
+                );
+                let group = Arc::new(CompiledConditionGroup {
+                    id: *condition_group_count,
+                    line: recipe.line,
+                    conditions,
+                    prerequisite,
+                    impossible,
+                    requirements,
+                });
+                *condition_group_count += 1;
+                let mut condition_groups = inherited_groups.to_vec();
+                condition_groups.push(group.clone());
                 match &recipe.action {
                     RecipeAction::Deliver(destination) => recipes.push(CompiledRecipe {
                         line: recipe.line,
                         assignments: std::mem::take(assignments),
-                        conditions,
+                        condition_groups,
                         destination: destination.clone(),
                         copy: recipe.has_flag('c'),
+                        requires_successful_predecessor: recipe.has_flag('a'),
                     }),
                     RecipeAction::Block(children) => {
-                        compile_statements(children, assignments, &conditions, recipes);
+                        compile_statements(
+                            children,
+                            assignments,
+                            &condition_groups,
+                            recipes,
+                            condition_group_count,
+                        );
                     }
+                }
+                previous = Some(group.clone());
+                if !recipe.has_flag('A') && !recipe.has_flag('a') {
+                    chain_anchor = Some(group);
                 }
             }
         }
@@ -602,11 +665,13 @@ impl CompiledRecipe {
     }
 
     fn explain(&self) -> RecipeExplanation {
-        let conditions = self
-            .conditions
-            .iter()
-            .map(CompiledCondition::explain)
-            .collect();
+        let mut conditions = Vec::new();
+        for group in &self.condition_groups {
+            let mut chain = condition_group_chain(group);
+            while let Some(dependency) = chain.pop() {
+                conditions.extend(dependency.conditions.iter().map(CompiledCondition::explain));
+            }
+        }
         let destination = match &self.destination {
             Destination::Maildir(_) => DestinationKind::Maildir,
             Destination::Mbox(_) => DestinationKind::Mbox,
@@ -622,25 +687,55 @@ impl CompiledRecipe {
     }
 
     fn requirements(&self) -> InputRequirements {
-        self.conditions
+        self.condition_groups
             .iter()
-            .fold(InputRequirements::default(), |requirements, condition| {
-                requirements.union(condition.requirements())
+            .fold(InputRequirements::default(), |requirements, group| {
+                requirements.union(group.requirements)
             })
     }
 
-    fn matches_headers(&self, head: &MessageHead, trace: &mut impl TraceSink) -> PartialMatch {
+    fn matches_headers(
+        &self,
+        head: &MessageHead,
+        results: &mut [Option<PartialMatch>],
+        trace: &mut impl TraceSink,
+    ) -> PartialMatch {
         let mut deferred = false;
-        for (index, condition) in self.conditions.iter().enumerate() {
-            let result = condition.matches_headers(head);
-            match result {
-                PartialMatch::False => {
-                    condition.trace_result(self.line, index, result, trace);
+        for group in &self.condition_groups {
+            let mut chain = condition_group_chain(group);
+            if let Some(cached) = chain.last().and_then(|dependency| results[dependency.id]) {
+                match cached {
+                    PartialMatch::False => return PartialMatch::False,
+                    PartialMatch::Deferred => deferred = true,
+                    PartialMatch::True => {}
+                }
+                chain.pop();
+            }
+            while let Some(dependency) = chain.pop() {
+                if dependency.impossible {
+                    results[dependency.id] = Some(PartialMatch::False);
                     return PartialMatch::False;
                 }
-                PartialMatch::Deferred => deferred = true,
-                PartialMatch::True => {
-                    condition.trace_result(self.line, index, result, trace);
+                let mut group_result = PartialMatch::True;
+                for (index, condition) in dependency.conditions.iter().enumerate() {
+                    let result = condition.matches_headers(head);
+                    match result {
+                        PartialMatch::False => {
+                            condition.trace_result(dependency.line, index, result, trace);
+                            group_result = PartialMatch::False;
+                            break;
+                        }
+                        PartialMatch::Deferred => group_result = PartialMatch::Deferred,
+                        PartialMatch::True => {
+                            condition.trace_result(dependency.line, index, result, trace);
+                        }
+                    }
+                }
+                results[dependency.id] = Some(group_result);
+                match group_result {
+                    PartialMatch::False => return PartialMatch::False,
+                    PartialMatch::Deferred => deferred = true,
+                    PartialMatch::True => {}
                 }
             }
         }
@@ -657,17 +752,54 @@ impl CompiledRecipe {
     fn matches_complete(
         &self,
         message: CompleteMessage<'_>,
+        results: &mut [Option<bool>],
         trace: &mut impl TraceSink,
     ) -> Result<bool, EvalError> {
-        for (index, condition) in self.conditions.iter().enumerate() {
-            let matched = condition.matches_complete(message)?;
-            condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
-            if !matched {
-                return Ok(false);
+        for group in &self.condition_groups {
+            let mut chain = condition_group_chain(group);
+            if let Some(cached) = chain.last().and_then(|dependency| results[dependency.id]) {
+                if !cached {
+                    return Ok(false);
+                }
+                chain.pop();
+            }
+            while let Some(dependency) = chain.pop() {
+                if dependency.impossible {
+                    results[dependency.id] = Some(false);
+                    return Ok(false);
+                }
+                let mut group_matched = true;
+                for (index, condition) in dependency.conditions.iter().enumerate() {
+                    let matched = condition.matches_complete(message)?;
+                    condition.trace_result(
+                        dependency.line,
+                        index,
+                        PartialMatch::from_bool(matched),
+                        trace,
+                    );
+                    if !matched {
+                        group_matched = false;
+                        break;
+                    }
+                }
+                results[dependency.id] = Some(group_matched);
+                if !group_matched {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
     }
+}
+
+fn condition_group_chain(group: &Arc<CompiledConditionGroup>) -> Vec<&CompiledConditionGroup> {
+    let mut chain = Vec::new();
+    let mut current = Some(group.as_ref());
+    while let Some(group) = current {
+        chain.push(group);
+        current = group.prerequisite.as_deref();
+    }
+    chain
 }
 
 impl CompiledCondition {
@@ -1153,6 +1285,109 @@ mod tests {
             ]
         );
         assert!(delivery.original_delivered());
+    }
+
+    #[test]
+    fn uppercase_chain_uses_last_unchained_recipe_at_the_same_level() {
+        let plan = compile(
+            ":0 c\n* ^Subject: wanted$\nmaildir:first\n:0 Ac\n* ^X-Never: yes$\nmaildir:skipped\n:0 A\nmaildir:final\n",
+        );
+        let HeaderEvaluation::Decided(delivery) =
+            plan.evaluate_headers(&head(b"Subject: wanted\n\nbody"))
+        else {
+            panic!("expected chained delivery");
+        };
+        assert_eq!(
+            delivery.destinations(),
+            [
+                Destination::Maildir("first".into()),
+                Destination::Maildir("final".into())
+            ]
+        );
+
+        let HeaderEvaluation::Decided(unmatched) =
+            plan.evaluate_headers(&head(b"Subject: other\n\nbody"))
+        else {
+            panic!("expected a complete decision");
+        };
+        assert!(unmatched.destinations().is_empty());
+        assert!(!unmatched.original_delivered());
+    }
+
+    #[test]
+    fn lowercase_chain_requires_the_immediately_preceding_recipe() {
+        let plan = compile(
+            ":0 c\n* ^Subject: wanted$\nmaildir:first\n:0 Ac\n* ^X-Select: yes$\nmaildir:second\n:0 a\nmaildir:final\n",
+        );
+
+        let HeaderEvaluation::Decided(selected) =
+            plan.evaluate_headers(&head(b"Subject: wanted\nX-Select: yes\n\nbody"))
+        else {
+            panic!("expected chained delivery");
+        };
+        assert_eq!(selected.destinations().len(), 3);
+
+        let HeaderEvaluation::Decided(skipped) =
+            plan.evaluate_headers(&head(b"Subject: wanted\n\nbody"))
+        else {
+            panic!("expected copy-only decision");
+        };
+        assert_eq!(
+            skipped.destinations(),
+            [Destination::Maildir("first".into())]
+        );
+        assert!(!skipped.original_delivered());
+    }
+
+    #[test]
+    fn lowercase_chain_forces_ordered_publication() {
+        let plan = compile(":0 c\nmaildir:first\n:0 a\nmaildir:second\n");
+
+        assert!(plan.requires_ordered_delivery());
+        assert!(plan.requirements().needs_end_of_message);
+    }
+
+    #[test]
+    fn chain_without_a_preceding_recipe_never_executes() {
+        for flag in ['A', 'a'] {
+            let plan = compile(&format!(":0 {flag}\nmaildir:unreachable\n"));
+            let HeaderEvaluation::Decided(delivery) =
+                plan.evaluate_headers(&head(b"Subject: test\n\nbody"))
+            else {
+                panic!("expected a complete decision");
+            };
+            assert!(delivery.destinations().is_empty());
+        }
+    }
+
+    #[test]
+    fn long_chain_reuses_the_preceding_condition_result() {
+        let mut source = ":0 c\n* ^Subject: wanted$\nmaildir:first\n".to_owned();
+        for index in 0..64 {
+            source.push_str(&format!(":0 Ac\nmaildir:copy-{index}\n"));
+        }
+        source.push_str(":0 A\nmaildir:final\n");
+        let plan = compile(&source);
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = MemoryTrace::default();
+
+        let result = plan.evaluate_headers_with_trace(
+            &head(b"Subject: wanted\n\nbody"),
+            &mut runtime,
+            &mut trace,
+        );
+        let HeaderEvaluation::Decided(delivery) = result else {
+            panic!("expected chained delivery");
+        };
+        assert_eq!(delivery.destinations().len(), 66);
+        assert_eq!(
+            trace
+                .events()
+                .iter()
+                .filter(|event| matches!(event, TraceEvent::ConditionEvaluated { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]

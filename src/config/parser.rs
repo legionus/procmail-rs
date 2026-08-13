@@ -392,11 +392,17 @@ fn parse_recipe_header(rest: &str, line: usize) -> Result<(String, Option<String
     }
     if let Some(flag) = flag_text
         .chars()
-        .find(|flag| !matches!(flag, 'H' | 'B' | 'D' | 'c'))
+        .find(|flag| !matches!(flag, 'H' | 'B' | 'D' | 'c' | 'A' | 'a'))
     {
         return Err(ParseError::new(
             line,
             format!("recipe flag '{flag}' is not supported yet"),
+        ));
+    }
+    if flag_text.contains('A') && flag_text.contains('a') {
+        return Err(ParseError::new(
+            line,
+            "recipe flags 'A' and 'a' cannot be combined",
         ));
     }
 
@@ -614,6 +620,16 @@ mod tests {
 
         assert_eq!(error.line, 1);
         assert_eq!(error.message, "recipe flag 'f' is not supported yet");
+    }
+
+    #[test]
+    fn accepts_chain_flags_but_rejects_their_combination() {
+        assert!(parse(":0 A\nmaildir:after-match\n").is_ok());
+        assert!(parse(":0 a\nmaildir:after-success\n").is_ok());
+
+        let error = parse(":0 Aa\nmaildir:ambiguous\n").unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(error.message, "recipe flags 'A' and 'a' cannot be combined");
     }
 
     #[test]
