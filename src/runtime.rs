@@ -25,6 +25,19 @@ impl RuntimeVariables {
         self.values.get(name).map(String::as_str)
     }
 
+    pub(crate) fn clear_match_values(&mut self) {
+        self.values.retain(|name, _| {
+            name != "MATCH"
+                && !name.strip_prefix("MATCH").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        });
+    }
+
+    pub(crate) fn set_match_value(&mut self, name: String, value: String) {
+        self.values.insert(name, value);
+    }
+
     pub fn record_commit(&mut self, report: &CommitReport) -> Result<(), String> {
         self.record_commit_with_trace(report, &mut NoTrace)
     }

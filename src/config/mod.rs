@@ -24,6 +24,8 @@ pub const MAX_PATH_EXPRESSION_LEN: usize = 4096;
 pub const MAX_RECIPE_NESTING_DEPTH: usize = 64;
 pub const MAX_REGEX_COMPILED_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_REGEX_PATTERN_LEN: usize = 64 * 1024;
+pub const MAX_REGEX_CAPTURES: usize = 64;
+pub const MAX_MATCH_BYTES: usize = MAX_ASSIGNMENT_VALUE_LEN;
 pub const MAX_RC_REGEXES: usize = 32;
 pub const MAX_RC_SIZE: usize = 1024 * 1024;
 pub const MAX_RC_CONDITIONS: usize = 4096;
@@ -189,6 +191,8 @@ pub enum ConditionKind {
 pub struct RegexCondition {
     pattern: String,
     compiled: Regex,
+    match_capture: Option<usize>,
+    capture_indexes: Vec<usize>,
 }
 
 impl RegexCondition {
@@ -198,6 +202,14 @@ impl RegexCondition {
 
     pub(crate) fn compiled(&self) -> &Regex {
         &self.compiled
+    }
+
+    pub(crate) fn match_capture(&self) -> Option<usize> {
+        self.match_capture
+    }
+
+    pub(crate) fn capture_indexes(&self) -> &[usize] {
+        &self.capture_indexes
     }
 }
 

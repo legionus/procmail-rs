@@ -690,6 +690,39 @@ fn filter_expands_assignment_and_destination_variables() {
 }
 
 #[test]
+fn filter_expands_match_captures_in_destination() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let destination = base.join("alpha-beta-beta");
+    create_maildir(&destination);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n* ^Subject: ([a-z]+)-\\/([a-z]+)$\nmaildir:$MATCH1-$MATCH-$MATCH2\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: alpha-beta\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(delivered_messages(&destination), [input.to_vec()]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn filter_expands_explicit_command_line_variables() {
     let path = config_file("");
     let maildir = path.parent().unwrap().join("inbox");

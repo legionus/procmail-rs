@@ -7,7 +7,7 @@ use regex::bytes::Regex;
 
 use crate::config::{
     ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination, Recipe,
-    RecipeAction, Statement,
+    RecipeAction, RegexCondition, Statement,
 };
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::runtime::RuntimeVariables;
@@ -79,6 +79,8 @@ struct CompiledCondition {
     line: usize,
     negated: bool,
     kind: CompiledConditionKind,
+    match_capture: Option<usize>,
+    capture_indexes: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +357,10 @@ pub enum EvalError {
         name: String,
         size: usize,
     },
+    MatchValueIsNotUtf8,
+    MatchValuesTooLarge {
+        size: usize,
+    },
     Expansion(crate::config::ExpansionError),
     Delivery {
         destination: String,
@@ -372,6 +378,14 @@ impl fmt::Display for EvalError {
                 formatter,
                 "variable {name} has {size} bytes, exceeding the hard limit of {} bytes",
                 crate::config::MAX_ASSIGNMENT_VALUE_LEN
+            ),
+            Self::MatchValueIsNotUtf8 => {
+                formatter.write_str("regular expression capture is not valid UTF-8")
+            }
+            Self::MatchValuesTooLarge { size } => write!(
+                formatter,
+                "regular expression captures require {size} bytes, exceeding the hard limit of {} bytes",
+                crate::config::MAX_MATCH_BYTES
             ),
             Self::Expansion(error) => write!(formatter, "cannot resolve destination: {error}"),
             Self::Delivery {
@@ -912,7 +926,7 @@ impl CompiledNode {
     fn matches(
         &self,
         message: &Message,
-        runtime: &RuntimeVariables,
+        runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<bool, EvalError> {
         for (index, condition) in self.conditions.iter().enumerate() {
@@ -929,7 +943,7 @@ impl CompiledNode {
     fn matches_complete(
         &self,
         message: CompleteMessage<'_>,
-        runtime: &RuntimeVariables,
+        runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<bool, EvalError> {
         for (index, condition) in self.conditions.iter().enumerate() {
@@ -945,7 +959,7 @@ impl CompiledNode {
     fn matches_headers(
         &self,
         head: &MessageHead,
-        runtime: &RuntimeVariables,
+        runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<(PartialMatch, Vec<Option<bool>>), EvalError> {
         let mut result = PartialMatch::True;
@@ -974,7 +988,7 @@ impl CompiledNode {
         &self,
         message: CompleteMessage<'_>,
         header_results: &[Option<bool>],
-        runtime: &RuntimeVariables,
+        runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<bool, EvalError> {
         for (index, condition) in self.conditions.iter().enumerate() {
@@ -1183,7 +1197,7 @@ impl CompiledNode {
 
     fn plan_delivery(
         &self,
-        runtime: &RuntimeVariables,
+        runtime: &mut RuntimeVariables,
         execution: &mut FanoutPlanState,
         has_error_handler: bool,
     ) -> Result<SequenceControl, EvalError> {
@@ -1507,6 +1521,12 @@ fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
     let mut conditions = Vec::with_capacity(recipe.conditions.len());
 
     for condition in &recipe.conditions {
+        let regex_condition = match &condition.kind {
+            ConditionKind::Regex(regex)
+            | ConditionKind::AreaRegex { regex, .. }
+            | ConditionKind::VariableRegex { regex, .. } => Some(regex),
+            ConditionKind::SmallerThan(_) | ConditionKind::LargerThan(_) => None,
+        };
         let kind = match &condition.kind {
             ConditionKind::SmallerThan(size) => CompiledConditionKind::SmallerThan(*size),
             ConditionKind::LargerThan(size) => CompiledConditionKind::LargerThan(*size),
@@ -1539,6 +1559,10 @@ fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
             line: condition.line,
             negated: condition.negated,
             kind,
+            match_capture: regex_condition.and_then(RegexCondition::match_capture),
+            capture_indexes: regex_condition
+                .map(|regex| regex.capture_indexes().to_vec())
+                .unwrap_or_default(),
         });
     }
 
@@ -1617,26 +1641,24 @@ impl CompiledCondition {
     fn matches_headers(
         &self,
         head: &MessageHead,
-        runtime: &RuntimeVariables,
+        runtime: &mut RuntimeVariables,
     ) -> Result<PartialMatch, EvalError> {
         let matched = match &self.kind {
             CompiledConditionKind::HeaderRegex(regex) => {
-                return Ok(PartialMatch::from_bool(
-                    regex.is_match(head.as_bytes()) ^ self.negated,
-                ));
+                self.regex_matches(regex, head.as_bytes(), runtime)?
             }
             CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
                 return Ok(PartialMatch::Deferred);
             }
             CompiledConditionKind::VariableRegex { name, regex } => {
-                let value = runtime.get(name).unwrap_or_default();
+                let value = runtime.get(name).unwrap_or_default().to_owned();
                 if value.len() > crate::config::MAX_ASSIGNMENT_VALUE_LEN {
                     return Err(EvalError::VariableValueTooLarge {
                         name: name.clone(),
                         size: value.len(),
                     });
                 }
-                regex.is_match(value.as_bytes())
+                self.regex_matches(regex, value.as_bytes(), runtime)?
             }
             CompiledConditionKind::SmallerThan(size) => {
                 if head.len() >= *size {
@@ -1659,31 +1681,91 @@ impl CompiledCondition {
     fn matches_complete(
         &self,
         message: CompleteMessage<'_>,
-        runtime: &RuntimeVariables,
+        runtime: &mut RuntimeVariables,
     ) -> Result<bool, EvalError> {
         let matched = match &self.kind {
-            CompiledConditionKind::HeaderRegex(regex) => regex.is_match(message.header_bytes()),
-            CompiledConditionKind::BodyRegex(regex) => {
-                regex.is_match(message.body().ok_or(EvalError::BodyWasNotBuffered)?)
+            CompiledConditionKind::HeaderRegex(regex) => {
+                self.regex_matches(regex, message.header_bytes(), runtime)?
             }
-            CompiledConditionKind::MessageRegex(regex) => {
-                regex.is_match(message.full().ok_or(EvalError::BodyWasNotBuffered)?)
-            }
+            CompiledConditionKind::BodyRegex(regex) => self.regex_matches(
+                regex,
+                message.body().ok_or(EvalError::BodyWasNotBuffered)?,
+                runtime,
+            )?,
+            CompiledConditionKind::MessageRegex(regex) => self.regex_matches(
+                regex,
+                message.full().ok_or(EvalError::BodyWasNotBuffered)?,
+                runtime,
+            )?,
             CompiledConditionKind::VariableRegex { name, regex } => {
-                let value = runtime.get(name).unwrap_or_default();
+                let value = runtime.get(name).unwrap_or_default().to_owned();
                 if value.len() > crate::config::MAX_ASSIGNMENT_VALUE_LEN {
                     return Err(EvalError::VariableValueTooLarge {
                         name: name.clone(),
                         size: value.len(),
                     });
                 }
-                regex.is_match(value.as_bytes())
+                self.regex_matches(regex, value.as_bytes(), runtime)?
             }
             CompiledConditionKind::SmallerThan(size) => message.len() < *size,
             CompiledConditionKind::LargerThan(size) => message.len() > *size,
         };
         Ok(matched ^ self.negated)
     }
+
+    fn regex_matches(
+        &self,
+        regex: &Regex,
+        input: &[u8],
+        runtime: &mut RuntimeVariables,
+    ) -> Result<bool, EvalError> {
+        if self.match_capture.is_none() && self.capture_indexes.is_empty() {
+            return Ok(regex.is_match(input));
+        }
+
+        // Captures are runtime variables, so stale values must disappear even
+        // when this condition does not match. Validate the complete set before
+        // updating the table so no later recipe can observe partial results.
+        runtime.clear_match_values();
+        let Some(captures) = regex.captures(input) else {
+            return Ok(false);
+        };
+        if self.negated {
+            return Ok(true);
+        }
+        let mut values = Vec::with_capacity(self.capture_indexes.len() + 1);
+        if let Some(index) = self.match_capture {
+            values.push(("MATCH".to_owned(), capture_value(&captures, index)?));
+        }
+        for (number, index) in self.capture_indexes.iter().copied().enumerate() {
+            values.push((
+                format!("MATCH{}", number + 1),
+                capture_value(&captures, index)?,
+            ));
+        }
+        let size = values
+            .iter()
+            .try_fold(0usize, |total, (_, value)| total.checked_add(value.len()));
+        let Some(size) = size else {
+            return Err(EvalError::MatchValuesTooLarge { size: usize::MAX });
+        };
+        if size > crate::config::MAX_MATCH_BYTES {
+            return Err(EvalError::MatchValuesTooLarge { size });
+        }
+        for (name, value) in values {
+            runtime.set_match_value(name, value);
+        }
+        Ok(true)
+    }
+}
+
+fn capture_value(captures: &regex::bytes::Captures<'_>, index: usize) -> Result<String, EvalError> {
+    let bytes = captures
+        .get(index)
+        .map_or(&[][..], |matched| matched.as_bytes());
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| EvalError::MatchValueIsNotUtf8)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2159,6 +2241,97 @@ mod tests {
             destinations(&header_delivery),
             [Destination::Maildir("headers".into())]
         );
+    }
+
+    #[test]
+    fn match_marker_and_numbered_groups_feed_later_expansion() {
+        let plan =
+            compile(":0\n* ^Subject: ([a-z]+)-\\/([a-z]+)$\nmaildir:$MATCH1-$MATCH-$MATCH2\n");
+        let mut runtime = RuntimeVariables::default();
+
+        let HeaderEvaluation::Decided(delivery) =
+            plan.evaluate_headers_with_runtime(&head(b"Subject: alpha-beta\n\nbody"), &mut runtime)
+        else {
+            panic!("expected a header decision");
+        };
+
+        assert_eq!(runtime.get("MATCH"), Some("beta"));
+        assert_eq!(runtime.get("MATCH1"), Some("alpha"));
+        assert_eq!(runtime.get("MATCH2"), Some("beta"));
+        let resolved = delivery.deliveries()[0]
+            .destination()
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .unwrap();
+        assert_eq!(resolved, Destination::Maildir("alpha-beta-beta".into()));
+    }
+
+    #[test]
+    fn failed_capture_condition_clears_previous_values() {
+        let plan = compile(":0\n* ^Subject: (wanted)$\nmaildir:matched\n");
+        let mut runtime = RuntimeVariables::default();
+        runtime.set("MATCH1", "stale");
+
+        let HeaderEvaluation::Decided(delivery) =
+            plan.evaluate_headers_with_runtime(&head(b"Subject: other\n\nbody"), &mut runtime)
+        else {
+            panic!("expected a header decision");
+        };
+
+        assert!(delivery.deliveries().is_empty());
+        assert_eq!(runtime.get("MATCH1"), None);
+    }
+
+    #[test]
+    fn unmatched_optional_group_becomes_an_empty_value() {
+        let plan = compile(":0\n* ^Subject: (wanted)(-extra)?$\nmaildir:matched\n");
+        let mut runtime = RuntimeVariables::default();
+
+        let HeaderEvaluation::Decided(_) =
+            plan.evaluate_headers_with_runtime(&head(b"Subject: wanted\n\nbody"), &mut runtime)
+        else {
+            panic!("expected a header decision");
+        };
+
+        assert_eq!(runtime.get("MATCH1"), Some("wanted"));
+        assert_eq!(runtime.get("MATCH2"), Some(""));
+    }
+
+    #[test]
+    fn capture_values_obey_the_aggregate_byte_limit() {
+        let plan = compile(":0\n* VALUE ?? ^((x+))$\nmaildir:matched\n");
+        for length in [
+            crate::config::MAX_MATCH_BYTES / 2,
+            crate::config::MAX_MATCH_BYTES / 2 + 1,
+        ] {
+            let mut runtime = RuntimeVariables::default();
+            runtime.set("VALUE", "x".repeat(length));
+            let result =
+                plan.evaluate_headers_with_runtime(&head(b"Subject: test\n\nbody"), &mut runtime);
+            if length * 2 <= crate::config::MAX_MATCH_BYTES {
+                assert!(matches!(result, HeaderEvaluation::Decided(_)));
+            } else {
+                assert!(matches!(
+                    result,
+                    HeaderEvaluation::Error(EvalError::MatchValuesTooLarge { size })
+                        if size == length * 2
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn non_utf8_capture_is_rejected_without_partial_values() {
+        let plan = compile(":0\n* ^X-Binary: (.)$\nmaildir:matched\n");
+        let mut runtime = RuntimeVariables::default();
+        runtime.set("MATCH1", "stale");
+        let result =
+            plan.evaluate_headers_with_runtime(&head(b"X-Binary: \xff\n\nbody"), &mut runtime);
+
+        assert!(matches!(
+            result,
+            HeaderEvaluation::Error(EvalError::MatchValueIsNotUtf8)
+        ));
+        assert_eq!(runtime.get("MATCH1"), None);
     }
 
     #[test]

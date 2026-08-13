@@ -8,9 +8,9 @@ use super::{
     ConditionKind, Config, ContinuationMode, ControlFlow, Destination, MAX_ASSIGNMENT_NAME_LEN,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
     MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS,
-    MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding,
-    ParseError, PathExpression, Recipe, RecipeAction, RecipeOptions, RegexCondition, Statement,
-    VariableSource, WriteErrorMode, variable_policy,
+    MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN,
+    OutputEnding, ParseError, PathExpression, Recipe, RecipeAction, RecipeOptions, RegexCondition,
+    Statement, VariableSource, WriteErrorMode, variable_policy,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -499,12 +499,42 @@ fn parse_condition(
                 ),
             ));
         }
-        let compiled = build_regex(pattern, case_sensitive).map_err(|error| {
+        let (compiled_pattern, marker_name) = prepare_capture_pattern(pattern, line)?;
+        let compiled = build_regex(&compiled_pattern, case_sensitive).map_err(|error| {
             ParseError::new(line, format!("invalid regular expression: {error}"))
         })?;
+        let match_capture = marker_name.as_deref().and_then(|wanted| {
+            compiled
+                .capture_names()
+                .enumerate()
+                .find_map(|(index, name)| (name == Some(wanted)).then_some(index))
+        });
+        if compiled
+            .capture_names()
+            .flatten()
+            .any(|name| Some(name) != marker_name.as_deref())
+        {
+            return Err(ParseError::new(
+                line,
+                "named regular expression groups are not supported",
+            ));
+        }
+        let capture_indexes = (1..compiled.captures_len())
+            .filter(|index| Some(*index) != match_capture)
+            .collect::<Vec<_>>();
+        if capture_indexes.len() > MAX_REGEX_CAPTURES {
+            return Err(ParseError::new(
+                line,
+                format!(
+                    "regular expression capture count exceeds the hard limit of {MAX_REGEX_CAPTURES}"
+                ),
+            ));
+        }
         let regex = RegexCondition {
             pattern: pattern.to_owned(),
             compiled,
+            match_capture,
+            capture_indexes,
         };
         match target {
             Some(ConditionRegexTarget::Variable(name)) => {
@@ -525,6 +555,52 @@ fn parse_condition(
         },
         is_regex,
     ))
+}
+
+fn prepare_capture_pattern(
+    pattern: &str,
+    line: usize,
+) -> Result<(String, Option<String>), ParseError> {
+    const MARKER: &str = "__procmail_rs_match";
+    let bytes = pattern.as_bytes();
+    let mut marker = None;
+    let mut in_class = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte == b'[' && !escaped(bytes, index) {
+            in_class = true;
+        } else if byte == b']' && !escaped(bytes, index) {
+            in_class = false;
+        } else if byte == b'/' && !in_class && escaped(bytes, index) {
+            let slash_escape = index - 1;
+            if marker.replace(slash_escape).is_some() {
+                return Err(ParseError::new(
+                    line,
+                    "regular expression contains more than one '\\/' capture marker",
+                ));
+            }
+        }
+    }
+    let Some(index) = marker else {
+        return Ok((pattern.to_owned(), None));
+    };
+    let mut translated = String::with_capacity(pattern.len() + MARKER.len() + 4);
+    translated.push_str(&pattern[..index]);
+    translated.push_str("(?P<");
+    translated.push_str(MARKER);
+    translated.push('>');
+    translated.push_str(&pattern[index + 2..]);
+    translated.push(')');
+    Ok((translated, Some(MARKER.to_owned())))
+}
+
+fn escaped(bytes: &[u8], index: usize) -> bool {
+    bytes[..index]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 enum ConditionRegexTarget {
@@ -656,6 +732,8 @@ mod tests {
                     kind: ConditionKind::Regex(RegexCondition {
                         pattern: "^Subject: spam".into(),
                         compiled: build_regex("^Subject: spam", false).unwrap(),
+                        match_capture: None,
+                        capture_indexes: Vec::new(),
                     }),
                 }],
                 action: RecipeAction::Deliver(Destination::Maildir("inbox".into())),
@@ -857,6 +935,49 @@ mod tests {
 
         assert_eq!(name, "CATEGORY");
         assert_eq!(regex.pattern(), "^alerts$");
+    }
+
+    #[test]
+    fn parses_match_marker_without_exposing_its_helper_group() {
+        let config = parse(":0\n* ^Subject: ([a-z]+)-\\/([a-z]+)$\nmaildir:matched\n").unwrap();
+        let Statement::Recipe(recipe) = &config.statements[0] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+            panic!("expected regex");
+        };
+
+        assert!(regex.match_capture().is_some());
+        assert_eq!(regex.capture_indexes().len(), 2);
+    }
+
+    #[test]
+    fn bounds_and_validates_capture_syntax() {
+        let accepted = format!(
+            ":0\n* {}\nmaildir:matched\n",
+            "()".repeat(MAX_REGEX_CAPTURES)
+        );
+        assert!(parse(&accepted).is_ok());
+
+        let rejected = format!(
+            ":0\n* {}\nmaildir:matched\n",
+            "()".repeat(MAX_REGEX_CAPTURES + 1)
+        );
+        assert!(
+            parse(&rejected)
+                .unwrap_err()
+                .message
+                .contains("capture count exceeds")
+        );
+
+        let duplicate = parse(":0\n* left\\/middle\\/right\nmaildir:matched\n").unwrap_err();
+        assert!(duplicate.message.contains("more than one '\\/'"));
+
+        let named = parse(":0\n* (?P<name>value)\nmaildir:matched\n").unwrap_err();
+        assert_eq!(
+            named.message,
+            "named regular expression groups are not supported"
+        );
     }
 
     #[test]

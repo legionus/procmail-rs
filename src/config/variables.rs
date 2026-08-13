@@ -123,7 +123,13 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LOGDETAIL" => VariablePolicy::RcOnly(AssignmentTarget::LogDetail),
         "VERBOSE" => VariablePolicy::RcOnly(AssignmentTarget::Verbose),
         "DURABILITY" => VariablePolicy::RcOnly(AssignmentTarget::Durability),
-        "LASTFOLDER" => VariablePolicy::RuntimeOnly,
+        "LASTFOLDER" | "MATCH" => VariablePolicy::RuntimeOnly,
+        name if name.strip_prefix("MATCH").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        }) =>
+        {
+            VariablePolicy::RuntimeOnly
+        }
         "LIMIT_MSG_SIZE" => VariablePolicy::RcOnly(AssignmentTarget::MessageLimit(
             MessageLimitVariable::MessageSize,
         )),
@@ -181,6 +187,9 @@ mod tests {
         assert!(!variable_policy("MAILDIR").allows(VariableSource::CommandLine));
         assert!(variable_policy("LASTFOLDER").allows(VariableSource::Runtime));
         assert!(!variable_policy("LASTFOLDER").allows(VariableSource::RcFile));
+        assert!(variable_policy("MATCH").allows(VariableSource::Runtime));
+        assert!(variable_policy("MATCH1").allows(VariableSource::Runtime));
+        assert!(!variable_policy("MATCH1").allows(VariableSource::RcFile));
         assert_eq!(
             variable_policy("VERBOSE").assignment_target(VariableSource::RcFile),
             Some(AssignmentTarget::Verbose)
