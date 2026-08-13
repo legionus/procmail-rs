@@ -165,6 +165,11 @@ impl PendingSink for MaildirSink {
             fsync(&self.file)
                 .map_err(|error| SinkCommitError::before_publication(io_error(error)))?;
         }
+
+        // Publish with one descriptor-relative rename so readers observe
+        // either no entry or the complete file. A cross-mount layout fails
+        // with EXDEV; falling back to copy-and-remove would expose partial
+        // contents and is deliberately not attempted.
         match renameat_with(
             &self.tmp_dir,
             self.name.as_str(),
@@ -472,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_message_private_until_commit() {
+    fn commit_atomically_moves_the_complete_file_from_tmp_to_new() {
         let maildir = TestMaildir::create();
         let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
         let name = sink.name.clone();
