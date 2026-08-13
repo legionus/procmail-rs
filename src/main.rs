@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use procmail_rs::config::{
     self, Destination, MAX_COMMAND_LINE_VARIABLES, Statement, SuppliedVariable,
 };
-use procmail_rs::delivery::maildir::MaildirSink;
+use procmail_rs::delivery::maildir::{Durability, MaildirSink};
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{PendingFanout, PendingSink};
 use procmail_rs::eval::{DeliveryPlan, ExecutionPlan, HeaderEvaluation};
@@ -37,6 +37,12 @@ struct Command {
     action: Action,
     config: PathBuf,
     supplied: Vec<SuppliedVariable>,
+}
+
+#[derive(Clone, Copy)]
+struct StagingOptions<'a> {
+    directory: &'a Path,
+    durability: Durability,
 }
 
 fn main() -> ExitCode {
@@ -65,6 +71,8 @@ fn run() -> Result<(), String> {
     }
     let limits = MessageLimits::from_config(&config)
         .map_err(|error| format!("{}:{error}", path.display()))?;
+    let durability =
+        Durability::from_config(&config).map_err(|error| format!("{}:{error}", path.display()))?;
     let plan = ExecutionPlan::compile(&config);
     let _trace_config =
         TraceConfig::from_config(&config).map_err(|error| format!("{}:{error}", path.display()))?;
@@ -91,9 +99,14 @@ fn run() -> Result<(), String> {
             let head = Message::read_headers(&mut stdin, limits)
                 .map_err(|error| format!("cannot read message headers from stdin: {error}"))?;
             match plan.evaluate_headers_with_trace(&head, &mut runtime, &mut trace) {
-                HeaderEvaluation::Decided(delivery) => {
-                    deliver_decided(head, &mut stdin, &delivery, &mut runtime, &mut trace)
-                }
+                HeaderEvaluation::Decided(delivery) => deliver_decided(
+                    head,
+                    &mut stdin,
+                    &delivery,
+                    durability,
+                    &mut runtime,
+                    &mut trace,
+                ),
                 HeaderEvaluation::NeedsMessage(continuation) => {
                     let staging_directory = staging_directory.as_deref().ok_or_else(|| {
                         "internal error: deferred evaluation has no staging directory".to_owned()
@@ -103,7 +116,10 @@ fn run() -> Result<(), String> {
                         &mut stdin,
                         &plan,
                         continuation,
-                        staging_directory,
+                        StagingOptions {
+                            directory: staging_directory,
+                            durability,
+                        },
                         &mut runtime,
                         &mut trace,
                     )
@@ -139,10 +155,11 @@ fn deliver_decided(
     head: procmail_rs::message::MessageHead,
     reader: &mut impl io::BufRead,
     plan: &DeliveryPlan,
+    durability: Durability,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
 ) -> Result<(), String> {
-    let sinks = open_sinks(plan.destinations(), runtime, trace)?;
+    let sinks = open_sinks(plan.destinations(), durability, runtime, trace)?;
     let pending = PendingFanout::new(sinks).map_err(|error| error.to_string())?;
     let (validated, _) = pending
         .stream(head, reader)
@@ -157,7 +174,7 @@ fn deliver_staged(
     reader: &mut impl io::BufRead,
     execution: &ExecutionPlan,
     continuation: procmail_rs::eval::Continuation,
-    staging_directory: &Path,
+    options: StagingOptions<'_>,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
 ) -> Result<(), String> {
@@ -165,10 +182,15 @@ fn deliver_staged(
     let early_sinks = if execution.requires_ordered_delivery() {
         Vec::new()
     } else {
-        open_sinks(continuation.pending_destinations(), runtime, trace)?
+        open_sinks(
+            continuation.pending_destinations(),
+            options.durability,
+            runtime,
+            trace,
+        )?
     };
     let pending = PendingFanout::new(early_sinks).map_err(|error| error.to_string())?;
-    let mut staging = StagingFile::create(staging_directory)
+    let mut staging = StagingFile::create(options.directory)
         .map_err(|error| format!("cannot create private staging file: {error}"))?;
     let header_len = head.len();
 
@@ -192,13 +214,13 @@ fn deliver_staged(
         )
         .map_err(|error| format!("cannot evaluate message: {error}"))?;
     if execution.requires_ordered_delivery() {
-        deliver_ordered(&plan, staged.as_bytes(), runtime, trace)?;
+        deliver_ordered(&plan, staged.as_bytes(), options.durability, runtime, trace)?;
         return delivery_outcome(&plan);
     }
     let late_destinations = plan.destinations().get(early_count..).ok_or_else(|| {
         "internal error: deferred delivery discarded an early copy destination".to_owned()
     })?;
-    let late_sinks = open_sinks(late_destinations, runtime, trace)?;
+    let late_sinks = open_sinks(late_destinations, options.durability, runtime, trace)?;
     let late = PendingFanout::new(late_sinks).map_err(|error| error.to_string())?;
     let validated = validated
         .append_bytes(late, staged.as_bytes())
@@ -211,6 +233,7 @@ fn deliver_staged(
 fn deliver_ordered(
     plan: &DeliveryPlan,
     message: &[u8],
+    durability: Durability,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
 ) -> Result<(), String> {
@@ -218,20 +241,32 @@ fn deliver_ordered(
     // Publish one complete staged copy at a time and update runtime values
     // before resolving the next expression.
     for destination in plan.destinations() {
-        let mut sinks = open_sinks(std::slice::from_ref(destination), runtime, trace)?;
+        let mut sinks = open_sinks(
+            std::slice::from_ref(destination),
+            durability,
+            runtime,
+            trace,
+        )?;
         let mut sink = sinks
             .pop()
             .ok_or_else(|| "internal error: destination produced no sink".to_owned())?;
         sink.write_all(message)
             .map_err(|error| format!("cannot write staged delivery: {error}"))?;
-        let published = sink.commit().map_err(|error| {
-            record_delivery(
-                destination,
-                DeliveryStage::Failed(FailureClass::Transient),
-                trace,
-            );
-            format!("cannot publish Maildir delivery: {error}")
-        })?;
+        let published = match sink.commit() {
+            Ok(published) => published,
+            Err(error) => {
+                if let Some(published) = error.published() {
+                    record_delivery(destination, DeliveryStage::Published, trace);
+                    runtime.record_delivery_with_trace(published, trace)?;
+                }
+                record_delivery(
+                    destination,
+                    DeliveryStage::Failed(FailureClass::Transient),
+                    trace,
+                );
+                return Err(format!("cannot publish Maildir delivery: {error}"));
+            }
+        };
         record_delivery(destination, DeliveryStage::Published, trace);
         runtime.record_delivery_with_trace(&published, trace)?;
     }
@@ -273,6 +308,7 @@ fn commit_delivery(
 
 fn open_sinks(
     destinations: &[Destination],
+    durability: Durability,
     runtime: &RuntimeVariables,
     trace: &mut impl TraceSink,
 ) -> Result<Vec<Box<dyn PendingSink>>, String> {
@@ -292,14 +328,15 @@ fn open_sinks(
         match &destination {
             Destination::Maildir(expression) => {
                 let path = Path::new(expression.source());
-                let sink = MaildirSink::create(path).map_err(|error| {
-                    record_delivery(
-                        unresolved,
-                        DeliveryStage::Failed(FailureClass::Transient),
-                        trace,
-                    );
-                    format!("cannot open Maildir {}: {error}", path.display())
-                })?;
+                let sink =
+                    MaildirSink::create_with_durability(path, durability).map_err(|error| {
+                        record_delivery(
+                            unresolved,
+                            DeliveryStage::Failed(FailureClass::Transient),
+                            trace,
+                        );
+                        format!("cannot open Maildir {}: {error}", path.display())
+                    })?;
                 sinks.push(Box::new(sink));
             }
             Destination::Mbox(expression) => {

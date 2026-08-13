@@ -22,6 +22,7 @@ pub enum AssignmentTarget {
     LogFile,
     LogDetail,
     Verbose,
+    Durability,
     MessageLimit(MessageLimitVariable),
     User,
 }
@@ -121,6 +122,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LOGFILE" => VariablePolicy::RcOnly(AssignmentTarget::LogFile),
         "LOGDETAIL" => VariablePolicy::RcOnly(AssignmentTarget::LogDetail),
         "VERBOSE" => VariablePolicy::RcOnly(AssignmentTarget::Verbose),
+        "DURABILITY" => VariablePolicy::RcOnly(AssignmentTarget::Durability),
         "LASTFOLDER" => VariablePolicy::RuntimeOnly,
         "LIMIT_MSG_SIZE" => VariablePolicy::RcOnly(AssignmentTarget::MessageLimit(
             MessageLimitVariable::MessageSize,

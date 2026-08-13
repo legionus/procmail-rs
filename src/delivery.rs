@@ -22,8 +22,50 @@ pub const MAX_PENDING_SINKS: usize = 256;
 /// clean up its private state.
 pub trait PendingSink: Write {
     /// Publishes the pending bytes and reports the exact visible destination.
-    fn commit(self: Box<Self>) -> io::Result<PublishedDelivery>;
+    fn commit(self: Box<Self>) -> Result<PublishedDelivery, SinkCommitError>;
     fn abort(self: Box<Self>) -> io::Result<()>;
+}
+
+#[derive(Debug)]
+pub struct SinkCommitError {
+    source: io::Error,
+    published: Option<PublishedDelivery>,
+}
+
+impl SinkCommitError {
+    pub fn before_publication(source: io::Error) -> Self {
+        Self {
+            source,
+            published: None,
+        }
+    }
+
+    pub fn after_publication(source: io::Error, published: PublishedDelivery) -> Self {
+        Self {
+            source,
+            published: Some(published),
+        }
+    }
+
+    pub fn published(&self) -> Option<&PublishedDelivery> {
+        self.published.as_ref()
+    }
+
+    pub fn kind(&self) -> io::ErrorKind {
+        self.source.kind()
+    }
+}
+
+impl fmt::Display for SinkCommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for SinkCommitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +323,9 @@ impl ValidatedFanout {
             match sink.commit() {
                 Ok(delivery) => published.push(delivery),
                 Err(source) => {
+                    if let Some(delivery) = source.published().cloned() {
+                        published.push(delivery);
+                    }
                     // A fan-out cannot roll back sinks already made visible.
                     // Preserve their exact names for LASTFOLDER, while aborting
                     // every sink that has not yet reached publication.
@@ -288,7 +333,7 @@ impl ValidatedFanout {
                         .map(|sink| usize::from(sink.abort().is_err()))
                         .fold(0usize, usize::saturating_add);
                     return Err(CommitError {
-                        source,
+                        source: io::Error::other(source),
                         published,
                         abort_failures,
                     });
@@ -544,9 +589,11 @@ mod tests {
     }
 
     impl PendingSink for TestSink {
-        fn commit(self: Box<Self>) -> io::Result<PublishedDelivery> {
+        fn commit(self: Box<Self>) -> Result<PublishedDelivery, SinkCommitError> {
             if self.fail_commit {
-                return Err(io::Error::other("injected commit failure"));
+                return Err(SinkCommitError::before_publication(io::Error::other(
+                    "injected commit failure",
+                )));
             }
             self.state.borrow_mut().visible = Some(self.pending.clone());
             Ok(PublishedDelivery::new(self.last_folder.clone()))

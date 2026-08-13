@@ -13,10 +13,44 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use rustix::fd::OwnedFd;
-use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, openat, renameat_with, unlinkat};
+use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, fsync, openat, renameat_with, unlinkat};
 use rustix::rand::{GetRandomFlags, getrandom};
 
-use super::{PendingSink, PublishedDelivery};
+use super::{PendingSink, PublishedDelivery, SinkCommitError};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Durability {
+    #[default]
+    None,
+    File,
+    Full,
+}
+
+impl Durability {
+    pub fn from_config(config: &crate::config::Config) -> Result<Self, String> {
+        let mut policy = Self::None;
+        for statement in &config.statements {
+            let crate::config::Statement::Assignment(assignment) = statement else {
+                continue;
+            };
+            if assignment.target != crate::config::AssignmentTarget::Durability {
+                continue;
+            }
+            policy = match assignment.value.as_str() {
+                "none" => Self::None,
+                "file" => Self::File,
+                "full" => Self::Full,
+                _ => {
+                    return Err(format!(
+                        "line {}: invalid DURABILITY: expected 'none', 'file', or 'full'",
+                        assignment.line
+                    ));
+                }
+            };
+        }
+        Ok(policy)
+    }
+}
 
 const MAX_NAME_ATTEMPTS: u64 = 128;
 const MAILDIR_NAME_PREFIX: &str = "procmail-rs.";
@@ -35,10 +69,15 @@ pub struct MaildirSink {
     name: String,
     maildir: PathBuf,
     pending: bool,
+    durability: Durability,
 }
 
 impl MaildirSink {
     pub fn create(path: &Path) -> io::Result<Self> {
+        Self::create_with_durability(path, Durability::None)
+    }
+
+    pub fn create_with_durability(path: &Path, durability: Durability) -> io::Result<Self> {
         let maildir = open_directory_path(path)?;
 
         // Validate all three standard components before creating a pending
@@ -58,6 +97,7 @@ impl MaildirSink {
             name,
             maildir: path.to_owned(),
             pending: true,
+            durability,
         })
     }
 
@@ -120,7 +160,11 @@ impl Write for MaildirSink {
 }
 
 impl PendingSink for MaildirSink {
-    fn commit(mut self: Box<Self>) -> io::Result<PublishedDelivery> {
+    fn commit(mut self: Box<Self>) -> Result<PublishedDelivery, SinkCommitError> {
+        if self.durability != Durability::None {
+            fsync(&self.file)
+                .map_err(|error| SinkCommitError::before_publication(io_error(error)))?;
+        }
         match renameat_with(
             &self.tmp_dir,
             self.name.as_str(),
@@ -130,20 +174,29 @@ impl PendingSink for MaildirSink {
         ) {
             Ok(()) => {
                 self.pending = false;
-                Ok(PublishedDelivery::new(
-                    self.maildir.join("new").join(&self.name),
-                ))
+                let published = PublishedDelivery::new(self.maildir.join("new").join(&self.name));
+                if self.durability == Durability::Full {
+                    for directory in [&self.tmp_dir, &self.new_dir] {
+                        if let Err(error) = fsync(directory) {
+                            return Err(SinkCommitError::after_publication(
+                                io_error(error),
+                                published,
+                            ));
+                        }
+                    }
+                }
+                Ok(published)
             }
             Err(error) => {
                 let rename_error = io_error(error);
                 match self.cleanup() {
-                    Ok(()) => Err(rename_error),
-                    Err(cleanup_error) => Err(io::Error::new(
+                    Ok(()) => Err(SinkCommitError::before_publication(rename_error)),
+                    Err(cleanup_error) => Err(SinkCommitError::before_publication(io::Error::new(
                         rename_error.kind(),
                         format!(
                             "{rename_error}; cannot remove pending Maildir file: {cleanup_error}"
                         ),
-                    )),
+                    ))),
                 }
             }
         }
@@ -310,6 +363,53 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(first.len(), MAILDIR_NAME_LEN);
         assert_eq!(second.len(), MAILDIR_NAME_LEN);
+    }
+
+    #[test]
+    fn reads_explicit_durability_policy_in_statement_order() {
+        for (value, expected) in [
+            ("none", Durability::None),
+            ("file", Durability::File),
+            ("full", Durability::Full),
+        ] {
+            let config = crate::config::parse(&format!("DURABILITY={value}\n:0\nmaildir:box\n"))
+                .unwrap()
+                .expand()
+                .unwrap();
+            assert_eq!(Durability::from_config(&config).unwrap(), expected);
+        }
+
+        let config = crate::config::parse("DURABILITY=file\nDURABILITY=none\n:0\nmaildir:box\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        assert_eq!(Durability::from_config(&config).unwrap(), Durability::None);
+    }
+
+    #[test]
+    fn rejects_unknown_durability_before_delivery() {
+        let config = crate::config::parse("DURABILITY=strong\n:0\nmaildir:box\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+
+        assert!(Durability::from_config(&config).is_err());
+    }
+
+    #[test]
+    fn every_durability_mode_can_publish_a_complete_message() {
+        for durability in [Durability::None, Durability::File, Durability::Full] {
+            let maildir = TestMaildir::create();
+            let mut sink =
+                Box::new(MaildirSink::create_with_durability(maildir.path(), durability).unwrap());
+            sink.write_all(b"Subject: sync\n\nbody").unwrap();
+
+            let published = PendingSink::commit(sink).unwrap();
+            assert_eq!(
+                fs::read(published.last_folder()).unwrap(),
+                b"Subject: sync\n\nbody"
+            );
+        }
     }
 
     #[test]

@@ -105,9 +105,11 @@ mod tests {
     }
 
     impl PendingSink for NamedSink {
-        fn commit(self: Box<Self>) -> io::Result<PublishedDelivery> {
+        fn commit(self: Box<Self>) -> Result<PublishedDelivery, crate::delivery::SinkCommitError> {
             if self.fail {
-                Err(io::Error::other("injected commit failure"))
+                Err(crate::delivery::SinkCommitError::before_publication(
+                    io::Error::other("injected commit failure"),
+                ))
             } else {
                 Ok(PublishedDelivery::new(PathBuf::from(self.name)))
             }
