@@ -340,6 +340,73 @@ fn filter_delivers_mboxrd_record() {
 }
 
 #[test]
+fn error_recipe_recovers_from_a_real_delivery_failure() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let fallback = base.join("fallback");
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\nmaildir:missing\n:0 e\nmaildir:fallback\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: recover delivery\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn error_recipe_is_skipped_after_real_delivery_success() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let primary = base.join("primary");
+    let fallback = base.join("fallback");
+    create_maildir(&primary);
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\nmaildir:primary\n:0 e\nmaildir:fallback\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: primary delivery\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&primary), [input.to_vec()]);
+    assert!(delivered_messages(&fallback).is_empty());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn mbox_delivery_updates_lastfolder_before_later_destination() {
     let path = config_file("");
     let first = path.parent().unwrap().join("first.mbox");

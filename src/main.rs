@@ -331,8 +331,9 @@ fn deliver_staged(
             OperationalError::PermanentDestination(format!("cannot evaluate message: {error}"))
         })?;
     if execution.requires_ordered_delivery() {
-        deliver_ordered(&plan, staged.as_bytes(), options.durability, runtime, trace)?;
-        return delivery_outcome(&plan);
+        let outcome =
+            deliver_ordered(&plan, staged.as_bytes(), options.durability, runtime, trace)?;
+        return delivery_outcome_counts(outcome.original_delivered, outcome.published);
     }
     let late_destinations = plan.destinations().get(early_count..).ok_or_else(|| {
         OperationalError::Internal(
@@ -356,55 +357,131 @@ fn deliver_ordered(
     durability: Durability,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
-) -> Result<(), OperationalError> {
+) -> Result<OrderedDeliveryOutcome, OperationalError> {
     // A later path may depend on the exact file published by an earlier copy.
     // Publish one complete staged copy at a time and update runtime values
     // before resolving the next expression.
-    for destination in plan.destinations() {
-        if matches!(destination, Destination::Mbox(_)) {
-            deliver_mbox(destination, message, durability, runtime, trace)?;
+    let mut previous_failed = false;
+    let mut pending_error = None;
+    let mut published = 0usize;
+    let mut original_delivered = false;
+    for (index, destination) in plan.destinations().iter().enumerate() {
+        if plan.runs_after_previous_error(index) != previous_failed {
             continue;
         }
-        let mut sinks = open_sinks(
-            std::slice::from_ref(destination),
-            durability,
-            runtime,
-            trace,
-        )?;
-        let mut sink = sinks.pop().ok_or_else(|| {
+        let result = if matches!(destination, Destination::Mbox(_)) {
+            deliver_mbox(destination, message, durability, runtime, trace)
+        } else {
+            deliver_one_maildir(destination, message, durability, runtime, trace)
+        };
+        match result {
+            Ok(()) => {
+                published += 1;
+                original_delivered |= !plan.destination_is_copy(index);
+                previous_failed = false;
+                pending_error = None;
+            }
+            Err(error) if error.can_handle => {
+                previous_failed = true;
+                pending_error = Some(error.error);
+            }
+            Err(error) => return Err(error.error),
+        }
+    }
+    if let Some(error) = pending_error {
+        return Err(error);
+    }
+    Ok(OrderedDeliveryOutcome {
+        published,
+        original_delivered,
+    })
+}
+
+struct OrderedDeliveryOutcome {
+    published: usize,
+    original_delivered: bool,
+}
+
+struct OrderedStepError {
+    error: OperationalError,
+    can_handle: bool,
+}
+
+impl OrderedStepError {
+    fn before_publication(error: OperationalError) -> Self {
+        Self {
+            error,
+            can_handle: true,
+        }
+    }
+
+    fn after_publication(error: OperationalError) -> Self {
+        Self {
+            error,
+            can_handle: false,
+        }
+    }
+}
+
+fn deliver_one_maildir(
+    destination: &Destination,
+    message: &[u8],
+    durability: Durability,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) -> Result<(), OrderedStepError> {
+    let mut sinks = open_sinks(
+        std::slice::from_ref(destination),
+        durability,
+        runtime,
+        trace,
+    )
+    .map_err(OrderedStepError::before_publication)?;
+    let mut sink = sinks
+        .pop()
+        .ok_or_else(|| {
             OperationalError::Internal("internal error: destination produced no sink".to_owned())
-        })?;
-        sink.write_all(message).map_err(|error| {
+        })
+        .map_err(OrderedStepError::before_publication)?;
+    sink.write_all(message)
+        .map_err(|error| {
             OperationalError::delivery(
                 DeliveryFailureClass::from_io_error(&error),
                 format!("cannot write staged delivery: {error}"),
             )
-        })?;
-        let published = match sink.commit() {
-            Ok(published) => published,
-            Err(error) => {
-                if let Some(published) = error.published() {
-                    record_delivery(destination, DeliveryStage::Published, trace);
-                    runtime
-                        .record_delivery_with_trace(published, trace)
-                        .map_err(OperationalError::Internal)?;
-                }
-                record_delivery(
-                    destination,
-                    DeliveryStage::Failed(FailureClass::Transient),
-                    trace,
-                );
-                return Err(OperationalError::delivery(
-                    error.class(),
-                    format!("cannot publish Maildir delivery: {error}"),
-                ));
+        })
+        .map_err(OrderedStepError::before_publication)?;
+    let published = match sink.commit() {
+        Ok(published) => published,
+        Err(error) => {
+            if let Some(published) = error.published() {
+                record_delivery(destination, DeliveryStage::Published, trace);
+                runtime
+                    .record_delivery_with_trace(published, trace)
+                    .map_err(OperationalError::Internal)
+                    .map_err(OrderedStepError::after_publication)?;
             }
-        };
-        record_delivery(destination, DeliveryStage::Published, trace);
-        runtime
-            .record_delivery_with_trace(&published, trace)
-            .map_err(OperationalError::Internal)?;
-    }
+            record_delivery(
+                destination,
+                DeliveryStage::Failed(FailureClass::Transient),
+                trace,
+            );
+            let failure = OperationalError::delivery(
+                error.class(),
+                format!("cannot publish Maildir delivery: {error}"),
+            );
+            return Err(if error.published().is_some() {
+                OrderedStepError::after_publication(failure)
+            } else {
+                OrderedStepError::before_publication(failure)
+            });
+        }
+    };
+    record_delivery(destination, DeliveryStage::Published, trace);
+    runtime
+        .record_delivery_with_trace(&published, trace)
+        .map_err(OperationalError::Internal)
+        .map_err(OrderedStepError::after_publication)?;
     Ok(())
 }
 
@@ -414,7 +491,7 @@ fn deliver_mbox(
     durability: Durability,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
-) -> Result<(), OperationalError> {
+) -> Result<(), OrderedStepError> {
     record_delivery(unresolved, DeliveryStage::Preparing, trace);
     let destination = unresolved
         .resolve_with(|name| runtime.get(name).map(str::to_owned))
@@ -425,10 +502,13 @@ fn deliver_mbox(
                 trace,
             );
             OperationalError::PermanentDestination(error.to_string())
-        })?;
+        })
+        .map_err(OrderedStepError::before_publication)?;
     let Destination::Mbox(expression) = destination else {
-        return Err(OperationalError::Internal(
-            "internal error: mbox delivery resolved to another destination type".to_owned(),
+        return Err(OrderedStepError::before_publication(
+            OperationalError::Internal(
+                "internal error: mbox delivery resolved to another destination type".to_owned(),
+            ),
         ));
     };
     let path = Path::new(expression.source());
@@ -445,13 +525,15 @@ fn deliver_mbox(
                 class,
                 format!("cannot open or lock mbox {}: {error}", path.display()),
             )
-        })?;
+        })
+        .map_err(OrderedStepError::before_publication)?;
     match locked.append(message, durability) {
         Ok(published) => {
             record_delivery(unresolved, DeliveryStage::Published, trace);
             runtime
                 .record_delivery_with_trace(&published, trace)
                 .map_err(OperationalError::Internal)
+                .map_err(OrderedStepError::after_publication)
         }
         Err(error) => {
             let class = error.class();
@@ -462,7 +544,8 @@ fn deliver_mbox(
                         &procmail_rs::delivery::PublishedDelivery::new(path.to_owned()),
                         trace,
                     )
-                    .map_err(OperationalError::Internal)?;
+                    .map_err(OperationalError::Internal)
+                    .map_err(OrderedStepError::after_publication)?;
             } else {
                 record_delivery(
                     unresolved,
@@ -470,10 +553,15 @@ fn deliver_mbox(
                     trace,
                 );
             }
-            Err(OperationalError::delivery(
+            let failure = OperationalError::delivery(
                 class,
                 format!("cannot deliver to mbox {}: {error}", path.display()),
-            ))
+            );
+            Err(if error.published() {
+                OrderedStepError::after_publication(failure)
+            } else {
+                OrderedStepError::before_publication(failure)
+            })
         }
     }
 }
@@ -604,12 +692,19 @@ fn validate_maildir_path(path: &Path) -> Result<(), String> {
 }
 
 fn delivery_outcome(plan: &DeliveryPlan) -> Result<(), OperationalError> {
-    if plan.original_delivered() {
+    delivery_outcome_counts(plan.original_delivered(), plan.destinations().len())
+}
+
+fn delivery_outcome_counts(
+    original_delivered: bool,
+    published: usize,
+) -> Result<(), OperationalError> {
+    if original_delivered {
         Ok(())
     } else {
         Err(OperationalError::Undelivered(format!(
             "original message was not delivered (published {} copy destination(s))",
-            plan.copies()
+            published
         )))
     }
 }

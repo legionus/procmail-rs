@@ -23,11 +23,32 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
     let lines: Vec<&str> = input.lines().collect();
     let mut counts = ParseCounts::default();
     let (statements, _) = parse_statements(&lines, 0, 0, &mut counts)?;
+    validate_error_predecessors(&statements)?;
 
     Ok(Config {
         statements,
         initial_variables: Vec::new(),
     })
+}
+
+fn validate_error_predecessors(statements: &[Statement]) -> Result<(), ParseError> {
+    let mut previous_action: Option<&RecipeAction> = None;
+    for statement in statements {
+        let Statement::Recipe(recipe) = statement else {
+            continue;
+        };
+        if recipe.has_flag('e') && matches!(previous_action, Some(RecipeAction::Block(_))) {
+            return Err(ParseError::new(
+                recipe.line,
+                "error flag 'e' after a recipe block is not supported yet",
+            ));
+        }
+        if let RecipeAction::Block(children) = &recipe.action {
+            validate_error_predecessors(children)?;
+        }
+        previous_action = Some(&recipe.action);
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -392,17 +413,24 @@ fn parse_recipe_header(rest: &str, line: usize) -> Result<(String, Option<String
     }
     if let Some(flag) = flag_text
         .chars()
-        .find(|flag| !matches!(flag, 'H' | 'B' | 'D' | 'c' | 'A' | 'a'))
+        .find(|flag| !matches!(flag, 'H' | 'B' | 'D' | 'c' | 'A' | 'a' | 'E' | 'e'))
     {
         return Err(ParseError::new(
             line,
             format!("recipe flag '{flag}' is not supported yet"),
         ));
     }
-    if flag_text.contains('A') && flag_text.contains('a') {
+    let control_flags = ['A', 'a', 'E', 'e']
+        .into_iter()
+        .filter(|flag| flag_text.contains(*flag))
+        .collect::<Vec<_>>();
+    if control_flags.len() > 1 {
         return Err(ParseError::new(
             line,
-            "recipe flags 'A' and 'a' cannot be combined",
+            format!(
+                "recipe control flags '{}' and '{}' cannot be combined",
+                control_flags[0], control_flags[1]
+            ),
         ));
     }
 
@@ -626,10 +654,32 @@ mod tests {
     fn accepts_chain_flags_but_rejects_their_combination() {
         assert!(parse(":0 A\nmaildir:after-match\n").is_ok());
         assert!(parse(":0 a\nmaildir:after-success\n").is_ok());
+        assert!(parse(":0 E\nmaildir:otherwise\n").is_ok());
+        assert!(parse(":0 e\nmaildir:on-error\n").is_ok());
 
         let error = parse(":0 Aa\nmaildir:ambiguous\n").unwrap_err();
         assert_eq!(error.line, 1);
-        assert_eq!(error.message, "recipe flags 'A' and 'a' cannot be combined");
+        assert_eq!(
+            error.message,
+            "recipe control flags 'A' and 'a' cannot be combined"
+        );
+
+        let error = parse(":0 Ee\nmaildir:ambiguous\n").unwrap_err();
+        assert_eq!(
+            error.message,
+            "recipe control flags 'E' and 'e' cannot be combined"
+        );
+    }
+
+    #[test]
+    fn rejects_error_handler_after_a_block() {
+        let error = parse(":0\n{\n:0\nmaildir:child\n}\n:0 e\nmaildir:fallback\n").unwrap_err();
+
+        assert_eq!(error.line, 6);
+        assert_eq!(
+            error.message,
+            "error flag 'e' after a recipe block is not supported yet"
+        );
     }
 
     #[test]
