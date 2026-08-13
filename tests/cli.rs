@@ -37,6 +37,13 @@ fn delivered_messages(path: &std::path::Path) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn assert_message_contents_absent(stderr: &[u8], secrets: &[&str]) {
+    let diagnostic = String::from_utf8(stderr.to_vec()).unwrap();
+    for secret in secrets {
+        assert!(!diagnostic.contains(secret), "diagnostic leaked {secret:?}");
+    }
+}
+
 #[test]
 fn check_accepts_valid_config() {
     let path = config_file(":0\nmaildir:inbox\n");
@@ -234,16 +241,22 @@ fn filter_reports_body_limit() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(b"\nbody").unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"X-Private: header-secret\n\nbody-secret")
+        .unwrap();
     let output = child.wait_with_output().unwrap();
 
     assert_eq!(output.status.code(), Some(65));
     assert!(output.stdout.is_empty());
     assert!(
-        String::from_utf8(output.stderr)
+        std::str::from_utf8(&output.stderr)
             .unwrap()
             .contains("message exceeds LIMIT_MSG_BODY (3 bytes)")
     );
+    assert_message_contents_absent(&output.stderr, &["header-secret", "body-secret"]);
     assert_eq!(fs::read_dir(maildir.join("tmp")).unwrap().count(), 0);
     assert_eq!(fs::read_dir(maildir.join("new")).unwrap().count(), 0);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -283,7 +296,7 @@ fn filter_streams_header_decided_message_to_maildir() {
 #[test]
 fn filter_fails_when_no_recipe_delivers_the_original() {
     let path = config_file(":0\n* ^Subject: wanted$\nmaildir:unused\n");
-    let input = b"Subject: other\n\nbody";
+    let input = b"Subject: other\nX-Private: header-secret\n\nbody-secret";
     let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["filter", "--config"])
         .arg(&path)
@@ -298,10 +311,11 @@ fn filter_fails_when_no_recipe_delivers_the_original() {
     assert_eq!(output.status.code(), Some(79));
     assert!(output.stdout.is_empty());
     assert!(
-        String::from_utf8(output.stderr)
+        std::str::from_utf8(&output.stderr)
             .unwrap()
             .contains("original message was not delivered")
     );
+    assert_message_contents_absent(&output.stderr, &["header-secret", "body-secret"]);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
@@ -613,7 +627,7 @@ fn runtime_destination_is_resolved_after_previous_copy_is_published() {
         ),
     )
     .unwrap();
-    let input = b"Subject: runtime destination\n\nbody";
+    let input = b"Subject: runtime destination\nX-Private: header-secret\n\nbody-secret";
     let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["filter", "--config"])
         .arg(&path)
@@ -630,6 +644,9 @@ fn runtime_destination_is_resolved_after_previous_copy_is_published() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains("runtime variable LASTFOLDER is not set"));
     assert!(stderr.contains("cannot open Maildir"), "{stderr}");
+    for secret in ["header-secret", "body-secret"] {
+        assert!(!stderr.contains(secret), "diagnostic leaked {secret:?}");
+    }
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
