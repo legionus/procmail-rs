@@ -40,11 +40,32 @@ impl InputRequirements {
 
 #[derive(Debug)]
 pub struct ExecutionPlan {
+    root: CompiledSequence,
     recipes: Vec<CompiledRecipe>,
     condition_group_count: usize,
     suffix_requirements: Vec<InputRequirements>,
-    requirements: InputRequirements,
     requires_ordered_delivery: bool,
+}
+
+#[derive(Debug)]
+struct CompiledSequence {
+    recipes: Vec<CompiledNode>,
+}
+
+#[derive(Debug)]
+struct CompiledNode {
+    control: ControlFlow,
+    condition_requirements: InputRequirements,
+    action: CompiledAction,
+}
+
+#[derive(Debug)]
+enum CompiledAction {
+    Deliver {
+        destination: Destination,
+        continuation: ContinuationMode,
+    },
+    Block(CompiledSequence),
 }
 
 #[derive(Debug)]
@@ -290,8 +311,110 @@ impl fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
+impl CompiledSequence {
+    fn compile(statements: &[Statement]) -> Self {
+        let recipes = statements
+            .iter()
+            .filter_map(|statement| {
+                let Statement::Recipe(recipe) = statement else {
+                    return None;
+                };
+                Some(CompiledNode::compile(recipe))
+            })
+            .collect::<Vec<_>>();
+        Self { recipes }
+    }
+
+    fn requirements(&self) -> InputRequirements {
+        self.recipes
+            .iter()
+            .fold(InputRequirements::default(), |requirements, recipe| {
+                requirements.union(recipe.requirements())
+            })
+    }
+
+    fn requires_ordered_delivery(&self) -> bool {
+        self.recipes
+            .iter()
+            .any(CompiledNode::requires_ordered_delivery)
+    }
+}
+
+impl CompiledNode {
+    fn compile(recipe: &Recipe) -> Self {
+        let condition_requirements = recipe.conditions.iter().fold(
+            InputRequirements::default(),
+            |requirements, condition| {
+                requirements.union(condition_requirements(recipe, &condition.kind))
+            },
+        );
+        let action = match &recipe.action {
+            RecipeAction::Deliver(destination) => CompiledAction::Deliver {
+                destination: destination.clone(),
+                continuation: recipe.options.continuation,
+            },
+            RecipeAction::Block(statements) => {
+                CompiledAction::Block(CompiledSequence::compile(statements))
+            }
+        };
+        Self {
+            control: recipe.options.control,
+            condition_requirements,
+            action,
+        }
+    }
+
+    fn requirements(&self) -> InputRequirements {
+        let action = match &self.action {
+            CompiledAction::Deliver { .. } => InputRequirements::default(),
+            CompiledAction::Block(sequence) => sequence.requirements(),
+        };
+        self.condition_requirements.union(action)
+    }
+
+    fn requires_ordered_delivery(&self) -> bool {
+        let action_requires_order = match &self.action {
+            CompiledAction::Deliver {
+                destination,
+                continuation,
+            } => {
+                destination.needs_runtime_variables()
+                    || matches!(destination, Destination::Mbox(_))
+                    || *continuation == ContinuationMode::BranchBlock
+            }
+            CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
+        };
+        action_requires_order
+            || matches!(
+                self.control,
+                ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
+            )
+    }
+}
+
+fn condition_requirements(recipe: &Recipe, condition: &ConditionKind) -> InputRequirements {
+    match condition {
+        ConditionKind::Regex(_) => match recipe.options.condition_input {
+            ConditionInput::Headers => InputRequirements {
+                needs_headers: true,
+                ..InputRequirements::default()
+            },
+            ConditionInput::Body | ConditionInput::Message => InputRequirements {
+                needs_headers: true,
+                needs_body_contents: true,
+                needs_end_of_message: true,
+            },
+        },
+        ConditionKind::SmallerThan(_) | ConditionKind::LargerThan(_) => InputRequirements {
+            needs_end_of_message: true,
+            ..InputRequirements::default()
+        },
+    }
+}
+
 impl ExecutionPlan {
     pub fn compile(config: &Config) -> Self {
+        let root = CompiledSequence::compile(&config.statements);
         let mut recipes = Vec::new();
         let mut assignments = config
             .initial_variables()
@@ -318,31 +441,25 @@ impl ExecutionPlan {
                 .requirements()
                 .union(suffix_requirements[index + 1]);
         }
-        let requirements = suffix_requirements[0];
-        let requires_ordered_delivery = recipes.iter().any(|recipe| {
-            recipe.destination.needs_runtime_variables()
-                || matches!(recipe.destination, Destination::Mbox(_))
-                || recipe.requires_successful_predecessor
-                || recipe.after_error
-        });
+        let requires_ordered_delivery = root.requires_ordered_delivery();
 
         Self {
+            root,
             recipes,
             condition_group_count,
             suffix_requirements,
-            requirements,
             requires_ordered_delivery,
         }
     }
 
     pub fn requirements(&self) -> InputRequirements {
         if self.requires_ordered_delivery {
-            self.requirements.union(InputRequirements {
+            self.root.requirements().union(InputRequirements {
                 needs_end_of_message: true,
                 ..InputRequirements::default()
             })
         } else {
-            self.requirements
+            self.root.requirements()
         }
     }
 
@@ -513,7 +630,7 @@ impl ExecutionPlan {
                 destinations: Vec::new(),
                 after_error: Vec::new(),
                 copies: Vec::new(),
-                requirements: self.requirements,
+                requirements: self.root.requirements(),
             },
             CompleteMessage::Buffered(message),
             &mut RuntimeVariables::default(),
@@ -1240,6 +1357,34 @@ mod tests {
         let size = compile(":0\n* < 100\ninbox/\n");
         assert!(!size.requirements().needs_body_contents);
         assert!(size.requirements().needs_end_of_message);
+    }
+
+    #[test]
+    fn computes_nested_requirements_from_the_compiled_tree() {
+        let plan = compile(":0\n* ^List-Id:\n{\n:0 B\n* body-marker\nmaildir:body\n}\n");
+
+        assert_eq!(plan.root.recipes.len(), 1);
+        let CompiledAction::Block(children) = &plan.root.recipes[0].action else {
+            panic!("expected compiled block action");
+        };
+        assert_eq!(children.recipes.len(), 1);
+        assert_eq!(
+            plan.requirements(),
+            InputRequirements {
+                needs_headers: true,
+                needs_body_contents: true,
+                needs_end_of_message: true,
+            }
+        );
+    }
+
+    #[test]
+    fn finds_ordered_delivery_inside_the_compiled_tree() {
+        let plan = compile(":0\n{\n:0\nmbox:archive\n}\n");
+
+        assert!(plan.root.requires_ordered_delivery());
+        assert!(plan.requires_ordered_delivery());
+        assert!(plan.requirements().needs_end_of_message);
     }
 
     #[test]
