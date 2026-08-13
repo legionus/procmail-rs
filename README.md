@@ -105,3 +105,9 @@ This deliberately differs from the ordinary Berkeley-style escaping in the
 procmail 3.22 reference source, which quotes an unquoted `From ` line but does
 not provide reversible quoting for every existing `>From ` line. Mailboxes
 written in different mbox variants must not be mixed.
+
+Local mbox writers use a kernel `flock` exclusive lock with bounded retries.
+Mailbox path components and the final file are opened without following
+symlinks, and a mailbox with multiple hard links is rejected. Dotlock is not
+used. This mode coordinates cooperating local writers; no NFS-safety claim is
+made.
