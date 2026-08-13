@@ -99,9 +99,7 @@ struct SequenceExecution {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PlanningExecution {
-    destinations: Vec<Destination>,
-    after_error: Vec<bool>,
-    copies: Vec<bool>,
+    deliveries: Vec<PlannedDelivery>,
     original_delivered: bool,
 }
 
@@ -235,37 +233,50 @@ pub enum DestinationKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryPlan {
-    destinations: Vec<Destination>,
-    after_error: Vec<bool>,
-    copies: Vec<bool>,
+    deliveries: Vec<PlannedDelivery>,
     original_delivered: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedDelivery {
+    destination: Destination,
+    trigger: DeliveryTrigger,
+    continuation: DeliveryContinuation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryTrigger {
+    Selected,
+    PreviousError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryContinuation {
+    Stop,
+    Continue,
+}
+
+impl PlannedDelivery {
+    pub fn destination(&self) -> &Destination {
+        &self.destination
+    }
+
+    pub fn runs_after_previous_error(&self) -> bool {
+        self.trigger == DeliveryTrigger::PreviousError
+    }
+
+    pub fn is_copy(&self) -> bool {
+        self.continuation == DeliveryContinuation::Continue
+    }
+}
+
 impl DeliveryPlan {
-    pub fn destinations(&self) -> &[Destination] {
-        &self.destinations
+    pub fn deliveries(&self) -> &[PlannedDelivery] {
+        &self.deliveries
     }
 
     pub fn original_delivered(&self) -> bool {
         self.original_delivered
-    }
-
-    pub fn runs_after_previous_error(&self, index: usize) -> bool {
-        self.after_error.get(index).copied().unwrap_or(false)
-    }
-
-    pub fn destination_is_copy(&self, index: usize) -> bool {
-        self.copies.get(index).copied().unwrap_or(false)
-    }
-
-    pub fn has_error_fallback(&self) -> bool {
-        self.after_error.iter().any(|enabled| *enabled)
-    }
-
-    pub fn copies(&self) -> usize {
-        self.destinations
-            .len()
-            .saturating_sub(usize::from(self.original_delivered))
     }
 }
 
@@ -296,8 +307,8 @@ impl Continuation {
         self.requirements
     }
 
-    pub fn pending_destinations(&self) -> &[Destination] {
-        &self.execution.destinations
+    pub fn pending_deliveries(&self) -> &[PlannedDelivery] {
+        &self.execution.deliveries
     }
 }
 
@@ -1038,16 +1049,23 @@ impl CompiledNode {
         else {
             return Ok(SequenceControl::Continue);
         };
-        execution.destinations.push(
-            destination
-                .bind_with(|name| runtime.get(name).map(str::to_owned))
-                .map_err(EvalError::Expansion)?,
-        );
-        execution
-            .after_error
-            .push(self.control == ControlFlow::AfterPreviousError);
+        let destination = destination
+            .bind_with(|name| runtime.get(name).map(str::to_owned))
+            .map_err(EvalError::Expansion)?;
         let copy = *continuation == ContinuationMode::Continue;
-        execution.copies.push(copy);
+        execution.deliveries.push(PlannedDelivery {
+            destination,
+            trigger: if self.control == ControlFlow::AfterPreviousError {
+                DeliveryTrigger::PreviousError
+            } else {
+                DeliveryTrigger::Selected
+            },
+            continuation: if copy {
+                DeliveryContinuation::Continue
+            } else {
+                DeliveryContinuation::Stop
+            },
+        });
         execution.original_delivered |= !copy;
         if copy || has_error_handler {
             Ok(SequenceControl::Continue)
@@ -1161,9 +1179,7 @@ impl ExecutionPlan {
             }),
             Ok(HeaderControl::Continue | HeaderControl::Stop) => {
                 HeaderEvaluation::Decided(DeliveryPlan {
-                    destinations: planning.execution.destinations,
-                    after_error: planning.execution.after_error,
-                    copies: planning.execution.copies,
+                    deliveries: planning.execution.deliveries,
                     original_delivered: planning.execution.original_delivered,
                 })
             }
@@ -1252,9 +1268,7 @@ impl ExecutionPlan {
             &mut execution,
         )?;
         Ok(DeliveryPlan {
-            destinations: execution.destinations,
-            after_error: execution.after_error,
-            copies: execution.copies,
+            deliveries: execution.deliveries,
             original_delivered: execution.original_delivered,
         })
     }
@@ -1284,9 +1298,7 @@ impl ExecutionPlan {
             &mut execution,
         )?;
         Ok(DeliveryPlan {
-            destinations: execution.destinations,
-            after_error: execution.after_error,
-            copies: execution.copies,
+            deliveries: execution.deliveries,
             original_delivered: execution.original_delivered,
         })
     }
@@ -1577,6 +1589,21 @@ mod tests {
         ExecutionPlan::compile(&config::parse(source).unwrap())
     }
 
+    fn destinations(plan: &DeliveryPlan) -> Vec<Destination> {
+        plan.deliveries()
+            .iter()
+            .map(|delivery| delivery.destination().clone())
+            .collect()
+    }
+
+    fn pending_destinations(continuation: &Continuation) -> Vec<Destination> {
+        continuation
+            .pending_deliveries()
+            .iter()
+            .map(|delivery| delivery.destination().clone())
+            .collect()
+    }
+
     fn evaluate_config(source: &str, raw: &[u8]) -> (Outcome, Recorder) {
         let config = config::parse(source).unwrap();
         let message = Message::from_bytes(raw.to_vec());
@@ -1789,7 +1816,7 @@ mod tests {
             panic!("expected a header decision");
         };
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [Destination::Maildir("wanted".into())]
         );
     }
@@ -1803,7 +1830,7 @@ mod tests {
             panic!("expected an unconditional decision");
         };
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [Destination::Maildir("all".into())]
         );
     }
@@ -1820,7 +1847,7 @@ mod tests {
             panic!("expected nested delivery");
         };
         assert_eq!(
-            selected.destinations(),
+            destinations(&selected),
             [Destination::Maildir("list".into())]
         );
 
@@ -1830,7 +1857,7 @@ mod tests {
             panic!("expected fallback delivery");
         };
         assert_eq!(
-            skipped.destinations(),
+            destinations(&skipped),
             [Destination::Maildir("fallback".into())]
         );
     }
@@ -1845,7 +1872,7 @@ mod tests {
         };
 
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [
                 Destination::Maildir("copy".into()),
                 Destination::Maildir("final".into())
@@ -1865,7 +1892,7 @@ mod tests {
             panic!("expected chained delivery");
         };
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [
                 Destination::Maildir("first".into()),
                 Destination::Maildir("final".into())
@@ -1877,7 +1904,7 @@ mod tests {
         else {
             panic!("expected a complete decision");
         };
-        assert!(unmatched.destinations().is_empty());
+        assert!(destinations(&unmatched).is_empty());
         assert!(!unmatched.original_delivered());
     }
 
@@ -1892,13 +1919,13 @@ mod tests {
                 b"Subject: wanted\nX-Select: yes\n\nbody".to_vec(),
             ))
             .unwrap();
-        assert_eq!(selected.destinations().len(), 3);
+        assert_eq!(destinations(&selected).len(), 3);
 
         let skipped = plan
             .evaluate_full(&Message::from_bytes(b"Subject: wanted\n\nbody".to_vec()))
             .unwrap();
         assert_eq!(
-            skipped.destinations(),
+            destinations(&skipped),
             [Destination::Maildir("first".into())]
         );
         assert!(!skipped.original_delivered());
@@ -1921,7 +1948,7 @@ mod tests {
             else {
                 panic!("expected a complete decision");
             };
-            assert!(delivery.destinations().is_empty());
+            assert!(destinations(&delivery).is_empty());
         }
     }
 
@@ -1944,7 +1971,7 @@ mod tests {
         let HeaderEvaluation::Decided(delivery) = result else {
             panic!("expected chained delivery");
         };
-        assert_eq!(delivery.destinations().len(), 66);
+        assert_eq!(destinations(&delivery).len(), 66);
         assert_eq!(
             trace
                 .events()
@@ -1971,8 +1998,8 @@ mod tests {
             else {
                 panic!("expected complete else decision");
             };
-            assert_eq!(delivery.destinations()[0].path(), expected);
-            assert_eq!(delivery.destinations().len(), 1);
+            assert_eq!(destinations(&delivery)[0].path(), expected);
+            assert_eq!(destinations(&delivery).len(), 1);
         }
     }
 
@@ -1984,7 +2011,7 @@ mod tests {
         else {
             panic!("expected fallback delivery");
         };
-        assert_eq!(delivery.destinations()[0].path(), "fallback");
+        assert_eq!(destinations(&delivery)[0].path(), "fallback");
     }
 
     #[test]
@@ -2058,7 +2085,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [Destination::Maildir("child-fallback".into())]
         );
     }
@@ -2084,7 +2111,7 @@ mod tests {
             panic!("expected deferred evaluation");
         };
         assert_eq!(
-            continuation.pending_destinations(),
+            pending_destinations(&continuation),
             [Destination::Maildir("copy".into())]
         );
 
@@ -2092,7 +2119,7 @@ mod tests {
             .resume_buffered(continuation, &Message::from_bytes(raw.to_vec()))
             .unwrap();
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [
                 Destination::Maildir("copy".into()),
                 Destination::Maildir("body".into())
@@ -2115,7 +2142,7 @@ mod tests {
         let streamed = head.stream_to(&mut reader, &mut Vec::new()).unwrap();
         let delivery = plan.resume_streamed(continuation, &streamed).unwrap();
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [Destination::Maildir("small".into())]
         );
     }
@@ -2138,7 +2165,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [Destination::Maildir("nested".into())]
         );
     }
@@ -2305,7 +2332,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            delivery.destinations(),
+            destinations(&delivery),
             [
                 Destination::Maildir("copy".into()),
                 Destination::Maildir("final".into())
