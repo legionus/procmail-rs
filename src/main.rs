@@ -19,7 +19,7 @@ use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::eval::{
     ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind, ExecutionPlan,
-    HeaderEvaluation, PlanExplanation, PlannedDelivery,
+    HeaderEvaluation, OrderedExecutionError, PlanExplanation, PlannedDelivery,
 };
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
@@ -319,6 +319,42 @@ fn deliver_staged(
         OperationalError::Internal(format!("cannot map staged message: {error}"))
     })?;
 
+    if execution.requires_ordered_delivery() {
+        let outcome = execution
+            .execute_mapped_ordered_with_trace(
+                staged.as_bytes(),
+                staged.header_len(),
+                runtime,
+                trace,
+                &mut |destination, message, runtime, trace| {
+                    let result = if matches!(destination, Destination::Mbox(_)) {
+                        deliver_mbox(destination, message, options.durability, runtime, trace)
+                    } else {
+                        deliver_one_maildir(
+                            destination,
+                            message,
+                            options.durability,
+                            runtime,
+                            trace,
+                        )
+                    };
+                    result.map_err(|error| {
+                        if error.can_handle {
+                            DeliveryAttemptError::Recoverable(error.error)
+                        } else {
+                            DeliveryAttemptError::Fatal(error.error)
+                        }
+                    })
+                },
+            )
+            .map_err(|error| match error {
+                OrderedExecutionError::Evaluation(error) => OperationalError::PermanentDestination(
+                    format!("cannot evaluate message: {error}"),
+                ),
+                OrderedExecutionError::Delivery(error) => error,
+            })?;
+        return delivery_outcome_counts(outcome.original_delivered(), outcome.published());
+    }
     let plan = execution
         .resume_mapped_with_trace(
             continuation,
@@ -330,36 +366,6 @@ fn deliver_staged(
         .map_err(|error| {
             OperationalError::PermanentDestination(format!("cannot evaluate message: {error}"))
         })?;
-    if execution.requires_ordered_delivery() {
-        let outcome = plan.execute_ordered(|delivery| {
-            let destination = delivery.destination();
-            let result = if matches!(destination, Destination::Mbox(_)) {
-                deliver_mbox(
-                    destination,
-                    staged.as_bytes(),
-                    options.durability,
-                    runtime,
-                    trace,
-                )
-            } else {
-                deliver_one_maildir(
-                    destination,
-                    staged.as_bytes(),
-                    options.durability,
-                    runtime,
-                    trace,
-                )
-            };
-            result.map_err(|error| {
-                if error.can_handle {
-                    DeliveryAttemptError::Recoverable(error.error)
-                } else {
-                    DeliveryAttemptError::Fatal(error.error)
-                }
-            })
-        })?;
-        return delivery_outcome_counts(outcome.original_delivered(), outcome.published());
-    }
     let late_deliveries = plan.deliveries().get(early_count..).ok_or_else(|| {
         OperationalError::Internal(
             "internal error: deferred delivery discarded an early copy destination".to_owned(),

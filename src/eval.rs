@@ -97,6 +97,16 @@ struct SequenceExecution {
     pending_error: Option<EvalError>,
 }
 
+struct OrderedTreeExecution<'a, E, D, T> {
+    message: CompleteMessage<'a>,
+    runtime: &'a mut RuntimeVariables,
+    trace: &'a mut T,
+    deliver: &'a mut D,
+    published: usize,
+    original_delivered: bool,
+    pending_error: Option<E>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PlanningExecution {
     deliveries: Vec<PlannedDelivery>,
@@ -248,6 +258,12 @@ pub struct PlannedDelivery {
 pub enum DeliveryAttemptError<E> {
     Recoverable(E),
     Fatal(E),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderedExecutionError<E> {
+    Evaluation(EvalError),
+    Delivery(E),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,6 +543,67 @@ impl CompiledSequence {
         }
 
         Ok(SequenceControl::Continue)
+    }
+
+    fn execute_ordered<E, D, T>(
+        &self,
+        context: &mut OrderedTreeExecution<'_, E, D, T>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        let mut state = SequenceState::default();
+        let mut sequence_action = ActionExecution::Succeeded;
+
+        for recipe in &self.recipes {
+            apply_assignments(&recipe.assignments, context.runtime, context.trace);
+            let gate = match recipe.control {
+                ControlFlow::Independent => true,
+                ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
+                ControlFlow::AfterPreviousSuccess => state.previous.is_some_and(|result| {
+                    result.conditions_matched && result.action == ActionExecution::Succeeded
+                }),
+                ControlFlow::Else => state.previous.is_none_or(|result| !result.else_handled),
+                ControlFlow::AfterPreviousError => state
+                    .previous
+                    .is_some_and(|result| result.action == ActionExecution::Failed),
+            };
+            let conditions_matched = gate
+                && recipe
+                    .matches_complete(context.message, context.trace)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+            let else_handled = recipe.else_handled(state, conditions_matched);
+            let (action, control) = if conditions_matched {
+                context.trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Selected,
+                });
+                recipe.execute_ordered_action(context)?
+            } else {
+                context.trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
+                (ActionExecution::NotAttempted, SequenceControl::Continue)
+            };
+            state.record(recipe.control, conditions_matched, action, else_handled);
+            if action == ActionExecution::Failed {
+                sequence_action = ActionExecution::Failed;
+            } else if action == ActionExecution::Succeeded {
+                sequence_action = ActionExecution::Succeeded;
+            }
+            if control == SequenceControl::Stop {
+                return Ok((sequence_action, control));
+            }
+        }
+
+        Ok((sequence_action, SequenceControl::Continue))
     }
 
     fn plan_complete(
@@ -1093,6 +1170,60 @@ impl CompiledNode {
         }
     }
 
+    fn execute_ordered_action<E, D, T>(
+        &self,
+        context: &mut OrderedTreeExecution<'_, E, D, T>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        match &self.action {
+            CompiledAction::Deliver {
+                destination,
+                continuation,
+            } => {
+                let destination = destination
+                    .bind_with(|name| context.runtime.get(name).map(str::to_owned))
+                    .map_err(EvalError::Expansion)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                let message = context
+                    .message
+                    .full()
+                    .ok_or(EvalError::BodyWasNotBuffered)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                match (context.deliver)(&destination, message, context.runtime, context.trace) {
+                    Ok(()) => {
+                        context.published += 1;
+                        context.pending_error = None;
+                        if *continuation == ContinuationMode::Stop {
+                            context.original_delivered = true;
+                            Ok((ActionExecution::Succeeded, SequenceControl::Stop))
+                        } else {
+                            Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                        }
+                    }
+                    Err(DeliveryAttemptError::Recoverable(error)) => {
+                        context.pending_error = Some(error);
+                        Ok((ActionExecution::Failed, SequenceControl::Continue))
+                    }
+                    Err(DeliveryAttemptError::Fatal(error)) => {
+                        Err(OrderedExecutionError::Delivery(error))
+                    }
+                }
+            }
+            CompiledAction::Block(children) => {
+                context.pending_error = None;
+                children.execute_ordered(context)
+            }
+        }
+    }
+
     fn plan_action(
         &self,
         message: CompleteMessage<'_>,
@@ -1360,6 +1491,47 @@ impl ExecutionPlan {
         Ok(DeliveryPlan {
             deliveries: execution.deliveries,
             original_delivered: execution.original_delivered,
+        })
+    }
+
+    pub fn execute_mapped_ordered_with_trace<E, D, T>(
+        &self,
+        raw: &[u8],
+        header_len: usize,
+        runtime: &mut RuntimeVariables,
+        trace: &mut T,
+        deliver: &mut D,
+    ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        if header_len > raw.len() {
+            return Err(OrderedExecutionError::Evaluation(
+                EvalError::BodyWasNotBuffered,
+            ));
+        }
+        let mut context = OrderedTreeExecution {
+            message: CompleteMessage::Mapped { raw, header_len },
+            runtime,
+            trace,
+            deliver,
+            published: 0,
+            original_delivered: false,
+            pending_error: None,
+        };
+        self.root.execute_ordered(&mut context)?;
+        if let Some(error) = context.pending_error {
+            return Err(OrderedExecutionError::Delivery(error));
+        }
+        Ok(DeliveryOutcome {
+            published: context.published,
+            original_delivered: context.original_delivered,
         })
     }
 
@@ -2242,6 +2414,69 @@ mod tests {
         assert_eq!(attempted, ["primary", "dependent"]);
         assert_eq!(outcome.published(), 2);
         assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn ordered_tree_binds_runtime_values_between_actual_actions() {
+        let plan = compile("BOX=first\n:0 c\nmaildir:$BOX\n:0\nmaildir:${LASTFOLDER}.second\n");
+        let raw = b"Subject: test\n\nbody";
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = NoTrace;
+        let mut attempted = Vec::new();
+
+        let outcome = plan
+            .execute_mapped_ordered_with_trace(
+                raw,
+                b"Subject: test\n\n".len(),
+                &mut runtime,
+                &mut trace,
+                &mut |destination, _, runtime, _| {
+                    let destination = destination
+                        .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                        .unwrap();
+                    attempted.push(destination.path().to_owned());
+                    runtime.set("LASTFOLDER", destination.path());
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(attempted, ["first", "first.second"]);
+        assert_eq!(runtime.last_folder(), Some("first.second"));
+        assert_eq!(outcome.published(), 2);
+        assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn ordered_tree_uses_actual_failure_for_lowercase_chain() {
+        let plan = compile(":0 c\nmaildir:primary\n:0 a\nmaildir:dependent\n");
+        let raw = b"Subject: test\n\nbody";
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = NoTrace;
+        let mut attempted = Vec::new();
+
+        let outcome = plan
+            .execute_mapped_ordered_with_trace(
+                raw,
+                b"Subject: test\n\n".len(),
+                &mut runtime,
+                &mut trace,
+                &mut |destination, _, _, _| {
+                    attempted.push(destination.path().to_owned());
+                    if destination.path() == "primary" {
+                        Err(DeliveryAttemptError::Recoverable("primary failed"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(attempted, ["primary"]);
+        assert!(matches!(
+            outcome,
+            OrderedExecutionError::Delivery("primary failed")
+        ));
     }
 
     #[test]
