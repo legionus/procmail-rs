@@ -102,6 +102,28 @@ fn explain_reports_safe_plan_without_reading_or_delivery() {
 }
 
 #[test]
+fn explain_reports_internal_stdout_failure() {
+    let path = config_file(":0\nmaildir:unused\n");
+    let failing_stdout = fs::File::options().write(true).open("/dev/full").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["explain", "--config"])
+        .arg(&path)
+        .stdout(Stdio::from(failing_stdout))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(70));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("cannot write plan explanation")
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn check_reports_source_line() {
     let path = config_file(":0\n| command\n");
     let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
@@ -290,6 +312,39 @@ fn filter_streams_header_decided_message_to_maildir() {
         .collect();
     assert_eq!(files.len(), 1);
     assert_eq!(fs::read(&files[0]).unwrap(), input);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_reports_temporary_descriptor_exhaustion() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("inbox");
+    create_maildir(&maildir);
+    fs::write(&path, format!(":0\nmaildir:{}\n", maildir.display())).unwrap();
+
+    // Limit only the child process. Maildir setup needs several directory
+    // descriptors at once, which provides a deterministic retryable failure
+    // without filling storage or changing global resource limits.
+    let output = Command::new("/bin/sh")
+        .args(["-c", "ulimit -n 5; exec \"$@\"", "procmail-rs"])
+        .arg(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::from({
+            let message = path.parent().unwrap().join("message.eml");
+            fs::write(&message, b"Subject: retry later\n\nbody").unwrap();
+            fs::File::open(message).unwrap()
+        }))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(75));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("Too many open files")
+    );
+    assert!(delivered_messages(&maildir).is_empty());
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
@@ -639,7 +694,7 @@ fn runtime_destination_is_resolved_after_previous_copy_is_published() {
     child.stdin.take().unwrap().write_all(input).unwrap();
     let output = child.wait_with_output().unwrap();
 
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(73));
     assert_eq!(delivered_messages(&first), [input.to_vec()]);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains("runtime variable LASTFOLDER is not set"));

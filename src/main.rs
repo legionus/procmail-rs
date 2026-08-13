@@ -395,7 +395,7 @@ fn deliver_ordered(
         })?;
         sink.write_all(message).map_err(|error| {
             OperationalError::delivery(
-                DeliveryFailureClass::from_io_kind(error.kind()),
+                DeliveryFailureClass::from_io_error(&error),
                 format!("cannot write staged delivery: {error}"),
             )
         })?;
@@ -497,7 +497,7 @@ fn open_sinks(
                             trace,
                         );
                         OperationalError::delivery(
-                            DeliveryFailureClass::from_io_kind(error.kind()),
+                            DeliveryFailureClass::from_io_error(&error),
                             format!("cannot open Maildir {}: {error}", path.display()),
                         )
                     })?;

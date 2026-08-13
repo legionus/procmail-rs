@@ -34,6 +34,18 @@ pub enum DeliveryFailureClass {
 }
 
 impl DeliveryFailureClass {
+    pub fn from_io_error(error: &io::Error) -> Self {
+        // Rust 1.93 does not expose EMFILE as a distinct ErrorKind. On the
+        // currently supported Linux target, descriptor exhaustion is a
+        // temporary process resource failure and can succeed after retry.
+        const LINUX_EMFILE: i32 = 24;
+
+        if error.raw_os_error() == Some(LINUX_EMFILE) {
+            return Self::Retryable;
+        }
+        Self::from_io_kind(error.kind())
+    }
+
     pub fn from_io_kind(kind: io::ErrorKind) -> Self {
         match kind {
             io::ErrorKind::AlreadyExists
@@ -88,7 +100,7 @@ impl SinkCommitError {
     }
 
     pub fn class(&self) -> DeliveryFailureClass {
-        DeliveryFailureClass::from_io_kind(self.kind())
+        DeliveryFailureClass::from_io_error(&self.source)
     }
 }
 
@@ -504,7 +516,7 @@ impl AppendError {
     }
 
     pub fn class(&self) -> DeliveryFailureClass {
-        DeliveryFailureClass::from_io_kind(self.source.kind())
+        DeliveryFailureClass::from_io_error(&self.source)
     }
 }
 
@@ -844,6 +856,10 @@ mod tests {
             let error = SinkCommitError::before_publication(io::Error::from(kind));
             assert_eq!(error.class(), expected);
         }
+        assert_eq!(
+            DeliveryFailureClass::from_io_error(&io::Error::from_raw_os_error(24)),
+            DeliveryFailureClass::Retryable
+        );
 
         let input = b"\nbody";
         let first = Rc::new(RefCell::new(SinkState::default()));
