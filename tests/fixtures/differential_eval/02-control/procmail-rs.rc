@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+:0 c
+* ^Subject: Control$
+mbox:/fixture/01-base
+
+:0 Ac
+mbox:/fixture/02-upper-chain
+
+:0 ac
+mbox:/fixture/03-lower-chain
+
+:0 Ec
+mbox:/fixture/never-else
+
+:0 c
+* ^X-Missing:
+mbox:/fixture/never-base
+
+:0 Ac
+mbox:/fixture/never-chain
+
+:0 Ec
+mbox:/fixture/04-else
+
+:0
+{
+  :0 c
+  * ^Subject: Control$
+  mbox:/fixture/05-nested
+}
+
+:0
+mbox:/fixture/99-final

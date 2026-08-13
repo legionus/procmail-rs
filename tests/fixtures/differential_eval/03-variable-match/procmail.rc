@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+TOKEN=alpha-beta
+
+:0 c
+* TOKEN ?? ^alpha-beta$
+$OUT/01-variable
+
+:0 c
+* ^Subject: request \/[^ ]+
+$OUT/02-capture
+
+:0 c
+* MATCH ?? ^report\.txt$
+$OUT/03-match-value
+
+:0
+$OUT/99-final

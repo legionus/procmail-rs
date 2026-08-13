@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+TOKEN=alpha-beta
+
+:0 c
+* TOKEN ?? ^alpha-beta$
+mbox:/fixture/01-variable
+
+:0 c
+* ^Subject: request \/[^ ]+
+mbox:/fixture/02-capture
+
+:0 c
+* MATCH ?? ^report\.txt$
+mbox:/fixture/03-match-value
+
+:0
+mbox:/fixture/99-final

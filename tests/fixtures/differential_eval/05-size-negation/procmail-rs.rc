@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+:0 c
+* < 1024
+mbox:/fixture/01-smaller
+
+:0 c
+* > 10
+mbox:/fixture/02-larger
+
+:0 c
+* ! ^X-Missing:
+mbox:/fixture/03-negated
+
+:0 c
+* ^Subject: Size$
+* ^X-Test: yes$
+mbox:/fixture/04-and
+
+:0
+mbox:/fixture/99-final

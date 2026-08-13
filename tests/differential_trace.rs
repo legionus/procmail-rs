@@ -13,7 +13,7 @@ use procmail_rs::trace::{ConditionKind, MemoryTrace, RecipeDecision, TraceEvent,
 const DIRECTORY: &str = "tests/fixtures/differential_trace/header_fallback";
 
 #[test]
-fn header_fallback_matches_procmail_3_22_decisions() {
+fn header_fallback_matches_reference_procmail_decisions() {
     let source = include_str!("fixtures/differential_trace/header_fallback/procmail-rs.rc");
     let message = include_bytes!("fixtures/differential_trace/header_fallback/message.eml");
     let expected = include_str!("fixtures/differential_trace/header_fallback/expected.events");

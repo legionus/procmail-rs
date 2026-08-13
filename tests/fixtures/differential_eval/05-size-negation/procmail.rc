@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+:0 c
+* < 1024
+$OUT/01-smaller
+
+:0 c
+* > 10
+$OUT/02-larger
+
+:0 c
+* ! ^X-Missing:
+$OUT/03-negated
+
+:0 c
+* ^Subject: Size$
+* ^X-Test: yes$
+$OUT/04-and
+
+:0
+$OUT/99-final

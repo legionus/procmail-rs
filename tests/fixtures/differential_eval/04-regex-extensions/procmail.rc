@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+:0 c
+* ^^Subject: Anchors
+$OUT/01-start
+
+:0 Bc
+* final^^
+$OUT/02-end
+
+:0 c
+* Subject:.*\<Anchors\>
+$OUT/03-word
+
+:0
+$OUT/99-final

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+:0 c
+* ^Subject: Area Test
+mbox:/fixture/01-header
+
+:0 Bc
+* ^body needle$
+mbox:/fixture/02-body
+
+:0 HBc
+* ^body needle$
+mbox:/fixture/03-message
+
+:0 Bc
+* H ?? ^X-Folded: continued  value$
+mbox:/fixture/04-H-override
+
+:0 c
+* B ?? ^body needle$
+mbox:/fixture/05-B-override
+
+:0 c
+* BH ?? ^body needle$
+mbox:/fixture/06-BH-override
+
+:0 Dc
+* ^subject: Area Test
+mbox:/fixture/never-case-sensitive
+
+:0
+mbox:/fixture/99-final

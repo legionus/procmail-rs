@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+:0 c
+* ^Subject: Control$
+$OUT/01-base
+
+:0 Ac
+$OUT/02-upper-chain
+
+:0 ac
+$OUT/03-lower-chain
+
+:0 Ec
+$OUT/never-else
+
+:0 c
+* ^X-Missing:
+$OUT/never-base
+
+:0 Ac
+$OUT/never-chain
+
+:0 Ec
+$OUT/04-else
+
+:0
+{
+  :0 c
+  * ^Subject: Control$
+  $OUT/05-nested
+}
+
+:0
+$OUT/99-final

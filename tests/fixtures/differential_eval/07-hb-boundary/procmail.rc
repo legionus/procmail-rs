@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+:0 HBc
+* ^^(.+$)*^body needle$
+$OUT/01-boundary
+
+:0
+$OUT/99-final

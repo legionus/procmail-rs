@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+:0 c
+$OUT/missing/primary
+
+:0 ec
+$OUT/01-error
+
+:0
+$OUT/99-final

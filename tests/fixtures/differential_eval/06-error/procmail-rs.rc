@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+:0 c
+mbox:/fixture/primary
+
+:0 ec
+mbox:/fixture/01-error
+
+:0
+mbox:/fixture/99-final

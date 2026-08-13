@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+:0 c
+* ^Subject: Area Test
+$OUT/01-header
+
+:0 Bc
+* ^body needle$
+$OUT/02-body
+
+:0 HBc
+* ^body needle$
+$OUT/03-message
+
+:0 Bc
+* H ?? ^X-Folded: continued  value$
+$OUT/04-H-override
+
+:0 c
+* B ?? ^body needle$
+$OUT/05-B-override
+
+:0 c
+* BH ?? ^body needle$
+$OUT/06-BH-override
+
+:0 Dc
+* ^subject: Area Test
+$OUT/never-case-sensitive
+
+:0
+$OUT/99-final
