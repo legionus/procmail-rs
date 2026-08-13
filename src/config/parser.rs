@@ -24,34 +24,11 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
     let lines: Vec<&str> = input.lines().collect();
     let mut counts = ParseCounts::default();
     let (statements, _) = parse_statements(&lines, 0, 0, &mut counts)?;
-    validate_error_predecessors(&statements)?;
 
     Ok(Config {
         statements,
         initial_variables: Vec::new(),
     })
-}
-
-fn validate_error_predecessors(statements: &[Statement]) -> Result<(), ParseError> {
-    let mut previous_action: Option<&RecipeAction> = None;
-    for statement in statements {
-        let Statement::Recipe(recipe) = statement else {
-            continue;
-        };
-        if recipe.options.control == ControlFlow::AfterPreviousError
-            && matches!(previous_action, Some(RecipeAction::Block(_)))
-        {
-            return Err(ParseError::new(
-                recipe.line,
-                "error flag 'e' after a recipe block is not supported yet",
-            ));
-        }
-        if let RecipeAction::Block(children) = &recipe.action {
-            validate_error_predecessors(children)?;
-        }
-        previous_action = Some(&recipe.action);
-    }
-    Ok(())
 }
 
 #[derive(Default)]
@@ -726,14 +703,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_error_handler_after_a_block() {
-        let error = parse(":0\n{\n:0\nmaildir:child\n}\n:0 e\nmaildir:fallback\n").unwrap_err();
-
-        assert_eq!(error.line, 6);
-        assert_eq!(
-            error.message,
-            "error flag 'e' after a recipe block is not supported yet"
-        );
+    fn accepts_error_handler_after_a_block() {
+        assert!(parse(":0\n{\n:0 c\nmaildir:child\n}\n:0 e\nmaildir:fallback\n").is_ok());
     }
 
     #[test]

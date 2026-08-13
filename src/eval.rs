@@ -470,6 +470,9 @@ impl CompiledSequence {
         let mut state = SequenceState::default();
         let mut sequence_action = ActionExecution::Succeeded;
 
+        // A block reports its latest attempted child action to its parent.
+        // An unhandled copy failure therefore escapes the block, while a
+        // successful child error handler replaces that failure.
         for recipe in &self.recipes {
             apply_assignments(&recipe.assignments, context.runtime, context.trace);
             let conditions_matched = recipe.execution_gate(state)
@@ -1131,6 +1134,9 @@ impl CompiledNode {
                 }
             }
             CompiledAction::Block(children) => {
+                // Do not let an older sibling error determine this block's
+                // result. Child actions either leave their latest failure in
+                // the context or clear it by completing successfully.
                 context.pending_error = None;
                 children.execute_ordered(context)
             }
@@ -2047,6 +2053,40 @@ mod tests {
             ]
         );
         assert!(delivery.original_delivered());
+    }
+
+    #[test]
+    fn failed_copy_makes_its_block_eligible_for_error_handling() {
+        let config =
+            config::parse(":0\n{\n:0 c\nmaildir:primary\n}\n:0 e\nmaildir:fallback\n").unwrap();
+        let message = Message::from_bytes(b"Subject: test\n\nbody".to_vec());
+        let mut recorder = FailingRecorder {
+            fail_paths: &["primary"],
+            attempted: Vec::new(),
+        };
+
+        let outcome = evaluate(&config, &message, &mut recorder).unwrap();
+
+        assert_eq!(recorder.attempted, ["primary", "fallback"]);
+        assert_eq!(outcome, Outcome::Delivered { deliveries: 1 });
+    }
+
+    #[test]
+    fn recovered_child_failure_makes_its_block_succeed() {
+        let config = config::parse(
+            ":0\n{\n:0 c\nmaildir:primary\n:0 ec\nmaildir:inner-fallback\n}\n:0 ec\nmaildir:outer-fallback\n:0\nmaildir:final\n",
+        )
+        .unwrap();
+        let message = Message::from_bytes(b"Subject: test\n\nbody".to_vec());
+        let mut recorder = FailingRecorder {
+            fail_paths: &["primary"],
+            attempted: Vec::new(),
+        };
+
+        let outcome = evaluate(&config, &message, &mut recorder).unwrap();
+
+        assert_eq!(recorder.attempted, ["primary", "inner-fallback", "final"]);
+        assert_eq!(outcome, Outcome::Delivered { deliveries: 2 });
     }
 
     #[test]

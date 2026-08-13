@@ -373,6 +373,39 @@ fn error_recipe_recovers_from_a_real_delivery_failure() {
 }
 
 #[test]
+fn error_recipe_recovers_from_a_failed_copy_inside_a_block() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let fallback = base.join("fallback");
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n{{\n:0 c\nmaildir:missing\n}}\n:0 e\nmaildir:fallback\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: recover block delivery\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn error_recipe_is_skipped_after_real_delivery_success() {
     let path = config_file("");
     let base = path.parent().unwrap();
