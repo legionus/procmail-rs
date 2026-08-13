@@ -269,6 +269,7 @@ impl DeliveryOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryTrigger {
     Selected,
+    PreviousSuccess,
     PreviousError,
 }
 
@@ -285,6 +286,10 @@ impl PlannedDelivery {
 
     pub fn runs_after_previous_error(&self) -> bool {
         self.trigger == DeliveryTrigger::PreviousError
+    }
+
+    pub fn requires_previous_success(&self) -> bool {
+        self.trigger == DeliveryTrigger::PreviousSuccess
     }
 
     pub fn is_copy(&self) -> bool {
@@ -314,7 +319,11 @@ impl DeliveryPlan {
         // preceding attempted action. A later success also replaces an older
         // recoverable error, matching an e recovery chain.
         for delivery in &self.deliveries {
-            if delivery.runs_after_previous_error() != previous_failed {
+            let should_run = match delivery.trigger {
+                DeliveryTrigger::Selected | DeliveryTrigger::PreviousSuccess => !previous_failed,
+                DeliveryTrigger::PreviousError => previous_failed,
+            };
+            if !should_run {
                 continue;
             }
             match deliver(delivery) {
@@ -1121,10 +1130,12 @@ impl CompiledNode {
         let copy = *continuation == ContinuationMode::Continue;
         execution.deliveries.push(PlannedDelivery {
             destination,
-            trigger: if self.control == ControlFlow::AfterPreviousError {
-                DeliveryTrigger::PreviousError
-            } else {
-                DeliveryTrigger::Selected
+            trigger: match self.control {
+                ControlFlow::AfterPreviousSuccess => DeliveryTrigger::PreviousSuccess,
+                ControlFlow::AfterPreviousError => DeliveryTrigger::PreviousError,
+                ControlFlow::Independent | ControlFlow::AfterChainMatch | ControlFlow::Else => {
+                    DeliveryTrigger::Selected
+                }
             },
             continuation: if copy {
                 DeliveryContinuation::Continue
@@ -2186,6 +2197,50 @@ mod tests {
 
         assert_eq!(attempted, ["primary", "fallback"]);
         assert_eq!(outcome.published(), 1);
+        assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn ordered_plan_skips_lowercase_chain_after_actual_failure() {
+        let plan = compile(":0 c\nmaildir:primary\n:0 a\nmaildir:dependent\n");
+        let delivery = plan
+            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody".to_vec()))
+            .unwrap();
+        assert!(delivery.deliveries()[1].requires_previous_success());
+        let mut attempted = Vec::new();
+
+        let error = delivery
+            .execute_ordered(|step| {
+                attempted.push(step.destination().path().to_owned());
+                if step.destination().path() == "primary" {
+                    Err(DeliveryAttemptError::Recoverable("primary failed"))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+
+        assert_eq!(error, "primary failed");
+        assert_eq!(attempted, ["primary"]);
+    }
+
+    #[test]
+    fn ordered_plan_runs_lowercase_chain_after_actual_success() {
+        let plan = compile(":0 c\nmaildir:primary\n:0 a\nmaildir:dependent\n");
+        let delivery = plan
+            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody".to_vec()))
+            .unwrap();
+        let mut attempted = Vec::new();
+
+        let outcome = delivery
+            .execute_ordered(|step| {
+                attempted.push(step.destination().path().to_owned());
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            })
+            .unwrap();
+
+        assert_eq!(attempted, ["primary", "dependent"]);
+        assert_eq!(outcome.published(), 2);
         assert!(outcome.original_delivered());
     }
 
