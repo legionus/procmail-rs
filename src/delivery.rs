@@ -463,6 +463,7 @@ mod tests {
     struct TestSink {
         state: Rc<RefCell<SinkState>>,
         pending: Vec<u8>,
+        max_write_size: Option<usize>,
         fail_write_at: Option<usize>,
         fail_commit: bool,
         fail_abort: bool,
@@ -474,6 +475,7 @@ mod tests {
             Box::new(Self {
                 state,
                 pending: Vec::new(),
+                max_write_size: None,
                 fail_write_at: None,
                 fail_commit: false,
                 fail_abort: false,
@@ -485,7 +487,20 @@ mod tests {
             Box::new(Self {
                 state,
                 pending: Vec::new(),
+                max_write_size: None,
                 fail_write_at: Some(at),
+                fail_commit: false,
+                fail_abort: false,
+                last_folder: PathBuf::from("test-folder"),
+            })
+        }
+
+        fn short_writing(state: Rc<RefCell<SinkState>>, size: usize) -> Box<dyn PendingSink> {
+            Box::new(Self {
+                state,
+                pending: Vec::new(),
+                max_write_size: Some(size),
+                fail_write_at: None,
                 fail_commit: false,
                 fail_abort: false,
                 last_folder: PathBuf::from("test-folder"),
@@ -496,6 +511,7 @@ mod tests {
             Box::new(Self {
                 state,
                 pending: Vec::new(),
+                max_write_size: None,
                 fail_write_at: None,
                 fail_commit: true,
                 fail_abort: false,
@@ -506,14 +522,20 @@ mod tests {
 
     impl Write for TestSink {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if self
-                .fail_write_at
-                .is_some_and(|limit| self.pending.len().saturating_add(bytes.len()) > limit)
-            {
-                return Err(io::Error::other("injected write failure"));
+            if let Some(limit) = self.fail_write_at {
+                let remaining = limit.saturating_sub(self.pending.len());
+                if remaining == 0 {
+                    return Err(io::Error::other("injected write failure"));
+                }
+                let length = bytes.len().min(remaining);
+                self.pending.extend_from_slice(&bytes[..length]);
+                return Ok(length);
             }
-            self.pending.extend_from_slice(bytes);
-            Ok(bytes.len())
+            let length = self
+                .max_write_size
+                .map_or(bytes.len(), |maximum| bytes.len().min(maximum));
+            self.pending.extend_from_slice(&bytes[..length]);
+            Ok(length)
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -614,6 +636,32 @@ mod tests {
         assert!(second.borrow().aborted);
         assert!(first.borrow().visible.is_none());
         assert!(second.borrow().visible.is_none());
+    }
+
+    #[test]
+    fn short_writes_preserve_the_complete_original_message() {
+        let input = b"Subject: test\n\nbinary:\xff\x00body";
+        let state = Rc::new(RefCell::new(SinkState::default()));
+        let (head, mut reader) = read_head(input, MessageLimits::default());
+        let pending = PendingFanout::new(vec![TestSink::short_writing(state.clone(), 3)]).unwrap();
+
+        let (validated, message) = pending.stream(head, &mut reader).unwrap();
+        assert_eq!(message.len(), input.len());
+        validated.commit().unwrap();
+
+        assert_eq!(state.borrow().visible.as_deref(), Some(input.as_slice()));
+    }
+
+    #[test]
+    fn failure_after_a_partial_write_never_publishes_a_message() {
+        let input = b"Subject: test\n\nbody";
+        let state = Rc::new(RefCell::new(SinkState::default()));
+        let (head, mut reader) = read_head(input, MessageLimits::default());
+        let pending = PendingFanout::new(vec![TestSink::failing_write(state.clone(), 5)]).unwrap();
+
+        assert!(pending.stream(head, &mut reader).is_err());
+        assert!(state.borrow().aborted);
+        assert!(state.borrow().visible.is_none());
     }
 
     #[test]
