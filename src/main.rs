@@ -19,7 +19,7 @@ use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::eval::{
     ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind, ExecutionPlan,
-    HeaderEvaluation, OrderedExecutionError, PlanExplanation, PlannedDelivery,
+    HeaderEvaluation, MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery,
 };
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
@@ -284,7 +284,7 @@ fn deliver_decided(
 }
 
 fn deliver_staged(
-    head: procmail_rs::message::MessageHead,
+    mut head: procmail_rs::message::MessageHead,
     reader: &mut impl io::BufRead,
     execution: &ExecutionPlan,
     continuation: procmail_rs::eval::Continuation,
@@ -309,6 +309,7 @@ fn deliver_staged(
         OperationalError::TemporaryDelivery(format!("cannot create private staging file: {error}"))
     })?;
     let header_len = head.len();
+    let matching_header = head.take_matching_header();
 
     // Early copies and staging receive identical bytes in one pass over stdin.
     // Neither side is published yet, so any failure drops both private outputs
@@ -319,12 +320,25 @@ fn deliver_staged(
     let staged = staging.map(MAX_MESSAGE_SIZE, header_len).map_err(|error| {
         OperationalError::Internal(format!("cannot map staged message: {error}"))
     })?;
+    let matching_staged = if execution.needs_message_contents() {
+        matching_header
+            .as_deref()
+            .map(|header| stage_matching_message(options.directory, header, &staged))
+            .transpose()?
+    } else {
+        None
+    };
+    let matching_raw = matching_staged.as_ref().map(|message| message.as_bytes());
+    let matching = matching_header
+        .as_deref()
+        .map(|header| MatchingMessage::new(header, matching_raw));
 
     if execution.requires_ordered_delivery() {
         let outcome = execution
-            .execute_mapped_ordered_with_trace(
+            .execute_mapped_ordered_with_matching_trace(
                 staged.as_bytes(),
                 staged.header_len(),
+                matching,
                 runtime,
                 trace,
                 &mut |destination, message, runtime, trace| {
@@ -357,10 +371,11 @@ fn deliver_staged(
         return delivery_outcome_counts(outcome.original_delivered(), outcome.published());
     }
     let plan = execution
-        .resume_mapped_with_trace(
+        .resume_mapped_with_matching_trace(
             continuation,
             staged.as_bytes(),
             staged.header_len(),
+            matching,
             runtime,
             trace,
         )
@@ -381,6 +396,42 @@ fn deliver_staged(
     commit_delivery(validated, plan.deliveries(), runtime, trace)?;
 
     delivery_outcome(&plan)
+}
+
+fn stage_matching_message(
+    directory: &Path,
+    matching_header: &[u8],
+    staged: &procmail_rs::delivery::staging::StagedMessage,
+) -> Result<procmail_rs::delivery::staging::StagedMessage, OperationalError> {
+    let mut matching = StagingFile::create(directory).map_err(|error| {
+        OperationalError::TemporaryDelivery(format!(
+            "cannot create private regex staging file: {error}"
+        ))
+    })?;
+
+    // A single mapped range is required because an HB expression may begin
+    // in a normalized continued header and finish in the body. Writing the
+    // already bounded pieces to private staging avoids a second message-sized
+    // heap allocation, while the original mapping remains the delivery data.
+    matching.write_all(matching_header).map_err(|error| {
+        OperationalError::TemporaryDelivery(format!(
+            "cannot write normalized headers to regex staging file: {error}"
+        ))
+    })?;
+    matching
+        .write_all(&staged.as_bytes()[staged.header_len()..])
+        .map_err(|error| {
+            OperationalError::TemporaryDelivery(format!(
+                "cannot write message body to regex staging file: {error}"
+            ))
+        })?;
+    matching
+        .map(MAX_MESSAGE_SIZE, matching_header.len())
+        .map_err(|error| {
+            OperationalError::Internal(format!(
+                "cannot map normalized message for regex matching: {error}"
+            ))
+        })
 }
 
 struct OrderedStepError {

@@ -27,6 +27,18 @@ pub struct InputRequirements {
     pub needs_end_of_message: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MatchingMessage<'a> {
+    header: &'a [u8],
+    full: Option<&'a [u8]>,
+}
+
+impl<'a> MatchingMessage<'a> {
+    pub fn new(header: &'a [u8], full: Option<&'a [u8]>) -> Self {
+        Self { header, full }
+    }
+}
+
 impl InputRequirements {
     fn union(self, other: Self) -> Self {
         Self {
@@ -436,9 +448,16 @@ impl CompiledSequence {
         })
     }
 
+    fn needs_message_contents(&self) -> bool {
+        self.recipes
+            .iter()
+            .any(CompiledNode::needs_message_contents)
+    }
+
     fn execute(
         &self,
         message: &Message,
+        matching: CompleteMessage<'_>,
         delivery: &mut impl Delivery,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
@@ -452,8 +471,8 @@ impl CompiledSequence {
             // Control-flow flags inspect only results produced at this block
             // level. Child sequences therefore cannot overwrite the state
             // used by the next sibling recipe.
-            let conditions_matched =
-                recipe.execution_gate(state) && recipe.matches(message, runtime, trace)?;
+            let conditions_matched = recipe.execution_gate(state)
+                && recipe.matches_complete(matching, runtime, trace)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
 
             let (action, control) = if conditions_matched {
@@ -461,7 +480,7 @@ impl CompiledSequence {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
-                recipe.execute_action(message, delivery, runtime, trace, execution)?
+                recipe.execute_action(message, matching, delivery, runtime, trace, execution)?
             } else {
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
@@ -923,21 +942,14 @@ impl CompiledNode {
         }
     }
 
-    fn matches(
-        &self,
-        message: &Message,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-    ) -> Result<bool, EvalError> {
-        for (index, condition) in self.conditions.iter().enumerate() {
-            let matched =
-                condition.matches_complete(CompleteMessage::Buffered(message), runtime)?;
-            condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
-            if !matched {
-                return Ok(false);
+    fn needs_message_contents(&self) -> bool {
+        self.conditions
+            .iter()
+            .any(|condition| matches!(condition.kind, CompiledConditionKind::MessageRegex(_)))
+            || match &self.action {
+                CompiledAction::Deliver { .. } => false,
+                CompiledAction::Block(sequence) => sequence.needs_message_contents(),
             }
-        }
-        Ok(true)
     }
 
     fn matches_complete(
@@ -1066,6 +1078,7 @@ impl CompiledNode {
     fn execute_action(
         &self,
         message: &Message,
+        matching: CompleteMessage<'_>,
         delivery: &mut impl Delivery,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
@@ -1109,7 +1122,8 @@ impl CompiledNode {
                 // Discard an older sibling failure before entering it so an
                 // empty or fully skipped block can still complete normally.
                 execution.pending_error = None;
-                let control = children.execute(message, delivery, runtime, trace, execution)?;
+                let control =
+                    children.execute(message, matching, delivery, runtime, trace, execution)?;
                 let action = if execution.pending_error.is_some() {
                     ActionExecution::Failed
                 } else {
@@ -1286,6 +1300,10 @@ impl ExecutionPlan {
         self.requires_ordered_delivery
     }
 
+    pub fn needs_message_contents(&self) -> bool {
+        self.root.needs_message_contents()
+    }
+
     pub fn explain(&self) -> PlanExplanation {
         // Explain only execution shape. Values, patterns, thresholds, and
         // paths can contain private configuration data and are unnecessary
@@ -1359,9 +1377,16 @@ impl ExecutionPlan {
         continuation: Continuation,
         message: &Message,
     ) -> Result<DeliveryPlan, EvalError> {
+        let matching_full = self
+            .needs_message_contents()
+            .then(|| message.matching_message())
+            .flatten();
         self.resume_tree(
             continuation,
-            CompleteMessage::Buffered(message),
+            CompleteMessage::Buffered {
+                message,
+                matching_full: matching_full.as_deref(),
+            },
             &mut RuntimeVariables::default(),
             &mut NoTrace,
         )
@@ -1415,12 +1440,41 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
+        self.resume_mapped_with_matching_trace(continuation, raw, header_len, None, runtime, trace)
+    }
+
+    pub fn resume_mapped_with_matching_trace(
+        &self,
+        continuation: Continuation,
+        raw: &[u8],
+        header_len: usize,
+        matching: Option<MatchingMessage<'_>>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+    ) -> Result<DeliveryPlan, EvalError> {
         if header_len > raw.len() {
+            return Err(EvalError::BodyWasNotBuffered);
+        }
+        let (matching_header, matching_raw) = matching
+            .map(|message| (Some(message.header), message.full))
+            .unwrap_or((None, None));
+        if !matching_views_are_valid(
+            raw.len(),
+            header_len,
+            matching_header,
+            matching_raw,
+            self.needs_message_contents(),
+        ) {
             return Err(EvalError::BodyWasNotBuffered);
         }
         self.resume_tree(
             continuation,
-            CompleteMessage::Mapped { raw, header_len },
+            CompleteMessage::Mapped {
+                raw,
+                header_len,
+                matching_header,
+                matching_raw,
+            },
             runtime,
             trace,
         )
@@ -1428,8 +1482,15 @@ impl ExecutionPlan {
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
         let mut execution = FanoutPlanState::default();
+        let matching_full = self
+            .needs_message_contents()
+            .then(|| message.matching_message())
+            .flatten();
         self.root.plan_complete(
-            CompleteMessage::Buffered(message),
+            CompleteMessage::Buffered {
+                message,
+                matching_full: matching_full.as_deref(),
+            },
             &mut RuntimeVariables::default(),
             &mut NoTrace,
             &mut execution,
@@ -1457,13 +1518,55 @@ impl ExecutionPlan {
         ) -> Result<(), DeliveryAttemptError<E>>,
         T: TraceSink,
     {
+        self.execute_mapped_ordered_with_matching_trace(
+            raw, header_len, None, runtime, trace, deliver,
+        )
+    }
+
+    pub fn execute_mapped_ordered_with_matching_trace<E, D, T>(
+        &self,
+        raw: &[u8],
+        header_len: usize,
+        matching: Option<MatchingMessage<'_>>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut T,
+        deliver: &mut D,
+    ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
         if header_len > raw.len() {
             return Err(OrderedExecutionError::Evaluation(
                 EvalError::BodyWasNotBuffered,
             ));
         }
+        let (matching_header, matching_raw) = matching
+            .map(|message| (Some(message.header), message.full))
+            .unwrap_or((None, None));
+        if !matching_views_are_valid(
+            raw.len(),
+            header_len,
+            matching_header,
+            matching_raw,
+            self.needs_message_contents(),
+        ) {
+            return Err(OrderedExecutionError::Evaluation(
+                EvalError::BodyWasNotBuffered,
+            ));
+        }
         let mut context = OrderedTreeExecution {
-            message: CompleteMessage::Mapped { raw, header_len },
+            message: CompleteMessage::Mapped {
+                raw,
+                header_len,
+                matching_header,
+                matching_raw,
+            },
             runtime,
             trace,
             deliver,
@@ -1645,7 +1748,7 @@ impl CompiledCondition {
     ) -> Result<PartialMatch, EvalError> {
         let matched = match &self.kind {
             CompiledConditionKind::HeaderRegex(regex) => {
-                self.regex_matches(regex, head.as_bytes(), runtime)?
+                self.regex_matches(regex, head.matching_header(), runtime)?
             }
             CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
                 return Ok(PartialMatch::Deferred);
@@ -1770,39 +1873,81 @@ fn capture_value(captures: &regex::bytes::Captures<'_>, index: usize) -> Result<
 
 #[derive(Debug, Clone, Copy)]
 enum CompleteMessage<'a> {
-    Buffered(&'a Message),
+    Buffered {
+        message: &'a Message,
+        matching_full: Option<&'a [u8]>,
+    },
     Streamed(&'a StreamedMessage),
-    Mapped { raw: &'a [u8], header_len: usize },
+    Mapped {
+        raw: &'a [u8],
+        header_len: usize,
+        matching_header: Option<&'a [u8]>,
+        matching_raw: Option<&'a [u8]>,
+    },
+}
+
+fn matching_views_are_valid(
+    raw_len: usize,
+    header_len: usize,
+    matching_header: Option<&[u8]>,
+    matching_raw: Option<&[u8]>,
+    needs_matching_raw: bool,
+) -> bool {
+    // Normalizing CRLF folding can shorten the header, so validate the two
+    // borrowed views by their independently known pieces rather than reusing
+    // the raw header offset. A full HB view is mandatory whenever a changed
+    // header could otherwise make matching fall back to delivery bytes.
+    match (matching_header, matching_raw) {
+        (None, None) => true,
+        (Some(_), None) => !needs_matching_raw,
+        (Some(header), Some(full)) => header
+            .len()
+            .checked_add(raw_len - header_len)
+            .is_some_and(|expected| expected == full.len()),
+        (None, Some(_)) => false,
+    }
 }
 
 impl<'a> CompleteMessage<'a> {
     fn header_bytes(self) -> &'a [u8] {
         match self {
-            Self::Buffered(message) => message.header(),
-            Self::Streamed(message) => message.header(),
-            Self::Mapped { raw, header_len } => &raw[..header_len],
+            Self::Buffered { message, .. } => message.matching_header(),
+            Self::Streamed(message) => message.matching_header(),
+            Self::Mapped {
+                raw,
+                header_len,
+                matching_header,
+                matching_raw: _,
+            } => matching_header.unwrap_or(&raw[..header_len]),
         }
     }
 
     fn body(self) -> Option<&'a [u8]> {
         match self {
-            Self::Buffered(message) => Some(message.body()),
+            Self::Buffered { message, .. } => Some(message.body()),
             Self::Streamed(_) => None,
-            Self::Mapped { raw, header_len } => Some(&raw[header_len..]),
+            Self::Mapped {
+                raw, header_len, ..
+            } => Some(&raw[header_len..]),
         }
     }
 
     fn full(self) -> Option<&'a [u8]> {
         match self {
-            Self::Buffered(message) => Some(message.as_bytes()),
+            Self::Buffered {
+                message,
+                matching_full,
+            } => Some(matching_full.unwrap_or_else(|| message.as_bytes())),
             Self::Streamed(_) => None,
-            Self::Mapped { raw, .. } => Some(raw),
+            Self::Mapped {
+                raw, matching_raw, ..
+            } => Some(matching_raw.unwrap_or(raw)),
         }
     }
 
     fn len(self) -> usize {
         match self {
-            Self::Buffered(message) => message.len(),
+            Self::Buffered { message, .. } => message.len(),
             Self::Streamed(message) => message.len(),
             Self::Mapped { raw, .. } => raw.len(),
         }
@@ -1835,6 +1980,14 @@ pub fn evaluate(
     delivery: &mut impl Delivery,
 ) -> Result<Outcome, EvalError> {
     let plan = ExecutionPlan::compile(config);
+    let matching_full = plan
+        .needs_message_contents()
+        .then(|| message.matching_message())
+        .flatten();
+    let matching = CompleteMessage::Buffered {
+        message,
+        matching_full: matching_full.as_deref(),
+    };
     let mut execution = SequenceExecution {
         deliveries: 0,
         original_delivered: false,
@@ -1842,6 +1995,7 @@ pub fn evaluate(
     };
     plan.root.execute(
         message,
+        matching,
         delivery,
         &mut RuntimeVariables::default(),
         &mut NoTrace,
@@ -2980,6 +3134,26 @@ mod tests {
         let (outcome, _) = evaluate_config(
             ":0\n* ^subject: WANTED$\nmaildir:wanted\n",
             b"Subject: wanted\n\nbody\n",
+        );
+
+        assert_eq!(outcome, Outcome::Delivered { deliveries: 1 });
+    }
+
+    #[test]
+    fn header_regex_uses_normalized_continuations() {
+        let (outcome, _) = evaluate_config(
+            ":0\n* Subject: alpha  beta\nmaildir:wanted\n",
+            b"Subject: alpha\n beta\n\nbody\n",
+        );
+
+        assert_eq!(outcome, Outcome::Delivered { deliveries: 1 });
+    }
+
+    #[test]
+    fn message_regex_can_cross_a_normalized_header_body_boundary() {
+        let (outcome, _) = evaluate_config(
+            ":0\n* HB ?? beta\\n\\nbody\nmaildir:wanted\n",
+            b"Subject: alpha\n beta\n\nbody\n",
         );
 
         assert_eq!(outcome, Outcome::Delivered { deliveries: 1 });

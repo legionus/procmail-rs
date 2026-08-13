@@ -658,6 +658,40 @@ fn maildir_resolves_relative_delivery_paths() {
 }
 
 #[test]
+fn filter_matches_folded_header_across_body_without_changing_delivery() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join("mail");
+    let inbox = maildir.join("inbox");
+    create_maildir(&maildir);
+    create_maildir(&inbox);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n* HB ?? beta\\n\\nbody\nmaildir:inbox\n",
+            maildir.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: alpha\n beta\n\nbody\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(delivered_messages(&inbox), [input.to_vec()]);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn filter_expands_assignment_and_destination_variables() {
     let path = config_file("");
     let maildir = path.parent().unwrap().join("mail");

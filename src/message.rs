@@ -12,17 +12,20 @@ pub struct Message {
     raw: Vec<u8>,
     header: Range<usize>,
     body: Range<usize>,
+    matching_header: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageHead {
     raw: Vec<u8>,
+    matching_header: Option<Vec<u8>>,
     limits: MessageLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamedMessage {
     header: Vec<u8>,
+    matching_header: Option<Vec<u8>>,
     len: usize,
 }
 
@@ -30,10 +33,12 @@ impl Message {
     #[cfg(test)]
     pub(crate) fn from_bytes(raw: Vec<u8>) -> Self {
         let body_start = find_body_start(&raw).unwrap_or(raw.len());
+        let matching_header = normalize_folded_header(&raw[..body_start]);
 
         Self {
             header: 0..body_start,
             body: body_start..raw.len(),
+            matching_header,
             raw,
         }
     }
@@ -44,6 +49,20 @@ impl Message {
 
     pub fn header(&self) -> &[u8] {
         &self.raw[self.header.clone()]
+    }
+
+    pub(crate) fn matching_header(&self) -> &[u8] {
+        self.matching_header
+            .as_deref()
+            .unwrap_or_else(|| self.header())
+    }
+
+    pub(crate) fn matching_message(&self) -> Option<Vec<u8>> {
+        let header = self.matching_header.as_ref()?;
+        let mut matching = Vec::with_capacity(self.raw.len());
+        matching.extend_from_slice(header);
+        matching.extend_from_slice(self.body());
+        Some(matching)
     }
 
     pub fn body(&self) -> &[u8] {
@@ -100,13 +119,26 @@ impl Message {
             }
         }
 
-        Ok(MessageHead { raw, limits })
+        let matching_header = normalize_folded_header(&raw);
+        Ok(MessageHead {
+            raw,
+            matching_header,
+            limits,
+        })
     }
 }
 
 impl MessageHead {
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
+    }
+
+    pub fn matching_header(&self) -> &[u8] {
+        self.matching_header.as_deref().unwrap_or(&self.raw)
+    }
+
+    pub fn take_matching_header(&mut self) -> Option<Vec<u8>> {
+        self.matching_header.take()
     }
 
     pub fn len(&self) -> usize {
@@ -125,6 +157,7 @@ impl MessageHead {
         Ok(Message {
             header: 0..body_start,
             body: body_start..body_end,
+            matching_header: self.matching_header,
             raw: self.raw,
         })
     }
@@ -150,6 +183,7 @@ impl MessageHead {
         Ok(Message {
             header: 0..body_start,
             body: body_start..body_end,
+            matching_header: self.matching_header,
             raw: self.raw,
         })
     }
@@ -172,14 +206,50 @@ impl MessageHead {
 
         Ok(StreamedMessage {
             header: self.raw,
+            matching_header: self.matching_header,
             len: total,
         })
     }
 }
 
+// Matching treats a continued field as one logical line, while delivery must
+// retain the exact input. Allocate a second header only after finding folding;
+// replacing CRLF or LF with one space cannot make it larger than the bounded
+// raw header. The continuation's own leading whitespace remains untouched to
+// match procmail's `concon(' ')` representation.
+pub(crate) fn normalize_folded_header(raw: &[u8]) -> Option<Vec<u8>> {
+    raw.iter().enumerate().find_map(|(index, byte)| {
+        (*byte == b'\n' && matches!(raw.get(index + 1), Some(b' ' | b'\t'))).then_some(index)
+    })?;
+    let mut normalized = Vec::with_capacity(raw.len());
+    let mut copied = 0usize;
+    let mut scanned = 0usize;
+
+    while let Some(offset) = raw[scanned..].iter().position(|byte| *byte == b'\n') {
+        let newline = scanned + offset;
+        scanned = newline + 1;
+        if matches!(raw.get(scanned), Some(b' ' | b'\t')) {
+            let line_ending_start = if newline > copied && raw.get(newline - 1) == Some(&b'\r') {
+                newline - 1
+            } else {
+                newline
+            };
+            normalized.extend_from_slice(&raw[copied..line_ending_start]);
+            normalized.push(b' ');
+            copied = scanned;
+        }
+    }
+    normalized.extend_from_slice(&raw[copied..]);
+    Some(normalized)
+}
+
 impl StreamedMessage {
     pub fn header(&self) -> &[u8] {
         &self.header
+    }
+
+    pub(crate) fn matching_header(&self) -> &[u8] {
+        self.matching_header.as_deref().unwrap_or(&self.header)
     }
 
     pub fn len(&self) -> usize {
@@ -395,6 +465,36 @@ mod tests {
 
         assert_eq!(message.header(), b"Subject: test\n");
         assert!(message.body().is_empty());
+    }
+
+    #[test]
+    fn normalizes_lf_and_crlf_continuations_only_for_matching() {
+        for (raw, matching) in [
+            (
+                &b"Subject: alpha\n beta\n\tmore\nX-Test: value\n\nbody"[..],
+                &b"Subject: alpha  beta \tmore\nX-Test: value\n\n"[..],
+            ),
+            (
+                &b"Subject: alpha\r\n beta\r\nX-Test: value\r\n\r\nbody"[..],
+                &b"Subject: alpha  beta\r\nX-Test: value\r\n\r\n"[..],
+            ),
+        ] {
+            let mut reader = Cursor::new(raw);
+            let head = Message::read_headers(&mut reader, MessageLimits::default()).unwrap();
+
+            assert_eq!(head.matching_header(), matching);
+            assert_eq!(head.as_bytes(), &raw[..head.len()]);
+        }
+    }
+
+    #[test]
+    fn does_not_allocate_a_matching_header_without_folding() {
+        let raw = b"Subject: alpha\nX-Test: value\n\nbody";
+        let mut reader = Cursor::new(raw);
+        let head = Message::read_headers(&mut reader, MessageLimits::default()).unwrap();
+
+        assert!(head.matching_header.is_none());
+        assert_eq!(head.matching_header(), b"Subject: alpha\nX-Test: value\n\n");
     }
 
     fn read_with(raw: &[u8], limits: MessageLimits) -> Result<Message, MessageReadError> {
