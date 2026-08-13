@@ -564,6 +564,7 @@ fn prepare_capture_pattern(
     const MARKER: &str = "__procmail_rs_match";
     let bytes = pattern.as_bytes();
     let mut marker_output = None;
+    let mut terminal_line_end_output = None;
     let mut in_class = false;
     let mut translated = String::with_capacity(pattern.len() + MARKER.len() + 8);
     let mut literal_start = 0usize;
@@ -593,6 +594,23 @@ fn prepare_capture_pattern(
             index += 2;
             literal_start = index;
             continue;
+        } else if !in_class && matches!(byte, b'^' | b'$') && !escaped(bytes, index) {
+            // Procmail's single line anchors consume the separating newline
+            // during a multiline match, while still matching the outer edge
+            // of the selected area. Express both cases explicitly so HB
+            // patterns can advance from headers into the body.
+            translated.push_str(&pattern[literal_start..index]);
+            if byte == b'^' {
+                translated.push_str("(?:\\A|\\n)");
+            } else {
+                if index + 1 == bytes.len() {
+                    terminal_line_end_output = Some(translated.len());
+                }
+                translated.push_str("(?:\\n|\\z)");
+            }
+            index += 1;
+            literal_start = index;
+            continue;
         } else if !in_class && matches!(byte, b'/' | b'<' | b'>') && escaped(bytes, index) {
             let escape = index - 1;
             translated.push_str(&pattern[literal_start..escape]);
@@ -617,8 +635,16 @@ fn prepare_capture_pattern(
     let Some(index) = marker_output else {
         return Ok((translated, None));
     };
-    translated.insert_str(index, &format!("(?P<{MARKER}>"));
-    translated.push(')');
+    let capture_start = format!("(?P<{MARKER}>");
+    translated.insert_str(index, &capture_start);
+    if let Some(capture_end) = terminal_line_end_output {
+        // `$` consumes a newline in procmail, but that separator is not part
+        // of MATCH. Close the helper capture before the translated terminal
+        // anchor while leaving it inside the condition's complete match.
+        translated.insert(capture_end + capture_start.len(), ')');
+    } else {
+        translated.push(')');
+    }
     Ok((translated, Some(MARKER.to_owned())))
 }
 
@@ -1028,6 +1054,15 @@ mod tests {
             panic!("expected regex");
         };
         assert_eq!(regex.compiled().as_str(), "end\\z");
+
+        let lines = parse(":0\n* ^line$\nmaildir:matched\n").unwrap();
+        let Statement::Recipe(recipe) = &lines.statements[0] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+            panic!("expected regex");
+        };
+        assert_eq!(regex.compiled().as_str(), "(?:\\A|\\n)line(?:\\n|\\z)");
 
         let words = parse(":0\n* \\<word\\>\nmaildir:matched\n").unwrap();
         let Statement::Recipe(recipe) = &words.statements[0] else {
