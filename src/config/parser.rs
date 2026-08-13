@@ -563,32 +563,61 @@ fn prepare_capture_pattern(
 ) -> Result<(String, Option<String>), ParseError> {
     const MARKER: &str = "__procmail_rs_match";
     let bytes = pattern.as_bytes();
-    let mut marker = None;
+    let mut marker_output = None;
     let mut in_class = false;
-    for (index, byte) in bytes.iter().copied().enumerate() {
+    let mut translated = String::with_capacity(pattern.len() + MARKER.len() + 8);
+    let mut literal_start = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
         if byte == b'[' && !escaped(bytes, index) {
             in_class = true;
         } else if byte == b']' && !escaped(bytes, index) {
             in_class = false;
-        } else if byte == b'/' && !in_class && escaped(bytes, index) {
-            let slash_escape = index - 1;
-            if marker.replace(slash_escape).is_some() {
+        } else if !in_class
+            && byte == b'^'
+            && bytes.get(index + 1) == Some(&b'^')
+            && !escaped(bytes, index)
+        {
+            translated.push_str(&pattern[literal_start..index]);
+            if index == 0 {
+                translated.push_str("\\A");
+            } else if index + 2 == bytes.len() {
+                translated.push_str("\\z");
+            } else {
                 return Err(ParseError::new(
                     line,
-                    "regular expression contains more than one '\\/' capture marker",
+                    "'^^' is supported only at the start or end of a regular expression",
                 ));
             }
+            index += 2;
+            literal_start = index;
+            continue;
+        } else if !in_class && matches!(byte, b'/' | b'<' | b'>') && escaped(bytes, index) {
+            let escape = index - 1;
+            translated.push_str(&pattern[literal_start..escape]);
+            if byte == b'/' {
+                if marker_output.replace(translated.len()).is_some() {
+                    return Err(ParseError::new(
+                        line,
+                        "regular expression contains more than one '\\/' capture marker",
+                    ));
+                }
+            } else {
+                translated.push_str("[^a-zA-Z0-9_]");
+            }
+            index += 1;
+            literal_start = index;
+            continue;
         }
+        index += 1;
     }
-    let Some(index) = marker else {
-        return Ok((pattern.to_owned(), None));
+    translated.push_str(&pattern[literal_start..]);
+
+    let Some(index) = marker_output else {
+        return Ok((translated, None));
     };
-    let mut translated = String::with_capacity(pattern.len() + MARKER.len() + 4);
-    translated.push_str(&pattern[..index]);
-    translated.push_str("(?P<");
-    translated.push_str(MARKER);
-    translated.push('>');
-    translated.push_str(&pattern[index + 2..]);
+    translated.insert_str(index, &format!("(?P<{MARKER}>"));
     translated.push(')');
     Ok((translated, Some(MARKER.to_owned())))
 }
@@ -977,6 +1006,42 @@ mod tests {
         assert_eq!(
             named.message,
             "named regular expression groups are not supported"
+        );
+    }
+
+    #[test]
+    fn translates_supported_procmail_regex_extensions() {
+        let start = parse(":0\n* ^^start\nmaildir:matched\n").unwrap();
+        let Statement::Recipe(recipe) = &start.statements[0] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+            panic!("expected regex");
+        };
+        assert_eq!(regex.compiled().as_str(), "\\Astart");
+
+        let end = parse(":0\n* end^^\nmaildir:matched\n").unwrap();
+        let Statement::Recipe(recipe) = &end.statements[0] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+            panic!("expected regex");
+        };
+        assert_eq!(regex.compiled().as_str(), "end\\z");
+
+        let words = parse(":0\n* \\<word\\>\nmaildir:matched\n").unwrap();
+        let Statement::Recipe(recipe) = &words.statements[0] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+            panic!("expected regex");
+        };
+        assert_eq!(regex.compiled().as_str(), "[^a-zA-Z0-9_]word[^a-zA-Z0-9_]");
+
+        let middle = parse(":0\n* left^^right\nmaildir:matched\n").unwrap_err();
+        assert_eq!(
+            middle.message,
+            "'^^' is supported only at the start or end of a regular expression"
         );
     }
 

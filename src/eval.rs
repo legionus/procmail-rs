@@ -2244,6 +2244,49 @@ mod tests {
     }
 
     #[test]
+    fn procmail_anchors_use_the_whole_selected_area() {
+        let start = compile(":0\n* B ?? ^^%!\nmaildir:postscript\n");
+        let delivery = start
+            .evaluate_full(&Message::from_bytes(
+                b"Subject: file\n\n%!PS-Adobe".to_vec(),
+            ))
+            .unwrap();
+        assert_eq!(
+            destinations(&delivery),
+            [Destination::Maildir("postscript".into())]
+        );
+
+        let end = compile(":0 B\n* trailer^^\nmaildir:ended\n");
+        let delivery = end
+            .evaluate_full(&Message::from_bytes(
+                b"Subject: file\n\nbody trailer".to_vec(),
+            ))
+            .unwrap();
+        assert_eq!(
+            destinations(&delivery),
+            [Destination::Maildir("ended".into())]
+        );
+    }
+
+    #[test]
+    fn procmail_word_edges_consume_the_surrounding_bytes() {
+        let plan = compile(":0\n* ^Subject: \\<word\\/\\>$\nmaildir:matched\n");
+        let mut runtime = RuntimeVariables::default();
+
+        let HeaderEvaluation::Decided(delivery) =
+            plan.evaluate_headers_with_runtime(&head(b"Subject: !word?\n\nbody"), &mut runtime)
+        else {
+            panic!("expected a header decision");
+        };
+
+        assert_eq!(
+            destinations(&delivery),
+            [Destination::Maildir("matched".into())]
+        );
+        assert_eq!(runtime.get("MATCH"), Some("?"));
+    }
+
+    #[test]
     fn match_marker_and_numbered_groups_feed_later_expansion() {
         let plan =
             compile(":0\n* ^Subject: ([a-z]+)-\\/([a-z]+)$\nmaildir:$MATCH1-$MATCH-$MATCH2\n");
