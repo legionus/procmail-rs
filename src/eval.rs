@@ -250,7 +250,6 @@ pub struct DeliveryPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedDelivery {
     destination: Destination,
-    trigger: DeliveryTrigger,
     continuation: DeliveryContinuation,
 }
 
@@ -283,13 +282,6 @@ impl DeliveryOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeliveryTrigger {
-    Selected,
-    PreviousSuccess,
-    PreviousError,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryContinuation {
     Stop,
     Continue,
@@ -298,14 +290,6 @@ enum DeliveryContinuation {
 impl PlannedDelivery {
     pub fn destination(&self) -> &Destination {
         &self.destination
-    }
-
-    pub fn runs_after_previous_error(&self) -> bool {
-        self.trigger == DeliveryTrigger::PreviousError
-    }
-
-    pub fn requires_previous_success(&self) -> bool {
-        self.trigger == DeliveryTrigger::PreviousSuccess
     }
 
     pub fn is_copy(&self) -> bool {
@@ -320,49 +304,6 @@ impl DeliveryPlan {
 
     pub fn original_delivered(&self) -> bool {
         self.original_delivered
-    }
-
-    pub fn execute_ordered<E>(
-        &self,
-        mut deliver: impl FnMut(&PlannedDelivery) -> Result<(), DeliveryAttemptError<E>>,
-    ) -> Result<DeliveryOutcome, E> {
-        let mut previous_failed = false;
-        let mut pending_error = None;
-        let mut published = 0usize;
-        let mut original_delivered = false;
-
-        // Dependent steps must observe the result of the immediately
-        // preceding attempted action. A later success also replaces an older
-        // recoverable error, matching an e recovery chain.
-        for delivery in &self.deliveries {
-            let should_run = match delivery.trigger {
-                DeliveryTrigger::Selected | DeliveryTrigger::PreviousSuccess => !previous_failed,
-                DeliveryTrigger::PreviousError => previous_failed,
-            };
-            if !should_run {
-                continue;
-            }
-            match deliver(delivery) {
-                Ok(()) => {
-                    published += 1;
-                    original_delivered |= !delivery.is_copy();
-                    previous_failed = false;
-                    pending_error = None;
-                }
-                Err(DeliveryAttemptError::Recoverable(error)) => {
-                    previous_failed = true;
-                    pending_error = Some(error);
-                }
-                Err(DeliveryAttemptError::Fatal(error)) => return Err(error),
-            }
-        }
-        if let Some(error) = pending_error {
-            return Err(error);
-        }
-        Ok(DeliveryOutcome {
-            published,
-            original_delivered,
-        })
     }
 }
 
@@ -1261,13 +1202,6 @@ impl CompiledNode {
         let copy = *continuation == ContinuationMode::Continue;
         execution.deliveries.push(PlannedDelivery {
             destination,
-            trigger: match self.control {
-                ControlFlow::AfterPreviousSuccess => DeliveryTrigger::PreviousSuccess,
-                ControlFlow::AfterPreviousError => DeliveryTrigger::PreviousError,
-                ControlFlow::Independent | ControlFlow::AfterChainMatch | ControlFlow::Else => {
-                    DeliveryTrigger::Selected
-                }
-            },
             continuation: if copy {
                 DeliveryContinuation::Continue
             } else {
@@ -2349,74 +2283,6 @@ mod tests {
     }
 
     #[test]
-    fn ordered_plan_uses_actual_results_for_error_steps() {
-        let plan = compile(":0\nmaildir:primary\n:0 e\nmaildir:fallback\n");
-        let delivery = plan
-            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody".to_vec()))
-            .unwrap();
-        let mut attempted = Vec::new();
-
-        let outcome = delivery
-            .execute_ordered(|step| {
-                attempted.push(step.destination().path().to_owned());
-                if step.destination().path() == "primary" {
-                    Err(DeliveryAttemptError::Recoverable("primary failed"))
-                } else {
-                    Ok(())
-                }
-            })
-            .unwrap();
-
-        assert_eq!(attempted, ["primary", "fallback"]);
-        assert_eq!(outcome.published(), 1);
-        assert!(outcome.original_delivered());
-    }
-
-    #[test]
-    fn ordered_plan_skips_lowercase_chain_after_actual_failure() {
-        let plan = compile(":0 c\nmaildir:primary\n:0 a\nmaildir:dependent\n");
-        let delivery = plan
-            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody".to_vec()))
-            .unwrap();
-        assert!(delivery.deliveries()[1].requires_previous_success());
-        let mut attempted = Vec::new();
-
-        let error = delivery
-            .execute_ordered(|step| {
-                attempted.push(step.destination().path().to_owned());
-                if step.destination().path() == "primary" {
-                    Err(DeliveryAttemptError::Recoverable("primary failed"))
-                } else {
-                    Ok(())
-                }
-            })
-            .unwrap_err();
-
-        assert_eq!(error, "primary failed");
-        assert_eq!(attempted, ["primary"]);
-    }
-
-    #[test]
-    fn ordered_plan_runs_lowercase_chain_after_actual_success() {
-        let plan = compile(":0 c\nmaildir:primary\n:0 a\nmaildir:dependent\n");
-        let delivery = plan
-            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody".to_vec()))
-            .unwrap();
-        let mut attempted = Vec::new();
-
-        let outcome = delivery
-            .execute_ordered(|step| {
-                attempted.push(step.destination().path().to_owned());
-                Ok::<_, DeliveryAttemptError<&str>>(())
-            })
-            .unwrap();
-
-        assert_eq!(attempted, ["primary", "dependent"]);
-        assert_eq!(outcome.published(), 2);
-        assert!(outcome.original_delivered());
-    }
-
-    #[test]
     fn ordered_tree_binds_runtime_values_between_actual_actions() {
         let plan = compile("BOX=first\n:0 c\nmaildir:$BOX\n:0\nmaildir:${LASTFOLDER}.second\n");
         let raw = b"Subject: test\n\nbody";
@@ -2480,21 +2346,60 @@ mod tests {
     }
 
     #[test]
-    fn ordered_plan_does_not_handle_failure_after_publication() {
+    fn ordered_tree_uses_actual_failure_for_error_handler() {
         let plan = compile(":0\nmaildir:primary\n:0 e\nmaildir:fallback\n");
-        let delivery = plan
-            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody".to_vec()))
-            .unwrap();
+        let raw = b"Subject: test\n\nbody";
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = NoTrace;
         let mut attempted = Vec::new();
 
-        let error = delivery
-            .execute_ordered(|step| {
-                attempted.push(step.destination().path().to_owned());
-                Err(DeliveryAttemptError::Fatal("durability failed"))
-            })
+        let outcome = plan
+            .execute_mapped_ordered_with_trace(
+                raw,
+                b"Subject: test\n\n".len(),
+                &mut runtime,
+                &mut trace,
+                &mut |destination, _, _, _| {
+                    attempted.push(destination.path().to_owned());
+                    if destination.path() == "primary" {
+                        Err(DeliveryAttemptError::Recoverable("primary failed"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap();
+
+        assert_eq!(attempted, ["primary", "fallback"]);
+        assert_eq!(outcome.published(), 1);
+        assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn ordered_tree_does_not_handle_failure_after_publication() {
+        let plan = compile(":0\nmaildir:primary\n:0 e\nmaildir:fallback\n");
+        let raw = b"Subject: test\n\nbody";
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = NoTrace;
+        let mut attempted = Vec::new();
+
+        let error = plan
+            .execute_mapped_ordered_with_trace(
+                raw,
+                b"Subject: test\n\n".len(),
+                &mut runtime,
+                &mut trace,
+                &mut |destination, _, _, _| {
+                    attempted.push(destination.path().to_owned());
+                    Err(DeliveryAttemptError::Fatal("durability failed"))
+                },
+            )
             .unwrap_err();
 
-        assert_eq!(error, "durability failed");
+        assert!(matches!(
+            error,
+            OrderedExecutionError::Delivery("durability failed")
+        ));
         assert_eq!(attempted, ["primary"]);
     }
 
