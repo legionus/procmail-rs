@@ -11,18 +11,18 @@
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, openat, renameat_with, unlinkat};
+use rustix::rand::{GetRandomFlags, getrandom};
 
 use super::{PendingSink, PublishedDelivery};
 
 const MAX_NAME_ATTEMPTS: u64 = 128;
+const MAILDIR_NAME_PREFIX: &str = "procmail-rs.";
+const MAILDIR_RANDOM_BYTES: usize = 16;
+const MAILDIR_NAME_LEN: usize = MAILDIR_NAME_PREFIX.len() + MAILDIR_RANDOM_BYTES * 2;
 const MAILDIR_FILE_MODE: u32 = 0o600;
-static NEXT_NAME: AtomicU64 = AtomicU64::new(0);
 
 /// A pending delivery into an existing Maildir.
 ///
@@ -50,8 +50,8 @@ impl MaildirSink {
         let new_dir = open_directory_at(&maildir, OsStr::new("new"))?;
         let _cur_dir = open_directory_at(&maildir, OsStr::new("cur"))?;
 
-        for attempt in 0..MAX_NAME_ATTEMPTS {
-            let name = unique_name(attempt);
+        for _ in 0..MAX_NAME_ATTEMPTS {
+            let name = unique_name()?;
             match openat(
                 &tmp_dir,
                 name.as_str(),
@@ -210,18 +210,21 @@ pub(crate) fn open_directory_at(dir: impl rustix::fd::AsFd, name: &OsStr) -> io:
     .map_err(io_error)
 }
 
-fn unique_name(attempt: u64) -> String {
-    let sequence = NEXT_NAME.fetch_add(1, Ordering::Relaxed);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    format!(
-        "procmail-rs.{}.{}.{}.{}",
-        process::id(),
-        timestamp,
-        sequence,
-        attempt
-    )
+fn unique_name() -> io::Result<String> {
+    let mut random = [0u8; MAILDIR_RANDOM_BYTES];
+    getrandom(&mut random, GetRandomFlags::empty()).map_err(io_error)?;
+
+    // Encode the fixed-size random value directly so the name cannot contain
+    // path separators or metadata about the process. Exclusive creation below
+    // remains the final collision check even when the random source repeats.
+    let mut name = String::with_capacity(MAILDIR_NAME_LEN);
+    name.push_str(MAILDIR_NAME_PREFIX);
+    for byte in random {
+        use std::fmt::Write as _;
+        write!(name, "{byte:02x}").map_err(|_| io::Error::other("cannot format Maildir name"))?;
+    }
+    debug_assert_eq!(name.len(), MAILDIR_NAME_LEN);
+    Ok(name)
 }
 
 fn io_error(error: rustix::io::Errno) -> io::Error {
@@ -244,7 +247,7 @@ mod tests {
         fn create() -> Self {
             let base = std::env::temp_dir();
             for attempt in 0..128u64 {
-                let path = base.join(unique_name(attempt));
+                let path = base.join(format!("{}test.{attempt}", unique_name().unwrap()));
                 match fs::create_dir(&path) {
                     Ok(()) => {
                         fs::create_dir(path.join("tmp")).unwrap();
@@ -268,6 +271,29 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.path).unwrap();
         }
+    }
+
+    #[test]
+    fn generated_names_have_a_fixed_safe_shape() {
+        let name = unique_name().unwrap();
+
+        assert_eq!(name.len(), MAILDIR_NAME_LEN);
+        assert!(name.starts_with(MAILDIR_NAME_PREFIX));
+        assert!(
+            name[MAILDIR_NAME_PREFIX.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn random_source_distinguishes_generated_names() {
+        let first = unique_name().unwrap();
+        let second = unique_name().unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(first.len(), MAILDIR_NAME_LEN);
+        assert_eq!(second.len(), MAILDIR_NAME_LEN);
     }
 
     #[test]
