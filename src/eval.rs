@@ -281,9 +281,10 @@ impl ExecutionPlan {
                 .union(suffix_requirements[index + 1]);
         }
         let requirements = suffix_requirements[0];
-        let requires_ordered_delivery = recipes
-            .iter()
-            .any(|recipe| recipe.destination.needs_runtime_variables());
+        let requires_ordered_delivery = recipes.iter().any(|recipe| {
+            recipe.destination.needs_runtime_variables()
+                || matches!(recipe.destination, Destination::Mbox(_))
+        });
 
         Self {
             recipes,
@@ -629,7 +630,10 @@ impl CompiledRecipe {
                 }
             }
         }
-        if deferred || self.destination.needs_runtime_variables() {
+        if deferred
+            || self.destination.needs_runtime_variables()
+            || matches!(self.destination, Destination::Mbox(_))
+        {
             PartialMatch::Deferred
         } else {
             PartialMatch::True

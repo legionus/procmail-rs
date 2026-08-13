@@ -167,7 +167,6 @@ fn invalid_configuration_does_not_consume_stdin() {
         "LIMIT_MSG_BODY=10KB\n:0\ninbox/\n",
         ":0 B\n* body\ninbox/\n",
         ":0\nmaildir:$UNDEFINED\n",
-        ":0\nmbox:unsupported\n",
         ":0\nambiguous\n",
         ":0\nmaildir:../escape\n",
         ":0\nmaildir:one//two\n",
@@ -222,27 +221,18 @@ fn non_utf8_command_line_value_does_not_consume_stdin() {
 
 #[test]
 fn check_rejects_unresolved_destination_types() {
-    for (action, expected) in [
-        (
-            "mbox:unsupported",
-            "line 2: mbox delivery is not implemented",
-        ),
-        (
-            "ambiguous",
-            "line 2: destination type is ambiguous; use an explicit maildir: or mbox: prefix, or a trailing '/' for Maildir",
-        ),
-    ] {
-        let path = config_file(&format!(":0\n{action}\n"));
-        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
-            .args(["check", "--config"])
-            .arg(&path)
-            .output()
-            .unwrap();
+    let path = config_file(":0\nambiguous\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
 
-        assert!(!output.status.success());
-        assert!(String::from_utf8(output.stderr).unwrap().contains(expected));
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr).unwrap().contains(
+        "line 2: destination type is ambiguous; use an explicit maildir: or mbox: prefix, or a trailing '/' for Maildir"
+    ));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
 #[test]
@@ -312,6 +302,74 @@ fn filter_streams_header_decided_message_to_maildir() {
         .collect();
     assert_eq!(files.len(), 1);
     assert_eq!(fs::read(&files[0]).unwrap(), input);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_delivers_mboxrd_record() {
+    let path = config_file("");
+    let mailbox = path.parent().unwrap().join("mailbox");
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\nmbox:{}\n",
+            path.parent().unwrap().display(),
+            mailbox.display()
+        ),
+    )
+    .unwrap();
+    let input = b"From hostile header\nX: value\n\nFrom body\n>From quoted\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    let stored = fs::read(&mailbox).unwrap();
+    assert!(stored.starts_with(b"From MAILER-DAEMON "));
+    assert!(stored.ends_with(b">From hostile header\nX: value\n\n>From body\n>>From quoted\n\n"));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn mbox_delivery_updates_lastfolder_before_later_destination() {
+    let path = config_file("");
+    let first = path.parent().unwrap().join("first.mbox");
+    let second = path.parent().unwrap().join("first.mbox.second");
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0 c\nmbox:{}\n:0\nmbox:${{LASTFOLDER}}.second\n",
+            path.parent().unwrap().display(),
+            first.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: ordered mbox\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    for mailbox in [first, second] {
+        let stored = fs::read(mailbox).unwrap();
+        assert!(stored.ends_with(b"Subject: ordered mbox\n\nbody\n\n"));
+    }
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 

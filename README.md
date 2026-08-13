@@ -75,8 +75,8 @@ integration should account for that possibility when it uses copy recipes.
 
 ## Mbox format
 
-Mbox delivery is not implemented yet. Its selected on-disk format is
-**mboxrd**, using the reversible quoting described by the
+Mbox delivery writes the **mboxrd** on-disk format, using the reversible
+quoting described by the
 [Library of Congress format description](https://www.loc.gov/preservation/digital/formats/fdd/fdd000385.shtml).
 The common record structure follows
 [RFC 4155](https://www.rfc-editor.org/rfc/rfc4155.html), with the more specific
@@ -110,5 +110,15 @@ written in different mbox variants must not be mixed.
 Local mbox writers use a kernel `flock` exclusive lock with bounded retries.
 Mailbox path components and the final file are opened without following
 symlinks, and a mailbox with multiple hard links is rejected. Dotlock is not
-used. This mode coordinates cooperating local writers; no NFS-safety claim is
-made.
+used. Existing files must be regular and writable by the process; ownership is
+not changed or required to match the effective user, so group-authorized local
+mailboxes remain usable. New files request mode `0600`, with ambient umask only
+able to remove permissions. This mode coordinates cooperating local writers;
+no NFS-safety claim is made.
+
+Mbox delivery stages the bounded input under `MAILDIR`, then holds the kernel
+lock while it records the original length, appends one complete record, and
+performs the selected `DURABILITY` operations. A write or sync failure attempts
+to truncate the mailbox back to its original length before unlocking. Failure
+of that recovery is reported as an internal error. `LASTFOLDER` changes only
+after a successful append.

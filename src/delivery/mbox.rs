@@ -215,6 +215,15 @@ impl LockedMbox {
         durability: Durability,
         write: impl FnOnce(&OwnedFd) -> io::Result<()>,
     ) -> Result<PublishedDelivery, MboxAppendError> {
+        self.append_with_sync(durability, write, |file| fsync(file).map_err(io_error))
+    }
+
+    fn append_with_sync(
+        self,
+        durability: Durability,
+        write: impl FnOnce(&OwnedFd) -> io::Result<()>,
+        sync: impl Fn(&OwnedFd) -> io::Result<()>,
+    ) -> Result<PublishedDelivery, MboxAppendError> {
         let original_len = seek(&self.file, SeekFrom::End(0))
             .map_err(|error| MboxAppendError::before_publication(io_error(error), None))?;
 
@@ -223,7 +232,7 @@ impl LockedMbox {
         // when recovery fails so callers can escalate possible corruption.
         let operation = write(&self.file).and_then(|()| match durability {
             Durability::None => Ok(()),
-            Durability::File | Durability::Full => fsync(&self.file).map_err(io_error),
+            Durability::File | Durability::Full => sync(&self.file),
         });
         if let Err(source) = operation {
             let rollback = rollback(&self.file, original_len, durability).err();
@@ -232,7 +241,7 @@ impl LockedMbox {
         }
 
         if durability == Durability::Full
-            && let Err(source) = fsync(&self.parent).map_err(io_error)
+            && let Err(source) = sync(&self.parent)
         {
             let rollback = rollback(&self.file, original_len, durability).err();
             let _unlock = flock(&self.file, FlockOperation::Unlock);
@@ -378,6 +387,7 @@ mod tests {
     use std::io::{self, Read};
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::{sync::Arc, sync::Barrier, thread};
 
     use super::{MAX_POSTMARK_LEN, MboxFile, Postmark, PostmarkError, write_record};
     use crate::delivery::maildir::Durability;
@@ -481,6 +491,14 @@ mod tests {
         let hardlink = directory.join("hardlink");
         fs::hard_link(&mailbox, &hardlink).unwrap();
         assert!(MboxFile::open(&mailbox).is_err());
+
+        let inaccessible = directory.join("inaccessible");
+        fs::write(&inaccessible, b"").unwrap();
+        fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(
+            MboxFile::open(&inaccessible).err().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
         drop(_opened);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -545,6 +563,100 @@ mod tests {
             .read_to_end(&mut bytes)
             .unwrap();
         assert_eq!(bytes, b"existing");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn durability_failure_is_rolled_back_and_not_published() {
+        let directory = temporary_path("sync-failure");
+        fs::create_dir(&directory).unwrap();
+        let mailbox = directory.join("mailbox");
+        fs::write(&mailbox, b"existing").unwrap();
+        let locked = MboxFile::open(&mailbox).unwrap().lock().unwrap();
+
+        let error = locked
+            .append_with_sync(
+                Durability::File,
+                |file| {
+                    rustix::io::write(file, b"complete-record").map_err(super::io_error)?;
+                    Ok(())
+                },
+                |_| Err(io::Error::other("injected sync failure")),
+            )
+            .unwrap_err();
+
+        assert!(!error.published());
+        assert!(!error.rollback_failed());
+        assert_eq!(fs::read(&mailbox).unwrap(), b"existing");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_writers_append_intact_records() {
+        const WRITERS: usize = 16;
+
+        let directory = temporary_path("concurrent");
+        fs::create_dir(&directory).unwrap();
+        let mailbox = directory.join("mailbox");
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let mut workers = Vec::new();
+        for index in 0..WRITERS {
+            let mailbox = mailbox.clone();
+            let barrier = barrier.clone();
+            workers.push(thread::spawn(move || {
+                let message = format!("Subject: writer-{index:02}\n\nbody-{index:02}\n");
+                barrier.wait();
+                MboxFile::open(&mailbox)
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .append(message.as_bytes(), Durability::None)
+                    .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let bytes = fs::read(&mailbox).unwrap();
+        assert_eq!(
+            bytes
+                .windows(b"From MAILER-DAEMON ".len())
+                .filter(|window| *window == b"From MAILER-DAEMON ")
+                .count(),
+            WRITERS
+        );
+        for index in 0..WRITERS {
+            let marker = format!("Subject: writer-{index:02}\n\nbody-{index:02}\n\n");
+            assert_eq!(
+                bytes
+                    .windows(marker.len())
+                    .filter(|window| *window == marker.as_bytes())
+                    .count(),
+                1
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_existing_bytes_are_not_parsed_or_rewritten() {
+        let directory = temporary_path("malformed");
+        fs::create_dir(&directory).unwrap();
+        let mailbox = directory.join("mailbox");
+        let original = b"not an mbox\x00\xffwithout newline";
+        fs::write(&mailbox, original).unwrap();
+
+        MboxFile::open(&mailbox)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .append(b"Subject: appended\n\nbody", Durability::None)
+            .unwrap();
+
+        let bytes = fs::read(&mailbox).unwrap();
+        assert!(bytes.starts_with(original));
+        assert!(bytes.ends_with(b"Subject: appended\n\nbody\n\n"));
         fs::remove_dir_all(directory).unwrap();
     }
 }

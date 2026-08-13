@@ -12,10 +12,9 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use procmail_rs::config::{
-    self, Destination, MAX_COMMAND_LINE_VARIABLES, Statement, SuppliedVariable,
-};
+use procmail_rs::config::{self, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
+use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::eval::{
@@ -127,7 +126,6 @@ fn run() -> Result<(), OperationalError> {
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
         .expand_with(&command.supplied)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    validate_destination_types(&config, path).map_err(OperationalError::Configuration)?;
     let staging_directory = config.maildir().map(PathBuf::from);
     if let Some(maildir) = &staging_directory {
         validate_maildir_path(maildir).map_err(|error| {
@@ -265,27 +263,6 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-fn validate_destination_types(config: &config::Config, rc_path: &Path) -> Result<(), String> {
-    // Recipe selection depends on hostile message data, so every reachable
-    // backend must be known before stdin is touched. Validate the complete rc
-    // file here instead of waiting until a selected recipe opens its sink.
-    for statement in &config.statements {
-        let Statement::Recipe(recipe) = statement else {
-            continue;
-        };
-        let message = match &recipe.destination {
-            Destination::Maildir(_) => continue,
-            Destination::Mbox(_) => "mbox delivery is not implemented",
-        };
-        return Err(format!(
-            "{}:line {}: {message}",
-            rc_path.display(),
-            recipe.action_line
-        ));
-    }
-    Ok(())
-}
-
 fn deliver_decided(
     head: procmail_rs::message::MessageHead,
     reader: &mut impl io::BufRead,
@@ -384,6 +361,10 @@ fn deliver_ordered(
     // Publish one complete staged copy at a time and update runtime values
     // before resolving the next expression.
     for destination in plan.destinations() {
+        if matches!(destination, Destination::Mbox(_)) {
+            deliver_mbox(destination, message, durability, runtime, trace)?;
+            continue;
+        }
         let mut sinks = open_sinks(
             std::slice::from_ref(destination),
             durability,
@@ -425,6 +406,84 @@ fn deliver_ordered(
             .map_err(OperationalError::Internal)?;
     }
     Ok(())
+}
+
+fn deliver_mbox(
+    unresolved: &Destination,
+    message: &[u8],
+    durability: Durability,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) -> Result<(), OperationalError> {
+    record_delivery(unresolved, DeliveryStage::Preparing, trace);
+    let destination = unresolved
+        .resolve_with(|name| runtime.get(name).map(str::to_owned))
+        .map_err(|error| {
+            record_delivery(
+                unresolved,
+                DeliveryStage::Failed(FailureClass::Permanent),
+                trace,
+            );
+            OperationalError::PermanentDestination(error.to_string())
+        })?;
+    let Destination::Mbox(expression) = destination else {
+        return Err(OperationalError::Internal(
+            "internal error: mbox delivery resolved to another destination type".to_owned(),
+        ));
+    };
+    let path = Path::new(expression.source());
+    let locked = MboxFile::open(path)
+        .and_then(MboxFile::lock)
+        .map_err(|error| {
+            let class = DeliveryFailureClass::from_io_error(&error);
+            record_delivery(
+                unresolved,
+                DeliveryStage::Failed(trace_failure_class(class)),
+                trace,
+            );
+            OperationalError::delivery(
+                class,
+                format!("cannot open or lock mbox {}: {error}", path.display()),
+            )
+        })?;
+    match locked.append(message, durability) {
+        Ok(published) => {
+            record_delivery(unresolved, DeliveryStage::Published, trace);
+            runtime
+                .record_delivery_with_trace(&published, trace)
+                .map_err(OperationalError::Internal)
+        }
+        Err(error) => {
+            let class = error.class();
+            if error.published() {
+                record_delivery(unresolved, DeliveryStage::Published, trace);
+                runtime
+                    .record_delivery_with_trace(
+                        &procmail_rs::delivery::PublishedDelivery::new(path.to_owned()),
+                        trace,
+                    )
+                    .map_err(OperationalError::Internal)?;
+            } else {
+                record_delivery(
+                    unresolved,
+                    DeliveryStage::Failed(trace_failure_class(class)),
+                    trace,
+                );
+            }
+            Err(OperationalError::delivery(
+                class,
+                format!("cannot deliver to mbox {}: {error}", path.display()),
+            ))
+        }
+    }
+}
+
+fn trace_failure_class(class: DeliveryFailureClass) -> FailureClass {
+    match class {
+        DeliveryFailureClass::Retryable => FailureClass::Transient,
+        DeliveryFailureClass::Permanent => FailureClass::Permanent,
+        DeliveryFailureClass::Internal => FailureClass::Internal,
+    }
 }
 
 fn commit_delivery(
@@ -509,8 +568,8 @@ fn open_sinks(
                     DeliveryStage::Failed(FailureClass::Permanent),
                     trace,
                 );
-                return Err(OperationalError::PermanentDestination(format!(
-                    "mbox delivery is not implemented yet: {}",
+                return Err(OperationalError::Internal(format!(
+                    "internal error: mbox destination reached streaming delivery: {}",
                     expression.source()
                 )));
             }

@@ -6,11 +6,11 @@ BOX=selected
 
 :0 c
 * ^From:.*@example\.com
-mbox:/dev/null
+maildir:/dev/null
 
 :0
 * ^Subject:.*release
-mbox:/dev/null
+maildir:/dev/null
 
 :0
-mbox:/dev/null
+maildir:/dev/null
