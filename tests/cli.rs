@@ -62,6 +62,7 @@ fn check_reports_source_line() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(78));
+    assert!(output.stdout.is_empty());
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
@@ -195,6 +196,7 @@ fn filter_reports_body_limit() {
     let output = child.wait_with_output().unwrap();
 
     assert_eq!(output.status.code(), Some(65));
+    assert!(output.stdout.is_empty());
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
