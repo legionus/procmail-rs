@@ -237,6 +237,59 @@ fn filter_streams_header_decided_message_to_maildir() {
 }
 
 #[test]
+fn filter_fails_when_no_recipe_delivers_the_original() {
+    let path = config_file(":0\n* ^Subject: wanted$\nmaildir:unused\n");
+    let input = b"Subject: other\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("original message was not delivered")
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_fails_when_only_a_copy_recipe_publishes() {
+    let path = config_file("");
+    let copy = path.parent().unwrap().join("copy");
+    create_maildir(&copy);
+    fs::write(&path, format!(":0c\nmaildir:{}\n", copy.display())).unwrap();
+    let input = b"Subject: copied only\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(delivered_messages(&copy), [input.to_vec()]);
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("published 1 copy destination(s)")
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn successful_filter_is_quiet_and_does_not_create_disabled_logfile() {
     let path = config_file("");
     let maildir = path.parent().unwrap().join("inbox");

@@ -661,7 +661,7 @@ mod tests {
             let published = PublishedDelivery::new(self.last_folder.clone());
             if self.fail_after_publish {
                 return Err(SinkCommitError::after_publication(
-                    io::Error::other("injected durability failure"),
+                    io::Error::new(io::ErrorKind::StorageFull, "injected durability failure"),
                     published,
                 ));
             }
@@ -827,6 +827,7 @@ mod tests {
         let error = validated.commit().unwrap_err();
         assert_eq!(error.committed(), 1);
         assert_eq!(error.last_folder(), Some(Path::new("test-folder")));
+        assert_eq!(error.class(), DeliveryFailureClass::Retryable);
         assert_eq!(state.borrow().visible.as_deref(), Some(input.as_slice()));
     }
 

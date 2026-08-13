@@ -515,6 +515,37 @@ mod tests {
     }
 
     #[test]
+    fn directory_replacement_cannot_redirect_an_open_delivery() {
+        let maildir = TestMaildir::create();
+        let moved = maildir.path().with_extension("opened");
+        let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+        sink.write_all(b"Subject: original directories\n\nbody")
+            .unwrap();
+
+        // Replace the configured pathname after the sink has opened every
+        // directory. Commit must keep using those descriptors instead of
+        // resolving the hostile path again and writing into the replacement.
+        fs::rename(maildir.path(), &moved).unwrap();
+        fs::create_dir(maildir.path()).unwrap();
+        for component in ["tmp", "new", "cur"] {
+            fs::create_dir(maildir.path().join(component)).unwrap();
+        }
+
+        PendingSink::commit(sink).unwrap();
+
+        assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+        let delivered = fs::read_dir(moved.join("new"))
+            .unwrap()
+            .map(|entry| fs::read(entry.unwrap().path()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delivered,
+            [b"Subject: original directories\n\nbody".to_vec()]
+        );
+        fs::remove_dir_all(moved).unwrap();
+    }
+
+    #[test]
     fn requires_an_existing_complete_maildir() {
         for component in ["tmp", "new", "cur"] {
             let maildir = TestMaildir::create();
