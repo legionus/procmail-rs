@@ -50,28 +50,15 @@ impl MaildirSink {
         let new_dir = open_directory_at(&maildir, OsStr::new("new"))?;
         let _cur_dir = open_directory_at(&maildir, OsStr::new("cur"))?;
 
-        for _ in 0..MAX_NAME_ATTEMPTS {
-            let name = unique_name()?;
-            match create_pending_file(&tmp_dir, &name) {
-                Ok(fd) => {
-                    return Ok(Self {
-                        file: fd,
-                        tmp_dir,
-                        new_dir,
-                        name,
-                        maildir: path.to_owned(),
-                        pending: true,
-                    });
-                }
-                Err(rustix::io::Errno::EXIST) => continue,
-                Err(error) => return Err(io_error(error)),
-            }
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("cannot allocate a unique Maildir name after {MAX_NAME_ATTEMPTS} attempts"),
-        ))
+        let (file, name) = create_unique_pending_file(&tmp_dir, unique_name)?;
+        Ok(Self {
+            file,
+            tmp_dir,
+            new_dir,
+            name,
+            maildir: path.to_owned(),
+            pending: true,
+        })
     }
 
     fn cleanup(&mut self) -> io::Result<()> {
@@ -98,6 +85,28 @@ fn create_pending_file(dir: &OwnedFd, name: &str) -> Result<OwnedFd, rustix::io:
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::from_raw_mode(MAILDIR_FILE_MODE),
     )
+}
+
+fn create_unique_pending_file(
+    dir: &OwnedFd,
+    mut next_name: impl FnMut() -> io::Result<String>,
+) -> io::Result<(OwnedFd, String)> {
+    // Retry only collisions: another error describes a condition that choosing
+    // another name cannot repair. The fixed attempt count also prevents a bad
+    // random source or a hostile directory from keeping delivery in this loop.
+    for _ in 0..MAX_NAME_ATTEMPTS {
+        let name = next_name()?;
+        match create_pending_file(dir, &name) {
+            Ok(file) => return Ok((file, name)),
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("cannot allocate a unique Maildir name after {MAX_NAME_ATTEMPTS} attempts"),
+    ))
 }
 
 impl Write for MaildirSink {
@@ -314,6 +323,52 @@ mod tests {
         let error = create_pending_file(&tmp_dir, &name).unwrap_err();
         assert_eq!(error, rustix::io::Errno::EXIST);
         assert_eq!(fs::read(path).unwrap(), b"owned by another delivery");
+    }
+
+    #[test]
+    fn collision_retry_can_succeed_on_the_last_attempt() {
+        let maildir = TestMaildir::create();
+        let tmp_path = maildir.path().join("tmp");
+        let occupied = "procmail-rs.occupied";
+        let available = "procmail-rs.available";
+        fs::write(tmp_path.join(occupied), b"existing").unwrap();
+        let tmp_dir = open_directory_path(&tmp_path).unwrap();
+        let mut attempts = 0u64;
+
+        let (file, name) = create_unique_pending_file(&tmp_dir, || {
+            attempts += 1;
+            Ok(if attempts < MAX_NAME_ATTEMPTS {
+                occupied.to_owned()
+            } else {
+                available.to_owned()
+            })
+        })
+        .unwrap();
+
+        assert_eq!(attempts, MAX_NAME_ATTEMPTS);
+        assert_eq!(name, available);
+        drop(file);
+        fs::remove_file(tmp_path.join(available)).unwrap();
+    }
+
+    #[test]
+    fn collision_retry_stops_after_its_fixed_limit() {
+        let maildir = TestMaildir::create();
+        let tmp_path = maildir.path().join("tmp");
+        let occupied = "procmail-rs.occupied";
+        fs::write(tmp_path.join(occupied), b"existing").unwrap();
+        let tmp_dir = open_directory_path(&tmp_path).unwrap();
+        let mut attempts = 0u64;
+
+        let error = create_unique_pending_file(&tmp_dir, || {
+            attempts += 1;
+            Ok(occupied.to_owned())
+        })
+        .unwrap_err();
+
+        assert_eq!(attempts, MAX_NAME_ATTEMPTS);
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(tmp_path.join(occupied)).unwrap(), b"existing");
     }
 
     #[test]
