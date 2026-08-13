@@ -361,6 +361,7 @@ struct ContinuationFrame {
     recipe_index: usize,
     state: SequenceState,
     condition_results: Vec<Option<bool>>,
+    assignments_applied: bool,
 }
 
 impl Continuation {
@@ -434,9 +435,14 @@ impl CompiledSequence {
     }
 
     fn requires_ordered_delivery(&self) -> bool {
-        self.recipes
-            .iter()
-            .any(CompiledNode::requires_ordered_delivery)
+        self.recipes.iter().enumerate().any(|(index, recipe)| {
+            recipe.requires_ordered_delivery()
+                || (index != 0
+                    && matches!(
+                        recipe.control,
+                        ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
+                    ))
+        })
     }
 
     fn execute(
@@ -608,6 +614,7 @@ impl CompiledSequence {
                     recipe_index: index,
                     state,
                     condition_results,
+                    assignments_applied: true,
                 });
                 planning.requirements = self.requirements_from(index).union(following);
                 return Ok(HeaderControl::Deferred);
@@ -625,6 +632,7 @@ impl CompiledSequence {
                     recipe_index: index,
                     state,
                     condition_results,
+                    assignments_applied: true,
                 });
                 planning.requirements = self.requirements_from(index).union(following);
                 return Ok(HeaderControl::Deferred);
@@ -651,6 +659,7 @@ impl CompiledSequence {
                             recipe_index: index,
                             state,
                             condition_results: Vec::new(),
+                            assignments_applied: true,
                         });
                         let child_following = self.requirements_from(index + 1).union(following);
                         let child = children.plan_headers(
@@ -763,6 +772,9 @@ impl CompiledSequence {
             .get(frame.recipe_index)
             .ok_or(EvalError::BodyWasNotBuffered)?;
         let mut state = frame.state;
+        if !frame.assignments_applied {
+            apply_assignments(&recipe.assignments, runtime, trace);
+        }
 
         let (conditions_matched, control) = if depth + 1 < frames.len() {
             let CompiledAction::Block(children) = &recipe.action else {
@@ -891,22 +903,15 @@ impl CompiledNode {
     }
 
     fn requires_ordered_delivery(&self) -> bool {
-        let action_requires_order = match &self.action {
+        match &self.action {
             CompiledAction::Deliver {
                 destination,
-                continuation,
+                continuation: _,
             } => {
-                destination.needs_runtime_variables()
-                    || matches!(destination, Destination::Mbox(_))
-                    || *continuation == ContinuationMode::BranchBlock
+                destination.needs_runtime_variables() || matches!(destination, Destination::Mbox(_))
             }
             CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
-        };
-        action_requires_order
-            || matches!(
-                self.control,
-                ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
-            )
+        }
     }
 
     fn matches(&self, message: &Message, trace: &mut impl TraceSink) -> Result<bool, EvalError> {
@@ -1224,6 +1229,19 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> HeaderEvaluation {
+        if self.requires_ordered_delivery {
+            return HeaderEvaluation::NeedsMessage(Continuation {
+                frames: vec![ContinuationFrame {
+                    recipe_index: 0,
+                    state: SequenceState::default(),
+                    condition_results: Vec::new(),
+                    assignments_applied: false,
+                }],
+                execution: PlanningExecution::default(),
+                runtime: runtime.clone(),
+                requirements: self.requirements(),
+            });
+        }
         let mut planning = HeaderPlanning::default();
         match self.root.plan_headers(
             head,
@@ -1998,6 +2016,39 @@ mod tests {
 
         assert!(plan.requires_ordered_delivery());
         assert!(plan.requirements().needs_end_of_message);
+    }
+
+    #[test]
+    fn ordered_header_evaluation_defers_before_the_first_action() {
+        let plan = compile("BOX=first\n:0 c\nmaildir:$BOX\n:0 a\nmaildir:second\n");
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = MemoryTrace::default();
+        let HeaderEvaluation::NeedsMessage(continuation) = plan.evaluate_headers_with_trace(
+            &head(b"Subject: test\n\nbody"),
+            &mut runtime,
+            &mut trace,
+        ) else {
+            panic!("expected ordered plan to defer before evaluation");
+        };
+
+        assert!(continuation.pending_deliveries().is_empty());
+        assert!(trace.events().is_empty());
+        assert!(runtime.get("BOX").is_none());
+
+        let delivery = plan
+            .resume_buffered(
+                continuation,
+                &Message::from_bytes(b"Subject: test\n\nbody".to_vec()),
+            )
+            .unwrap();
+        assert_eq!(
+            delivery
+                .deliveries()
+                .iter()
+                .map(|delivery| delivery.destination().path())
+                .collect::<Vec<_>>(),
+            ["$BOX", "second"]
+        );
     }
 
     #[test]
