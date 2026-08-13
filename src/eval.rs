@@ -5,7 +5,7 @@ use std::fmt;
 
 use regex::bytes::Regex;
 
-use crate::config::{ConditionKind, Config, Destination, Recipe, Statement};
+use crate::config::{ConditionKind, Config, Destination, Recipe, RecipeAction, Statement};
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::runtime::RuntimeVariables;
 use crate::trace::{
@@ -59,14 +59,14 @@ struct CompiledAssignment {
     source: TraceVariableSource,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CompiledCondition {
     line: usize,
     negated: bool,
     kind: CompiledConditionKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum CompiledConditionKind {
     HeaderRegex(Regex),
     BodyRegex(Regex),
@@ -255,24 +255,7 @@ impl ExecutionPlan {
                 source: TraceVariableSource::CommandLine,
             })
             .collect::<Vec<_>>();
-        for statement in &config.statements {
-            match statement {
-                Statement::Assignment(assignment) => {
-                    assignments.push(CompiledAssignment {
-                        name: assignment.name.clone(),
-                        value: assignment.value.clone(),
-                        line: Some(assignment.line),
-                        source: TraceVariableSource::RcFile,
-                    });
-                }
-                Statement::Recipe(recipe) => {
-                    recipes.push(CompiledRecipe::compile(
-                        recipe,
-                        std::mem::take(&mut assignments),
-                    ));
-                }
-            }
-        }
+        compile_statements(&config.statements, &mut assignments, &[], &mut recipes);
 
         let mut suffix_requirements = vec![InputRequirements::default(); recipes.len() + 1];
         for index in (0..recipes.len()).rev() {
@@ -528,8 +511,45 @@ impl ExecutionPlan {
     }
 }
 
+fn compile_statements(
+    statements: &[Statement],
+    assignments: &mut Vec<CompiledAssignment>,
+    inherited_conditions: &[CompiledCondition],
+    recipes: &mut Vec<CompiledRecipe>,
+) {
+    for statement in statements {
+        match statement {
+            Statement::Assignment(assignment) => assignments.push(CompiledAssignment {
+                name: assignment.name.clone(),
+                value: assignment.value.clone(),
+                line: Some(assignment.line),
+                source: TraceVariableSource::RcFile,
+            }),
+            Statement::Recipe(recipe) => {
+                // A block is compiled into its reachable delivery leaves.
+                // Each leaf carries its ancestors' tests, which preserves the
+                // gating behavior without an unbounded runtime call stack.
+                let mut conditions = inherited_conditions.to_vec();
+                conditions.extend(CompiledRecipe::compile_conditions(recipe));
+                match &recipe.action {
+                    RecipeAction::Deliver(destination) => recipes.push(CompiledRecipe {
+                        line: recipe.line,
+                        assignments: std::mem::take(assignments),
+                        conditions,
+                        destination: destination.clone(),
+                        copy: recipe.has_flag('c'),
+                    }),
+                    RecipeAction::Block(children) => {
+                        compile_statements(children, assignments, &conditions, recipes);
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl CompiledRecipe {
-    fn compile(recipe: &Recipe, assignments: Vec<CompiledAssignment>) -> Self {
+    fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
         let area = match (recipe.has_flag('H'), recipe.has_flag('B')) {
             (false, true) => RegexArea::Body,
             (true, true) => RegexArea::Message,
@@ -561,13 +581,7 @@ impl CompiledRecipe {
             });
         }
 
-        Self {
-            line: recipe.line,
-            assignments,
-            conditions,
-            destination: recipe.destination.clone(),
-            copy: recipe.has_flag('c'),
-        }
+        conditions
     }
 
     fn apply_assignments(&self, runtime: &mut RuntimeVariables, trace: &mut impl TraceSink) {
@@ -1093,6 +1107,52 @@ mod tests {
             delivery.destinations(),
             [Destination::Maildir("all".into())]
         );
+    }
+
+    #[test]
+    fn parent_conditions_gate_nested_delivery() {
+        let plan = compile(
+            ":0\n* ^List-Id: wanted$\n{\n:0\n* ^Subject: report$\nmaildir:list\n}\n:0\nmaildir:fallback\n",
+        );
+
+        let HeaderEvaluation::Decided(selected) =
+            plan.evaluate_headers(&head(b"List-Id: wanted\nSubject: report\n\nbody"))
+        else {
+            panic!("expected nested delivery");
+        };
+        assert_eq!(
+            selected.destinations(),
+            [Destination::Maildir("list".into())]
+        );
+
+        let HeaderEvaluation::Decided(skipped) =
+            plan.evaluate_headers(&head(b"List-Id: other\nSubject: report\n\nbody"))
+        else {
+            panic!("expected fallback delivery");
+        };
+        assert_eq!(
+            skipped.destinations(),
+            [Destination::Maildir("fallback".into())]
+        );
+    }
+
+    #[test]
+    fn processing_continues_after_copy_delivery_in_a_block() {
+        let plan = compile(":0\n{\n:0 c\nmaildir:copy\n}\n:0\nmaildir:final\n");
+        let HeaderEvaluation::Decided(delivery) =
+            plan.evaluate_headers(&head(b"Subject: test\n\nbody"))
+        else {
+            panic!("expected delivery");
+        };
+
+        assert_eq!(
+            delivery.destinations(),
+            [
+                Destination::Maildir("copy".into()),
+                Destination::Maildir("final".into())
+            ]
+        );
+        assert!(delivery.original_delivered());
     }
 
     #[test]

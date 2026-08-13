@@ -8,7 +8,8 @@ use super::{
     MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
     MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS,
     MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, ParseError,
-    PathExpression, Recipe, RegexCondition, Statement, VariableSource, variable_policy,
+    PathExpression, Recipe, RecipeAction, RegexCondition, Statement, VariableSource,
+    variable_policy,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -20,12 +21,30 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
     }
 
     let lines: Vec<&str> = input.lines().collect();
-    let mut statements = Vec::new();
-    let mut condition_count = 0usize;
-    let mut recipe_count = 0;
-    let mut regex_count = 0usize;
-    let mut index = 0;
+    let mut counts = ParseCounts::default();
+    let (statements, _) = parse_statements(&lines, 0, 0, &mut counts)?;
 
+    Ok(Config {
+        statements,
+        initial_variables: Vec::new(),
+    })
+}
+
+#[derive(Default)]
+struct ParseCounts {
+    statements: usize,
+    recipes: usize,
+    conditions: usize,
+    regexes: usize,
+}
+
+fn parse_statements(
+    lines: &[&str],
+    mut index: usize,
+    depth: usize,
+    counts: &mut ParseCounts,
+) -> Result<(Vec<Statement>, usize), ParseError> {
+    let mut statements = Vec::new();
     while index < lines.len() {
         let line_number = index + 1;
         let line = lines[index].trim();
@@ -35,28 +54,53 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
             continue;
         }
 
-        check_statement_limit(statements.len(), line_number)?;
+        if line == "}" {
+            if depth == 0 {
+                return Err(ParseError::new(
+                    line_number,
+                    "closing recipe block has no matching opening block",
+                ));
+            }
+            return Ok((statements, index + 1));
+        }
+
+        check_statement_limit(counts.statements, line_number)?;
 
         if line.starts_with(':') {
-            check_recipe_limit(recipe_count, line_number)?;
-            let (recipe, next, recipe_regexes) =
-                parse_recipe(&lines, index, condition_count, regex_count)?;
-            condition_count = condition_count
-                .checked_add(recipe.conditions.len())
-                .ok_or_else(|| ParseError::new(line_number, "rc condition count overflows"))?;
-            regex_count = regex_count
-                .checked_add(recipe_regexes)
-                .ok_or_else(|| ParseError::new(line_number, "rc regex count overflows"))?;
-            statements.push(Statement::Recipe(recipe));
-            recipe_count = recipe_count
+            check_recipe_limit(counts.recipes, line_number)?;
+            counts.recipes = counts
+                .recipes
                 .checked_add(1)
                 .ok_or_else(|| ParseError::new(line_number, "rc recipe count overflows"))?;
+            counts.statements = counts
+                .statements
+                .checked_add(1)
+                .ok_or_else(|| ParseError::new(line_number, "rc statement count overflows"))?;
+            let (recipe, next) = parse_recipe(
+                lines,
+                index,
+                depth,
+                counts.conditions,
+                counts.regexes,
+                counts,
+            )?;
+            statements.push(Statement::Recipe(recipe));
             index = next;
             continue;
         }
 
         if let Some(assignment) = parse_assignment(line, line_number)? {
+            if depth > 0 {
+                return Err(ParseError::new(
+                    line_number,
+                    "assignments inside recipe blocks are not supported yet",
+                ));
+            }
             statements.push(Statement::Assignment(assignment));
+            counts.statements = counts
+                .statements
+                .checked_add(1)
+                .ok_or_else(|| ParseError::new(line_number, "rc statement count overflows"))?;
             index += 1;
             continue;
         }
@@ -67,10 +111,13 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
         ));
     }
 
-    Ok(Config {
-        statements,
-        initial_variables: Vec::new(),
-    })
+    if depth > 0 {
+        return Err(ParseError::new(
+            lines.len().max(1),
+            "recipe block has no closing brace",
+        ));
+    }
+    Ok((statements, index))
 }
 
 fn check_recipe_limit(count: usize, line: usize) -> Result<(), ParseError> {
@@ -141,9 +188,11 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
 fn parse_recipe(
     lines: &[&str],
     start: usize,
+    depth: usize,
     prior_conditions: usize,
     prior_regexes: usize,
-) -> Result<(Recipe, usize, usize), ParseError> {
+    counts: &mut ParseCounts,
+) -> Result<(Recipe, usize), ParseError> {
     let header = lines[start].trim();
     let rest = header
         .strip_prefix(":0")
@@ -187,6 +236,18 @@ fn parse_recipe(
         .map(|line| line.trim())
         .ok_or_else(|| ParseError::new(start + 1, "recipe has no action"))?;
 
+    // Charge the parent recipe before descending into a block so nested
+    // parsing cannot temporarily hide conditions or regexes from file-wide
+    // limits.
+    counts.conditions = counts
+        .conditions
+        .checked_add(conditions.len())
+        .ok_or_else(|| ParseError::new(start + 1, "rc condition count overflows"))?;
+    counts.regexes = counts
+        .regexes
+        .checked_add(regex_count)
+        .ok_or_else(|| ParseError::new(start + 1, "rc regex count overflows"))?;
+
     if action.starts_with('|') {
         return Err(ParseError::new(index + 1, "pipe actions are not supported"));
     }
@@ -194,12 +255,6 @@ fn parse_recipe(
         return Err(ParseError::new(
             index + 1,
             "forward actions are not supported",
-        ));
-    }
-    if action.starts_with('{') {
-        return Err(ParseError::new(
-            index + 1,
-            format!("recipe nesting depth 1 exceeds the hard limit of {MAX_RECIPE_NESTING_DEPTH}"),
         ));
     }
     if action == "}" {
@@ -215,30 +270,70 @@ fn parse_recipe(
         return Err(ParseError::new(index + 1, "recipe action is empty"));
     }
 
-    let destination = if let Some(path) = action.strip_prefix("mbox:") {
-        Destination::Mbox(PathExpression {
-            source: required_path(path, index + 1, "destination path")?,
-            base: None,
-            line: index + 1,
-            runtime_dependent: false,
-            expansion: None,
-        })
+    let (action, next) = if action == "{" {
+        let next_depth = depth
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(index + 1, "recipe nesting depth overflows"))?;
+        if next_depth > MAX_RECIPE_NESTING_DEPTH {
+            return Err(ParseError::new(
+                index + 1,
+                format!(
+                    "recipe nesting depth {next_depth} exceeds the hard limit of {MAX_RECIPE_NESTING_DEPTH}"
+                ),
+            ));
+        }
+        if lock.is_some() {
+            return Err(ParseError::new(
+                start + 1,
+                "local lockfiles on recipe blocks are not supported",
+            ));
+        }
+        if flags.contains('c') {
+            return Err(ParseError::new(
+                start + 1,
+                "copy flag 'c' on recipe blocks is not supported yet",
+            ));
+        }
+        let (statements, next) = parse_statements(lines, index + 1, next_depth, counts)?;
+        (RecipeAction::Block(statements), next)
+    } else if action.starts_with('{') {
+        return Err(ParseError::new(
+            index + 1,
+            "opening recipe block must be a standalone '{' action",
+        ));
+    } else if let Some(path) = action.strip_prefix("mbox:") {
+        (
+            RecipeAction::Deliver(Destination::Mbox(PathExpression {
+                source: required_path(path, index + 1, "destination path")?,
+                base: None,
+                line: index + 1,
+                runtime_dependent: false,
+                expansion: None,
+            })),
+            index + 1,
+        )
     } else if let Some(path) = action.strip_prefix("maildir:") {
-        Destination::Maildir(PathExpression {
-            source: required_path(path, index + 1, "destination path")?,
-            base: None,
-            line: index + 1,
-            runtime_dependent: false,
-            expansion: None,
-        })
+        (
+            RecipeAction::Deliver(Destination::Maildir(PathExpression {
+                source: required_path(path, index + 1, "destination path")?,
+                base: None,
+                line: index + 1,
+                runtime_dependent: false,
+                expansion: None,
+            })),
+            index + 1,
+        )
     } else if action.ends_with('/') {
-        Destination::Maildir(PathExpression {
-            source: required_path(action, index + 1, "destination path")?,
-            base: None,
-            line: index + 1,
-            runtime_dependent: false,
-            expansion: None,
-        })
+        (
+            RecipeAction::Deliver(Destination::Maildir(PathExpression {
+                source: required_path(action, index + 1, "destination path")?,
+                base: None,
+                line: index + 1,
+                runtime_dependent: false,
+                expansion: None,
+            })),
+            index + 1,
+        )
     } else {
         check_path_length(action, index + 1, "destination path")?;
         return Err(ParseError::new(
@@ -253,9 +348,9 @@ fn parse_recipe(
         flags,
         lock,
         conditions,
-        destination,
+        action,
     };
-    Ok((recipe, index + 1, regex_count))
+    Ok((recipe, next))
 }
 
 fn check_condition_limits(
@@ -447,7 +542,7 @@ mod tests {
                         compiled: build_regex("^Subject: spam", false).unwrap(),
                     }),
                 }],
-                destination: Destination::Maildir("inbox".into()),
+                action: RecipeAction::Deliver(Destination::Maildir("inbox".into())),
             })
         );
     }
@@ -459,7 +554,10 @@ mod tests {
             panic!("expected recipe");
         };
 
-        assert_eq!(recipe.destination, Destination::Maildir("inbox/".into()));
+        assert_eq!(
+            recipe.action,
+            RecipeAction::Deliver(Destination::Maildir("inbox/".into()))
+        );
     }
 
     #[test]
@@ -519,16 +617,70 @@ mod tests {
     }
 
     #[test]
-    fn enforces_zero_recipe_nesting_depth() {
-        assert_eq!(MAX_RECIPE_NESTING_DEPTH, 0);
-        assert!(parse(":0\ninbox/\n").is_ok());
+    fn enforces_recipe_nesting_depth_at_the_boundary() {
+        fn nested(depth: usize) -> String {
+            let mut source = ":0\n{\n".repeat(depth);
+            source.push_str(":0\ninbox/\n");
+            source.push_str(&"}\n".repeat(depth));
+            source
+        }
 
-        let error = parse(":0\n{\n:0\ninbox/\n}\n").unwrap_err();
+        assert_eq!(MAX_RECIPE_NESTING_DEPTH, 64);
+        for depth in [
+            MAX_RECIPE_NESTING_DEPTH - 1,
+            MAX_RECIPE_NESTING_DEPTH,
+            MAX_RECIPE_NESTING_DEPTH + 1,
+        ] {
+            let result = parse(&nested(depth));
+            if depth <= MAX_RECIPE_NESTING_DEPTH {
+                assert!(result.is_ok(), "depth {depth} must be accepted");
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, MAX_RECIPE_NESTING_DEPTH * 2 + 2);
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "recipe nesting depth {depth} exceeds the hard limit of {MAX_RECIPE_NESTING_DEPTH}"
+                    )
+                );
+            }
+        }
+    }
 
-        assert_eq!(error.line, 2);
+    #[test]
+    fn rejects_unclosed_recipe_block() {
+        let error = parse(":0\n{\n:0\ninbox/\n").unwrap_err();
+
+        assert_eq!(error.line, 4);
+        assert_eq!(error.message, "recipe block has no closing brace");
+    }
+
+    #[test]
+    fn rejects_assignment_inside_recipe_block() {
+        let error = parse(":0\n{\nBOX=inbox\n}\n").unwrap_err();
+
+        assert_eq!(error.line, 3);
         assert_eq!(
             error.message,
-            "recipe nesting depth 1 exceeds the hard limit of 0"
+            "assignments inside recipe blocks are not supported yet"
+        );
+    }
+
+    #[test]
+    fn parses_typed_nested_block_actions() {
+        let config = parse(":0\n* ^List-Id:\n{\n:0\nmaildir:list\n}\n").unwrap();
+        let [Statement::Recipe(parent)] = config.statements.as_slice() else {
+            panic!("expected one parent recipe");
+        };
+        let RecipeAction::Block(children) = &parent.action else {
+            panic!("expected block action");
+        };
+        let [Statement::Recipe(child)] = children.as_slice() else {
+            panic!("expected one child recipe");
+        };
+        assert_eq!(
+            child.action,
+            RecipeAction::Deliver(Destination::Maildir("list".into()))
         );
     }
 
@@ -752,7 +904,7 @@ mod tests {
                 let Statement::Recipe(recipe) = &config.statements[0] else {
                     panic!("expected recipe");
                 };
-                let Destination::Maildir(path) = &recipe.destination else {
+                let RecipeAction::Deliver(Destination::Maildir(path)) = &recipe.action else {
                     panic!("expected Maildir destination");
                 };
                 assert_eq!(path.source().len(), length);

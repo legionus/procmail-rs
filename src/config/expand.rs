@@ -7,8 +7,8 @@ use std::path::Path;
 
 use super::{
     AssignmentTarget, Config, Destination, ExpansionExpression, ExpansionPart,
-    MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression,
-    Statement, SuppliedVariable, VariablePolicy, variable_policy,
+    MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression, Recipe,
+    RecipeAction, Statement, SuppliedVariable, VariablePolicy, variable_policy,
 };
 
 #[derive(Debug, Clone)]
@@ -180,43 +180,69 @@ pub(super) fn expand(
                 );
             }
             Statement::Recipe(recipe) => {
-                if let Some(lock) = &mut recipe.lock {
-                    *lock =
-                        expand_text(lock, recipe.line, MAX_PATH_EXPRESSION_LEN, &variables)?.text;
-                    if !lock.is_empty() {
-                        *lock = resolve_relative_path(lock, maildir.as_deref(), recipe.line)?;
-                        validate_filesystem_path(lock, recipe.line, "lockfile", false)?;
-                    }
-                }
-                let (expression, description, allows_trailing_slash) = match &mut recipe.destination
-                {
-                    Destination::Maildir(expression) => (expression, "Maildir destination", true),
-                    Destination::Mbox(expression) => (expression, "mbox destination", false),
-                };
-                let parsed = parse_expression(&expression.source, recipe.action_line)?;
-                validate_path_references(&parsed, recipe.action_line, &variables)?;
-                expression.base = maildir.clone();
-                expression.line = recipe.action_line;
-                let has_runtime_reference = expression_needs_runtime(&parsed, &variables);
-                expression.runtime_dependent = has_runtime_reference;
-                expression.expansion = Some(parsed);
-                let expression_line = expression.line;
-                if !has_runtime_reference {
-                    let resolved = recipe
-                        .destination
-                        .resolve_with(|name| variables.get(name).map(|value| value.text.clone()))?;
-                    validate_filesystem_path(
-                        resolved.path(),
-                        expression_line,
-                        description,
-                        allows_trailing_slash,
-                    )?;
-                }
+                expand_recipe(recipe, &variables, maildir.as_deref())?;
             }
         }
     }
 
     Ok(config)
+}
+
+fn expand_recipe(
+    recipe: &mut Recipe,
+    variables: &BTreeMap<String, ExpandedValue>,
+    maildir: Option<&str>,
+) -> Result<(), ExpansionError> {
+    if let Some(lock) = &mut recipe.lock {
+        *lock = expand_text(lock, recipe.line, MAX_PATH_EXPRESSION_LEN, variables)?.text;
+        if !lock.is_empty() {
+            *lock = resolve_relative_path(lock, maildir, recipe.line)?;
+            validate_filesystem_path(lock, recipe.line, "lockfile", false)?;
+        }
+    }
+
+    match &mut recipe.action {
+        RecipeAction::Deliver(destination) => {
+            let (expression, description, allows_trailing_slash) = match destination {
+                Destination::Maildir(expression) => (expression, "Maildir destination", true),
+                Destination::Mbox(expression) => (expression, "mbox destination", false),
+            };
+            let parsed = parse_expression(&expression.source, recipe.action_line)?;
+            validate_path_references(&parsed, recipe.action_line, variables)?;
+            expression.base = maildir.map(str::to_owned);
+            expression.line = recipe.action_line;
+            let has_runtime_reference = expression_needs_runtime(&parsed, variables);
+            expression.runtime_dependent = has_runtime_reference;
+            expression.expansion = Some(parsed);
+            let expression_line = expression.line;
+            if !has_runtime_reference {
+                let resolved = destination
+                    .resolve_with(|name| variables.get(name).map(|value| value.text.clone()))?;
+                validate_filesystem_path(
+                    resolved.path(),
+                    expression_line,
+                    description,
+                    allows_trailing_slash,
+                )?;
+            }
+        }
+        RecipeAction::Block(statements) => {
+            // Nested assignments are rejected by the parser, so every child
+            // sees the same bounded value table and MAILDIR base as its parent.
+            for statement in statements {
+                match statement {
+                    Statement::Recipe(child) => expand_recipe(child, variables, maildir)?,
+                    Statement::Assignment(assignment) => {
+                        return Err(ExpansionError::new(
+                            assignment.line,
+                            "assignments inside recipe blocks are not supported yet",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_filesystem_path(
@@ -693,8 +719,10 @@ mod tests {
                     variables.insert(assignment.name.clone(), assignment.value.clone());
                 }
                 Statement::Recipe(recipe) if index == statement_index => {
-                    return recipe
-                        .destination
+                    let RecipeAction::Deliver(destination) = &recipe.action else {
+                        panic!("expected delivery recipe");
+                    };
+                    return destination
                         .resolve_with(|name| variables.get(name).cloned())
                         .unwrap();
                 }
@@ -823,15 +851,42 @@ mod tests {
         let Statement::Recipe(recipe) = &config.statements[1] else {
             panic!("expected recipe");
         };
-        assert!(recipe.destination.needs_runtime_variables());
+        let RecipeAction::Deliver(destination) = &recipe.action else {
+            panic!("expected delivery recipe");
+        };
+        assert!(destination.needs_runtime_variables());
 
-        let error = recipe.destination.resolve_with(|_| None).unwrap_err();
+        let error = destination.resolve_with(|_| None).unwrap_err();
         assert_eq!(error.message, "runtime variable LASTFOLDER is not set");
-        let resolved = recipe
-            .destination
+        let resolved = destination
             .resolve_with(|name| (name == "LASTFOLDER").then(|| "archive/item".to_owned()))
             .unwrap();
         assert_eq!(resolved.path(), "/mail/archive/item-related");
+    }
+
+    #[test]
+    fn expands_destinations_inside_recipe_blocks() {
+        let config = parse("MAILDIR=/mail\nBOX=lists\n:0\n{\n:0\nmaildir:$BOX/inbox\n}\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        let Statement::Recipe(parent) = &config.statements[2] else {
+            panic!("expected parent recipe");
+        };
+        let RecipeAction::Block(children) = &parent.action else {
+            panic!("expected block action");
+        };
+        let Statement::Recipe(child) = &children[0] else {
+            panic!("expected child recipe");
+        };
+        let RecipeAction::Deliver(destination) = &child.action else {
+            panic!("expected delivery action");
+        };
+
+        let resolved = destination
+            .resolve_with(|name| (name == "BOX").then(|| "lists".to_owned()))
+            .unwrap();
+        assert_eq!(resolved.path(), "/mail/lists/inbox");
     }
 
     #[test]
@@ -904,8 +959,10 @@ mod tests {
         let Statement::Recipe(recipe) = &config.statements[1] else {
             panic!("expected recipe");
         };
-        let bound = recipe
-            .destination
+        let RecipeAction::Deliver(destination) = &recipe.action else {
+            panic!("expected delivery recipe");
+        };
+        let bound = destination
             .bind_with(|name| (name == "MAILDIR").then(|| "/mail".to_owned()))
             .unwrap();
 

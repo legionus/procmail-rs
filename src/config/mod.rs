@@ -21,7 +21,7 @@ pub const MAX_ASSIGNMENT_VALUE_LEN: usize = 64 * 1024;
 pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
 pub const MAX_EXPANSION_DEPTH: usize = 32;
 pub const MAX_PATH_EXPRESSION_LEN: usize = 4096;
-pub const MAX_RECIPE_NESTING_DEPTH: usize = 0;
+pub const MAX_RECIPE_NESTING_DEPTH: usize = 64;
 pub const MAX_REGEX_COMPILED_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_REGEX_PATTERN_LEN: usize = 64 * 1024;
 pub const MAX_RC_REGEXES: usize = 32;
@@ -80,13 +80,19 @@ pub struct Recipe {
     pub flags: String,
     pub lock: Option<String>,
     pub conditions: Vec<Condition>,
-    pub destination: Destination,
+    pub action: RecipeAction,
 }
 
 impl Recipe {
     pub fn has_flag(&self, flag: char) -> bool {
         self.flags.contains(flag)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipeAction {
+    Deliver(Destination),
+    Block(Vec<Statement>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
