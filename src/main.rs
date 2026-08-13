@@ -18,8 +18,8 @@ use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::eval::{
-    ConditionKindExplanation, DeliveryPlan, DestinationKind, ExecutionPlan, HeaderEvaluation,
-    PlanExplanation, PlannedDelivery,
+    ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind, ExecutionPlan,
+    HeaderEvaluation, PlanExplanation, PlannedDelivery,
 };
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
@@ -331,9 +331,34 @@ fn deliver_staged(
             OperationalError::PermanentDestination(format!("cannot evaluate message: {error}"))
         })?;
     if execution.requires_ordered_delivery() {
-        let outcome =
-            deliver_ordered(&plan, staged.as_bytes(), options.durability, runtime, trace)?;
-        return delivery_outcome_counts(outcome.original_delivered, outcome.published);
+        let outcome = plan.execute_ordered(|delivery| {
+            let destination = delivery.destination();
+            let result = if matches!(destination, Destination::Mbox(_)) {
+                deliver_mbox(
+                    destination,
+                    staged.as_bytes(),
+                    options.durability,
+                    runtime,
+                    trace,
+                )
+            } else {
+                deliver_one_maildir(
+                    destination,
+                    staged.as_bytes(),
+                    options.durability,
+                    runtime,
+                    trace,
+                )
+            };
+            result.map_err(|error| {
+                if error.can_handle {
+                    DeliveryAttemptError::Recoverable(error.error)
+                } else {
+                    DeliveryAttemptError::Fatal(error.error)
+                }
+            })
+        })?;
+        return delivery_outcome_counts(outcome.original_delivered(), outcome.published());
     }
     let late_deliveries = plan.deliveries().get(early_count..).ok_or_else(|| {
         OperationalError::Internal(
@@ -349,58 +374,6 @@ fn deliver_staged(
     commit_delivery(validated, plan.deliveries(), runtime, trace)?;
 
     delivery_outcome(&plan)
-}
-
-fn deliver_ordered(
-    plan: &DeliveryPlan,
-    message: &[u8],
-    durability: Durability,
-    runtime: &mut RuntimeVariables,
-    trace: &mut impl TraceSink,
-) -> Result<OrderedDeliveryOutcome, OperationalError> {
-    // A later path may depend on the exact file published by an earlier copy.
-    // Publish one complete staged copy at a time and update runtime values
-    // before resolving the next expression.
-    let mut previous_failed = false;
-    let mut pending_error = None;
-    let mut published = 0usize;
-    let mut original_delivered = false;
-    for delivery in plan.deliveries() {
-        if delivery.runs_after_previous_error() != previous_failed {
-            continue;
-        }
-        let destination = delivery.destination();
-        let result = if matches!(destination, Destination::Mbox(_)) {
-            deliver_mbox(destination, message, durability, runtime, trace)
-        } else {
-            deliver_one_maildir(destination, message, durability, runtime, trace)
-        };
-        match result {
-            Ok(()) => {
-                published += 1;
-                original_delivered |= !delivery.is_copy();
-                previous_failed = false;
-                pending_error = None;
-            }
-            Err(error) if error.can_handle => {
-                previous_failed = true;
-                pending_error = Some(error.error);
-            }
-            Err(error) => return Err(error.error),
-        }
-    }
-    if let Some(error) = pending_error {
-        return Err(error);
-    }
-    Ok(OrderedDeliveryOutcome {
-        published,
-        original_delivered,
-    })
-}
-
-struct OrderedDeliveryOutcome {
-    published: usize,
-    original_delivered: bool,
 }
 
 struct OrderedStepError {

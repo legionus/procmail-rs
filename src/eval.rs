@@ -244,6 +244,28 @@ pub struct PlannedDelivery {
     continuation: DeliveryContinuation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryAttemptError<E> {
+    Recoverable(E),
+    Fatal(E),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryOutcome {
+    published: usize,
+    original_delivered: bool,
+}
+
+impl DeliveryOutcome {
+    pub fn published(self) -> usize {
+        self.published
+    }
+
+    pub fn original_delivered(self) -> bool {
+        self.original_delivered
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryTrigger {
     Selected,
@@ -277,6 +299,45 @@ impl DeliveryPlan {
 
     pub fn original_delivered(&self) -> bool {
         self.original_delivered
+    }
+
+    pub fn execute_ordered<E>(
+        &self,
+        mut deliver: impl FnMut(&PlannedDelivery) -> Result<(), DeliveryAttemptError<E>>,
+    ) -> Result<DeliveryOutcome, E> {
+        let mut previous_failed = false;
+        let mut pending_error = None;
+        let mut published = 0usize;
+        let mut original_delivered = false;
+
+        // Dependent steps must observe the result of the immediately
+        // preceding attempted action. A later success also replaces an older
+        // recoverable error, matching an e recovery chain.
+        for delivery in &self.deliveries {
+            if delivery.runs_after_previous_error() != previous_failed {
+                continue;
+            }
+            match deliver(delivery) {
+                Ok(()) => {
+                    published += 1;
+                    original_delivered |= !delivery.is_copy();
+                    previous_failed = false;
+                    pending_error = None;
+                }
+                Err(DeliveryAttemptError::Recoverable(error)) => {
+                    previous_failed = true;
+                    pending_error = Some(error);
+                }
+                Err(DeliveryAttemptError::Fatal(error)) => return Err(error),
+            }
+        }
+        if let Some(error) = pending_error {
+            return Err(error);
+        }
+        Ok(DeliveryOutcome {
+            published,
+            original_delivered,
+        })
     }
 }
 
@@ -2051,6 +2112,49 @@ mod tests {
             EvalError::Delivery { destination, .. } if destination == "fallback"
         ));
         assert_eq!(recorder.attempted, ["primary", "fallback"]);
+    }
+
+    #[test]
+    fn ordered_plan_uses_actual_results_for_error_steps() {
+        let plan = compile(":0\nmaildir:primary\n:0 e\nmaildir:fallback\n");
+        let delivery = plan
+            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody".to_vec()))
+            .unwrap();
+        let mut attempted = Vec::new();
+
+        let outcome = delivery
+            .execute_ordered(|step| {
+                attempted.push(step.destination().path().to_owned());
+                if step.destination().path() == "primary" {
+                    Err(DeliveryAttemptError::Recoverable("primary failed"))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+
+        assert_eq!(attempted, ["primary", "fallback"]);
+        assert_eq!(outcome.published(), 1);
+        assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn ordered_plan_does_not_handle_failure_after_publication() {
+        let plan = compile(":0\nmaildir:primary\n:0 e\nmaildir:fallback\n");
+        let delivery = plan
+            .evaluate_full(&Message::from_bytes(b"Subject: test\n\nbody".to_vec()))
+            .unwrap();
+        let mut attempted = Vec::new();
+
+        let error = delivery
+            .execute_ordered(|step| {
+                attempted.push(step.destination().path().to_owned());
+                Err(DeliveryAttemptError::Fatal("durability failed"))
+            })
+            .unwrap_err();
+
+        assert_eq!(error, "durability failed");
+        assert_eq!(attempted, ["primary"]);
     }
 
     #[test]
