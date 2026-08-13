@@ -61,7 +61,7 @@ fn check_reports_source_line() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(78));
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
@@ -194,7 +194,7 @@ fn filter_reports_body_limit() {
     child.stdin.take().unwrap().write_all(b"\nbody").unwrap();
     let output = child.wait_with_output().unwrap();
 
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(65));
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
@@ -251,7 +251,7 @@ fn filter_fails_when_no_recipe_delivers_the_original() {
     child.stdin.take().unwrap().write_all(input).unwrap();
     let output = child.wait_with_output().unwrap();
 
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(79));
     assert!(output.stdout.is_empty());
     assert!(
         String::from_utf8(output.stderr)

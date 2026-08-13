@@ -55,6 +55,21 @@ enum OperationalError {
     Internal(String),
 }
 
+// Use the established sysexits values when they describe the action a caller
+// should take. Keep unmatched delivery separate because none of those names
+// accurately describes a valid message for which no final recipe was selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum ExitStatus {
+    Success = 0,
+    Input = 65,
+    PermanentDestination = 73,
+    TemporaryDelivery = 75,
+    Configuration = 78,
+    Undelivered = 79,
+    Internal = 70,
+}
+
 impl std::fmt::Display for OperationalError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
@@ -77,14 +92,25 @@ impl OperationalError {
             DeliveryFailureClass::Internal => Self::Internal(message),
         }
     }
+
+    fn exit_status(&self) -> ExitStatus {
+        match self {
+            Self::Configuration(_) => ExitStatus::Configuration,
+            Self::Input(_) => ExitStatus::Input,
+            Self::TemporaryDelivery(_) => ExitStatus::TemporaryDelivery,
+            Self::PermanentDestination(_) => ExitStatus::PermanentDestination,
+            Self::Undelivered(_) => ExitStatus::Undelivered,
+            Self::Internal(_) => ExitStatus::Internal,
+        }
+    }
 }
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::from(ExitStatus::Success as u8),
         Err(error) => {
             eprintln!("procmail-rs: {error}");
-            ExitCode::FAILURE
+            ExitCode::from(error.exit_status() as u8)
         }
     }
 }
@@ -529,4 +555,51 @@ fn parse_args() -> Result<Command, String> {
 
 fn usage() -> String {
     "usage: procmail-rs <check|filter> --config PATH [--set NAME=VALUE]...".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExitStatus, OperationalError};
+
+    #[test]
+    fn operational_errors_have_distinct_stable_exit_statuses() {
+        let cases = [
+            (
+                OperationalError::Configuration(String::new()),
+                ExitStatus::Configuration,
+                78,
+            ),
+            (
+                OperationalError::Input(String::new()),
+                ExitStatus::Input,
+                65,
+            ),
+            (
+                OperationalError::TemporaryDelivery(String::new()),
+                ExitStatus::TemporaryDelivery,
+                75,
+            ),
+            (
+                OperationalError::PermanentDestination(String::new()),
+                ExitStatus::PermanentDestination,
+                73,
+            ),
+            (
+                OperationalError::Undelivered(String::new()),
+                ExitStatus::Undelivered,
+                79,
+            ),
+            (
+                OperationalError::Internal(String::new()),
+                ExitStatus::Internal,
+                70,
+            ),
+        ];
+
+        for (error, status, value) in cases {
+            assert_eq!(error.exit_status(), status);
+            assert_eq!(status as u8, value);
+        }
+        assert_eq!(ExitStatus::Success as u8, 0);
+    }
 }
