@@ -52,12 +52,7 @@ impl MaildirSink {
 
         for _ in 0..MAX_NAME_ATTEMPTS {
             let name = unique_name()?;
-            match openat(
-                &tmp_dir,
-                name.as_str(),
-                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::from_raw_mode(MAILDIR_FILE_MODE),
-            ) {
+            match create_pending_file(&tmp_dir, &name) {
                 Ok(fd) => {
                     return Ok(Self {
                         file: fd,
@@ -91,6 +86,18 @@ impl MaildirSink {
             Err(error) => Err(io_error(error)),
         }
     }
+}
+
+fn create_pending_file(dir: &OwnedFd, name: &str) -> Result<OwnedFd, rustix::io::Errno> {
+    // CREATE and EXCL make checking the candidate name and claiming it one
+    // filesystem operation. NOFOLLOW additionally prevents a pre-existing
+    // symlink from turning creation into an open of another path.
+    openat(
+        dir,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::from_raw_mode(MAILDIR_FILE_MODE),
+    )
 }
 
 impl Write for MaildirSink {
@@ -294,6 +301,19 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(first.len(), MAILDIR_NAME_LEN);
         assert_eq!(second.len(), MAILDIR_NAME_LEN);
+    }
+
+    #[test]
+    fn exclusive_creation_never_opens_an_existing_tmp_file() {
+        let maildir = TestMaildir::create();
+        let name = unique_name().unwrap();
+        let path = maildir.path().join("tmp").join(&name);
+        fs::write(&path, b"owned by another delivery").unwrap();
+        let tmp_dir = open_directory_path(&maildir.path().join("tmp")).unwrap();
+
+        let error = create_pending_file(&tmp_dir, &name).unwrap_err();
+        assert_eq!(error, rustix::io::Errno::EXIST);
+        assert_eq!(fs::read(path).unwrap(), b"owned by another delivery");
     }
 
     #[test]
