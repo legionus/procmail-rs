@@ -54,8 +54,10 @@ struct CompiledSequence {
 
 #[derive(Debug)]
 struct CompiledNode {
+    line: usize,
+    assignments: Vec<CompiledAssignment>,
     control: ControlFlow,
-    condition_requirements: InputRequirements,
+    conditions: Vec<CompiledCondition>,
     action: CompiledAction,
 }
 
@@ -104,7 +106,7 @@ struct GroupResult<T> {
     else_handled: T,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CompiledAssignment {
     name: String,
     value: String,
@@ -126,6 +128,39 @@ enum CompiledConditionKind {
     MessageRegex(Regex),
     SmallerThan(usize),
     LargerThan(usize),
+}
+
+#[derive(Debug)]
+struct SequenceExecution {
+    deliveries: usize,
+    original_delivered: bool,
+    pending_error: Option<EvalError>,
+}
+
+#[derive(Debug, Default)]
+struct SequenceState {
+    previous: Option<RecipeExecution>,
+    chain_base_matched: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecipeExecution {
+    conditions_matched: bool,
+    else_handled: bool,
+    action: ActionExecution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionExecution {
+    NotAttempted,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequenceControl {
+    Continue,
+    Stop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,16 +347,21 @@ impl fmt::Display for EvalError {
 impl std::error::Error for EvalError {}
 
 impl CompiledSequence {
-    fn compile(statements: &[Statement]) -> Self {
-        let recipes = statements
-            .iter()
-            .filter_map(|statement| {
-                let Statement::Recipe(recipe) = statement else {
-                    return None;
-                };
-                Some(CompiledNode::compile(recipe))
-            })
-            .collect::<Vec<_>>();
+    fn compile(statements: &[Statement], assignments: &mut Vec<CompiledAssignment>) -> Self {
+        let mut recipes = Vec::new();
+        for statement in statements {
+            match statement {
+                Statement::Assignment(assignment) => assignments.push(CompiledAssignment {
+                    name: assignment.name.clone(),
+                    value: assignment.value.clone(),
+                    line: Some(assignment.line),
+                    source: TraceVariableSource::RcFile,
+                }),
+                Statement::Recipe(recipe) => {
+                    recipes.push(CompiledNode::compile(recipe, std::mem::take(assignments)));
+                }
+            }
+        }
         Self { recipes }
     }
 
@@ -338,28 +378,100 @@ impl CompiledSequence {
             .iter()
             .any(CompiledNode::requires_ordered_delivery)
     }
+
+    fn execute(
+        &self,
+        message: &Message,
+        delivery: &mut impl Delivery,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut SequenceExecution,
+    ) -> Result<SequenceControl, EvalError> {
+        let mut state = SequenceState::default();
+
+        for recipe in &self.recipes {
+            apply_assignments(&recipe.assignments, runtime, trace);
+
+            // Control-flow flags inspect only results produced at this block
+            // level. Child sequences therefore cannot overwrite the state
+            // used by the next sibling recipe.
+            let gate = match recipe.control {
+                ControlFlow::Independent => true,
+                ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
+                ControlFlow::AfterPreviousSuccess => {
+                    state.previous.is_some_and(|result: RecipeExecution| {
+                        result.conditions_matched && result.action == ActionExecution::Succeeded
+                    })
+                }
+                ControlFlow::Else => state
+                    .previous
+                    .is_none_or(|result: RecipeExecution| !result.else_handled),
+                ControlFlow::AfterPreviousError => {
+                    state.previous.is_some_and(|result: RecipeExecution| {
+                        result.action == ActionExecution::Failed
+                    })
+                }
+            };
+
+            let conditions_matched = gate && recipe.matches(message, trace)?;
+            let else_handled = if recipe.control == ControlFlow::Else {
+                state.previous.is_some_and(|result| result.else_handled) || conditions_matched
+            } else {
+                conditions_matched
+            };
+
+            let (action, control) = if conditions_matched {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Selected,
+                });
+                recipe.execute_action(message, delivery, runtime, trace, execution)?
+            } else {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
+                (ActionExecution::NotAttempted, SequenceControl::Continue)
+            };
+
+            let result = RecipeExecution {
+                conditions_matched,
+                else_handled,
+                action,
+            };
+            state.previous = Some(result);
+            if !matches!(
+                recipe.control,
+                ControlFlow::AfterChainMatch | ControlFlow::AfterPreviousSuccess
+            ) {
+                state.chain_base_matched = Some(conditions_matched);
+            }
+            if control == SequenceControl::Stop {
+                return Ok(SequenceControl::Stop);
+            }
+        }
+
+        Ok(SequenceControl::Continue)
+    }
 }
 
 impl CompiledNode {
-    fn compile(recipe: &Recipe) -> Self {
-        let condition_requirements = recipe.conditions.iter().fold(
-            InputRequirements::default(),
-            |requirements, condition| {
-                requirements.union(condition_requirements(recipe, &condition.kind))
-            },
-        );
+    fn compile(recipe: &Recipe, assignments: Vec<CompiledAssignment>) -> Self {
+        let conditions = CompiledRecipe::compile_conditions(recipe);
         let action = match &recipe.action {
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
                 destination: destination.clone(),
                 continuation: recipe.options.continuation,
             },
             RecipeAction::Block(statements) => {
-                CompiledAction::Block(CompiledSequence::compile(statements))
+                CompiledAction::Block(CompiledSequence::compile(statements, &mut Vec::new()))
             }
         };
         Self {
+            line: recipe.line,
+            assignments,
             control: recipe.options.control,
-            condition_requirements,
+            conditions,
             action,
         }
     }
@@ -369,7 +481,11 @@ impl CompiledNode {
             CompiledAction::Deliver { .. } => InputRequirements::default(),
             CompiledAction::Block(sequence) => sequence.requirements(),
         };
-        self.condition_requirements.union(action)
+        self.conditions
+            .iter()
+            .fold(action, |requirements, condition| {
+                requirements.union(condition.requirements())
+            })
     }
 
     fn requires_ordered_delivery(&self) -> bool {
@@ -390,33 +506,100 @@ impl CompiledNode {
                 ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
             )
     }
+
+    fn matches(&self, message: &Message, trace: &mut impl TraceSink) -> Result<bool, EvalError> {
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let matched = condition.matches_complete(CompleteMessage::Buffered(message))?;
+            condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
+            if !matched {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn execute_action(
+        &self,
+        message: &Message,
+        delivery: &mut impl Delivery,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut SequenceExecution,
+    ) -> Result<(ActionExecution, SequenceControl), EvalError> {
+        match &self.action {
+            CompiledAction::Deliver {
+                destination,
+                continuation,
+            } => {
+                let destination =
+                    match destination.bind_with(|name| runtime.get(name).map(str::to_owned)) {
+                        Ok(destination) => destination,
+                        Err(error) => {
+                            execution.pending_error = Some(EvalError::Expansion(error));
+                            return Ok((ActionExecution::Failed, SequenceControl::Continue));
+                        }
+                    };
+                match delivery.deliver(&destination, message) {
+                    Ok(()) => {
+                        execution.deliveries += 1;
+                        execution.pending_error = None;
+                        if *continuation == ContinuationMode::Stop {
+                            execution.original_delivered = true;
+                            Ok((ActionExecution::Succeeded, SequenceControl::Stop))
+                        } else {
+                            Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                        }
+                    }
+                    Err(message) => {
+                        execution.pending_error = Some(EvalError::Delivery {
+                            destination: destination_name(&destination).to_owned(),
+                            message,
+                        });
+                        Ok((ActionExecution::Failed, SequenceControl::Continue))
+                    }
+                }
+            }
+            CompiledAction::Block(children) => {
+                // A selected block owns the outcome of its child sequence.
+                // Discard an older sibling failure before entering it so an
+                // empty or fully skipped block can still complete normally.
+                execution.pending_error = None;
+                let control = children.execute(message, delivery, runtime, trace, execution)?;
+                let action = if execution.pending_error.is_some() {
+                    ActionExecution::Failed
+                } else {
+                    ActionExecution::Succeeded
+                };
+                Ok((action, control))
+            }
+        }
+    }
 }
 
-fn condition_requirements(recipe: &Recipe, condition: &ConditionKind) -> InputRequirements {
-    match condition {
-        ConditionKind::Regex(_) => match recipe.options.condition_input {
-            ConditionInput::Headers => InputRequirements {
-                needs_headers: true,
-                ..InputRequirements::default()
-            },
-            ConditionInput::Body | ConditionInput::Message => InputRequirements {
-                needs_headers: true,
-                needs_body_contents: true,
-                needs_end_of_message: true,
-            },
-        },
-        ConditionKind::SmallerThan(_) | ConditionKind::LargerThan(_) => InputRequirements {
-            needs_end_of_message: true,
-            ..InputRequirements::default()
-        },
+fn apply_assignments(
+    assignments: &[CompiledAssignment],
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) {
+    for assignment in assignments {
+        runtime.set(assignment.name.clone(), assignment.value.clone());
+        if let Ok(name) = TraceName::new(&assignment.name) {
+            trace.record(TraceEvent::VariableAssigned {
+                line: assignment.line,
+                name,
+                source: assignment.source,
+                value: trace
+                    .detail()
+                    .includes_variable_values()
+                    .then(|| TraceValue::new(assignment.value.as_bytes())),
+            });
+        }
     }
 }
 
 impl ExecutionPlan {
     pub fn compile(config: &Config) -> Self {
-        let root = CompiledSequence::compile(&config.statements);
-        let mut recipes = Vec::new();
-        let mut assignments = config
+        let initial_assignments = config
             .initial_variables()
             .iter()
             .map(|(name, value)| CompiledAssignment {
@@ -426,6 +609,9 @@ impl ExecutionPlan {
                 source: TraceVariableSource::CommandLine,
             })
             .collect::<Vec<_>>();
+        let root = CompiledSequence::compile(&config.statements, &mut initial_assignments.clone());
+        let mut recipes = Vec::new();
+        let mut assignments = initial_assignments;
         let mut condition_group_count = 0;
         compile_statements(
             &config.statements,
@@ -849,20 +1035,7 @@ impl CompiledRecipe {
     }
 
     fn apply_assignments(&self, runtime: &mut RuntimeVariables, trace: &mut impl TraceSink) {
-        for assignment in &self.assignments {
-            runtime.set(assignment.name.clone(), assignment.value.clone());
-            if let Ok(name) = TraceName::new(&assignment.name) {
-                trace.record(TraceEvent::VariableAssigned {
-                    line: assignment.line,
-                    name,
-                    source: assignment.source,
-                    value: trace
-                        .detail()
-                        .includes_variable_values()
-                        .then(|| TraceValue::new(assignment.value.as_bytes())),
-                });
-            }
-        }
+        apply_assignments(&self.assignments, runtime, trace);
     }
 
     fn explain(&self) -> RecipeExplanation {
@@ -1234,47 +1407,30 @@ pub fn evaluate(
     delivery: &mut impl Delivery,
 ) -> Result<Outcome, EvalError> {
     let plan = ExecutionPlan::compile(config);
-    let delivery_plan = plan.evaluate_full(message)?;
-    execute_deliveries(&delivery_plan, message, delivery)
-}
-
-fn execute_deliveries(
-    plan: &DeliveryPlan,
-    message: &Message,
-    delivery: &mut impl Delivery,
-) -> Result<Outcome, EvalError> {
-    let mut previous_failed = false;
-    let mut pending_error = None;
-    let mut deliveries = 0usize;
-    let mut original_delivered = false;
-    for (index, destination) in plan.destinations.iter().enumerate() {
-        if plan.runs_after_previous_error(index) != previous_failed {
-            continue;
-        }
-        match delivery.deliver(destination, message) {
-            Ok(()) => {
-                deliveries += 1;
-                original_delivered |= !plan.destination_is_copy(index);
-                previous_failed = false;
-                pending_error = None;
-            }
-            Err(error) => {
-                previous_failed = true;
-                pending_error = Some(EvalError::Delivery {
-                    destination: destination_name(destination).to_owned(),
-                    message: error,
-                });
-            }
-        }
-    }
-    if let Some(error) = pending_error {
+    let mut execution = SequenceExecution {
+        deliveries: 0,
+        original_delivered: false,
+        pending_error: None,
+    };
+    plan.root.execute(
+        message,
+        delivery,
+        &mut RuntimeVariables::default(),
+        &mut NoTrace,
+        &mut execution,
+    )?;
+    if let Some(error) = execution.pending_error {
         return Err(error);
     }
 
-    if original_delivered {
-        Ok(Outcome::Delivered { deliveries })
+    if execution.original_delivered {
+        Ok(Outcome::Delivered {
+            deliveries: execution.deliveries,
+        })
     } else {
-        Ok(Outcome::Undelivered { copies: deliveries })
+        Ok(Outcome::Undelivered {
+            copies: execution.deliveries,
+        })
     }
 }
 
@@ -1945,5 +2101,36 @@ mod tests {
         let (outcome, _) = evaluate_config(":0 c\nmaildir:copy\n", b"Subject: test\n\nbody\n");
 
         assert_eq!(outcome, Outcome::Undelivered { copies: 1 });
+    }
+
+    #[test]
+    fn nested_final_delivery_stops_the_parent_sequence() {
+        let (outcome, recorder) = evaluate_config(
+            ":0\n{\n:0\nmaildir:nested\n}\n:0\nmaildir:unreachable\n",
+            b"Subject: test\n\nbody\n",
+        );
+
+        assert_eq!(outcome, Outcome::Delivered { deliveries: 1 });
+        assert_eq!(
+            recorder.destinations,
+            [Destination::Maildir("nested".into())]
+        );
+    }
+
+    #[test]
+    fn successful_block_action_enables_lowercase_chain() {
+        let (outcome, recorder) = evaluate_config(
+            ":0\n{\n:0 c\nmaildir:copy\n}\n:0 a\nmaildir:final\n",
+            b"Subject: test\n\nbody\n",
+        );
+
+        assert_eq!(outcome, Outcome::Delivered { deliveries: 2 });
+        assert_eq!(
+            recorder.destinations,
+            [
+                Destination::Maildir("copy".into()),
+                Destination::Maildir("final".into())
+            ]
+        );
     }
 }
