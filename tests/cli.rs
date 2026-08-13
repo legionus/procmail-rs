@@ -53,6 +53,48 @@ fn check_accepts_valid_config() {
 }
 
 #[test]
+fn explain_reports_safe_plan_without_reading_or_delivery() {
+    let path = config_file("");
+    let destination = path.parent().unwrap().join("must-not-exist");
+    fs::write(
+        &path,
+        format!(
+            "PRIVATE_VALUE=assignment-secret\n:0 B\n* body-secret\nmaildir:{}\n",
+            destination.display()
+        ),
+    )
+    .unwrap();
+    let input_path = path.parent().unwrap().join("message.eml");
+    fs::write(&input_path, b"Subject: stdin-secret\n\nbody").unwrap();
+    let mut input = fs::File::open(&input_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["explain", "--config"])
+        .arg(&path)
+        .stdin(Stdio::from(input.try_clone().unwrap()))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_eq!(input.stream_position().unwrap(), 0);
+    assert!(!destination.exists());
+    let explanation = String::from_utf8(output.stdout).unwrap();
+    assert!(explanation.contains("input headers=yes body=yes end=yes"));
+    assert!(explanation.contains("recipe line=2"));
+    assert!(explanation.contains("condition kind=body-regex negated=no"));
+    for secret in [
+        "assignment-secret",
+        "body-secret",
+        "must-not-exist",
+        "stdin-secret",
+    ] {
+        assert!(!explanation.contains(secret), "leaked {secret:?}");
+    }
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn check_reports_source_line() {
     let path = config_file(":0\n| command\n");
     let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))

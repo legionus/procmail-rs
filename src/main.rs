@@ -18,7 +18,10 @@ use procmail_rs::config::{
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
-use procmail_rs::eval::{DeliveryPlan, ExecutionPlan, HeaderEvaluation};
+use procmail_rs::eval::{
+    ConditionKindExplanation, DeliveryPlan, DestinationKind, ExecutionPlan, HeaderEvaluation,
+    PlanExplanation,
+};
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::runtime::RuntimeVariables;
@@ -30,6 +33,7 @@ use procmail_rs::trace::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Check,
+    Explain,
     Filter,
 }
 
@@ -153,6 +157,12 @@ fn run() -> Result<(), OperationalError> {
 
     match command.action {
         Action::Check => Ok(()),
+        Action::Explain => {
+            let mut stdout = io::stdout().lock();
+            write_plan_explanation(&plan.explain(), &mut stdout).map_err(|error| {
+                OperationalError::Internal(format!("cannot write plan explanation: {error}"))
+            })
+        }
         Action::Filter => {
             let mut runtime = RuntimeVariables::default();
             let mut trace = NoTrace;
@@ -195,6 +205,64 @@ fn run() -> Result<(), OperationalError> {
             }
         }
     }
+}
+
+fn write_plan_explanation(
+    explanation: &PlanExplanation,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let requirements = explanation.requirements();
+    writeln!(
+        writer,
+        "input headers={} body={} end={}",
+        yes_no(requirements.needs_headers),
+        yes_no(requirements.needs_body_contents),
+        yes_no(requirements.needs_end_of_message)
+    )?;
+    writeln!(
+        writer,
+        "ordered-delivery={}",
+        yes_no(explanation.requires_ordered_delivery())
+    )?;
+
+    // The explanation deliberately describes only control-flow shape. Do not
+    // print regex text, assignment values, or destination paths because they
+    // can contain credentials or other private configuration data.
+    for recipe in explanation.recipes() {
+        let destination = match recipe.destination() {
+            DestinationKind::Maildir => "maildir",
+            DestinationKind::Mbox => "mbox",
+        };
+        writeln!(
+            writer,
+            "recipe line={} copy={} assignments={} destination={} deferred={}",
+            recipe.line(),
+            yes_no(recipe.is_copy()),
+            recipe.assignment_count(),
+            destination,
+            yes_no(recipe.defers_destination())
+        )?;
+        for condition in recipe.conditions() {
+            let kind = match condition.kind() {
+                ConditionKindExplanation::HeaderRegex => "header-regex",
+                ConditionKindExplanation::BodyRegex => "body-regex",
+                ConditionKindExplanation::MessageRegex => "message-regex",
+                ConditionKindExplanation::SmallerThan => "smaller-than",
+                ConditionKindExplanation::LargerThan => "larger-than",
+            };
+            writeln!(
+                writer,
+                "  condition kind={} negated={}",
+                kind,
+                yes_no(condition.is_negated())
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn validate_destination_types(config: &config::Config, rc_path: &Path) -> Result<(), String> {
@@ -512,6 +580,7 @@ fn parse_args() -> Result<Command, String> {
         .ok_or_else(usage)?;
     let action = match action.as_str() {
         "check" => Action::Check,
+        "explain" => Action::Explain,
         "filter" => Action::Filter,
         _ => return Err(usage()),
     };
@@ -554,7 +623,7 @@ fn parse_args() -> Result<Command, String> {
 }
 
 fn usage() -> String {
-    "usage: procmail-rs <check|filter> --config PATH [--set NAME=VALUE]...".into()
+    "usage: procmail-rs <check|explain|filter> --config PATH [--set NAME=VALUE]...".into()
 }
 
 #[cfg(test)]
