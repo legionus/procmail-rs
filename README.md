@@ -84,9 +84,10 @@ mboxrd quoting rules below.
 
 The formatter will use these rules:
 
-- Each record starts with exactly one ASCII postmark line beginning with
-  `From ` and ending with LF. A later implementation step will define how its
-  sender and timestamp are selected and how an incoming postmark is handled.
+- Each record starts with exactly one generated ASCII postmark line using
+  sender `MAILER-DAEMON`, the current UTC timestamp in ctime shape, and LF.
+  An incoming leading `From ` line remains message data and is quoted like any
+  other line; hostile input cannot select envelope metadata.
 - The message is treated as bytes. Existing line endings are not normalized.
 - At the start of every physical message line, including lines in the header
   section, a sequence matching zero or more `>` bytes followed by `From ` is

@@ -8,12 +8,16 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::fd::OwnedFd;
-use rustix::fs::{FileType, FlockOperation, Mode, OFlags, flock, fstat, openat};
+use rustix::fs::{
+    FileType, FlockOperation, Mode, OFlags, SeekFrom, flock, fstat, fsync, ftruncate, openat, seek,
+};
 
+use super::maildir::Durability;
 use super::maildir::open_directory_path;
+use super::{DeliveryFailureClass, PublishedDelivery};
 
 pub const MAX_POSTMARK_LEN: usize = 512;
 const MBOX_FILE_MODE: u32 = 0o600;
@@ -22,11 +26,13 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 pub struct MboxFile {
     file: OwnedFd,
+    parent: OwnedFd,
     path: PathBuf,
 }
 
 pub struct LockedMbox {
     file: OwnedFd,
+    parent: OwnedFd,
     path: PathBuf,
 }
 
@@ -38,6 +44,15 @@ pub enum PostmarkError {
     TooLong,
     InvalidShape,
     NonAscii,
+    TimeBeforeEpoch,
+    TimeOutOfRange,
+}
+
+#[derive(Debug)]
+pub struct MboxAppendError {
+    source: io::Error,
+    rollback: Option<io::Error>,
+    published: bool,
 }
 
 impl Postmark {
@@ -63,6 +78,30 @@ impl Postmark {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    pub fn generated(time: SystemTime) -> Result<Self, PostmarkError> {
+        let seconds = time
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| PostmarkError::TimeBeforeEpoch)?
+            .as_secs();
+        let days = i64::try_from(seconds / 86_400).map_err(|_| PostmarkError::TimeOutOfRange)?;
+        let seconds_in_day = seconds % 86_400;
+        let hour = seconds_in_day / 3_600;
+        let minute = seconds_in_day % 3_600 / 60;
+        let second = seconds_in_day % 60;
+        let (year, month, day) = civil_from_days(days).ok_or(PostmarkError::TimeOutOfRange)?;
+        let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+            [usize::try_from(days.rem_euclid(7)).map_err(|_| PostmarkError::TimeOutOfRange)?];
+        let month = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ]
+        .get(month.checked_sub(1).ok_or(PostmarkError::TimeOutOfRange)? as usize)
+        .ok_or(PostmarkError::TimeOutOfRange)?;
+        let line = format!(
+            "From MAILER-DAEMON {weekday} {month} {day:>2} {hour:02}:{minute:02}:{second:02} {year:04}\n"
+        );
+        Self::new(line.as_bytes())
+    }
 }
 
 impl fmt::Display for PostmarkError {
@@ -71,6 +110,8 @@ impl fmt::Display for PostmarkError {
             Self::TooLong => "mbox postmark exceeds its hard limit",
             Self::InvalidShape => "mbox postmark must be one LF-terminated 'From ' line",
             Self::NonAscii => "mbox postmark must contain only printable ASCII",
+            Self::TimeBeforeEpoch => "cannot generate mbox postmark before the Unix epoch",
+            Self::TimeOutOfRange => "cannot represent timestamp in mbox postmark",
         })
     }
 }
@@ -106,6 +147,7 @@ impl MboxFile {
         }
         Ok(Self {
             file: fd,
+            parent,
             path: path.to_owned(),
         })
     }
@@ -121,6 +163,7 @@ impl MboxFile {
                 Ok(()) => {
                     return Ok(LockedMbox {
                         file: self.file,
+                        parent: self.parent,
                         path: self.path,
                     });
                 }
@@ -154,6 +197,103 @@ impl LockedMbox {
 
     pub fn unlock(self) -> io::Result<()> {
         flock(&self.file, FlockOperation::Unlock).map_err(io_error)
+    }
+
+    pub fn append(
+        self,
+        message: &[u8],
+        durability: Durability,
+    ) -> Result<PublishedDelivery, MboxAppendError> {
+        self.append_with(durability, |file| {
+            let postmark = Postmark::generated(SystemTime::now()).map_err(io::Error::other)?;
+            write_record(&mut FdWriter(file), &postmark, message)
+        })
+    }
+
+    fn append_with(
+        self,
+        durability: Durability,
+        write: impl FnOnce(&OwnedFd) -> io::Result<()>,
+    ) -> Result<PublishedDelivery, MboxAppendError> {
+        let original_len = seek(&self.file, SeekFrom::End(0))
+            .map_err(|error| MboxAppendError::before_publication(io_error(error), None))?;
+
+        // Every failure before unlock attempts to restore the exact original
+        // length while this writer still owns the lock. Preserve both errors
+        // when recovery fails so callers can escalate possible corruption.
+        let operation = write(&self.file).and_then(|()| match durability {
+            Durability::None => Ok(()),
+            Durability::File | Durability::Full => fsync(&self.file).map_err(io_error),
+        });
+        if let Err(source) = operation {
+            let rollback = rollback(&self.file, original_len, durability).err();
+            let _unlock = flock(&self.file, FlockOperation::Unlock);
+            return Err(MboxAppendError::before_publication(source, rollback));
+        }
+
+        if durability == Durability::Full
+            && let Err(source) = fsync(&self.parent).map_err(io_error)
+        {
+            let rollback = rollback(&self.file, original_len, durability).err();
+            let _unlock = flock(&self.file, FlockOperation::Unlock);
+            return Err(MboxAppendError::before_publication(source, rollback));
+        }
+
+        let published = PublishedDelivery::new(self.path.clone());
+        flock(&self.file, FlockOperation::Unlock)
+            .map_err(io_error)
+            .map_err(MboxAppendError::after_publication)?;
+        Ok(published)
+    }
+}
+
+impl MboxAppendError {
+    fn before_publication(source: io::Error, rollback: Option<io::Error>) -> Self {
+        Self {
+            source,
+            rollback,
+            published: false,
+        }
+    }
+
+    fn after_publication(source: io::Error) -> Self {
+        Self {
+            source,
+            rollback: None,
+            published: true,
+        }
+    }
+
+    pub fn class(&self) -> DeliveryFailureClass {
+        if self.rollback.is_some() {
+            DeliveryFailureClass::Internal
+        } else {
+            DeliveryFailureClass::from_io_error(&self.source)
+        }
+    }
+
+    pub fn published(&self) -> bool {
+        self.published
+    }
+
+    pub fn rollback_failed(&self) -> bool {
+        self.rollback.is_some()
+    }
+}
+
+impl fmt::Display for MboxAppendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "cannot append mbox record: {}", self.source)?;
+        if let Some(error) = &self.rollback {
+            write!(formatter, "; cannot complete mailbox rollback: {error}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for MboxAppendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
     }
 }
 
@@ -193,13 +333,54 @@ fn io_error(error: rustix::io::Errno) -> io::Error {
     io::Error::from_raw_os_error(error.raw_os_error())
 }
 
+struct FdWriter<'a>(&'a OwnedFd);
+
+impl Write for FdWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        rustix::io::write(self.0, bytes).map_err(io_error)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn rollback(file: &OwnedFd, original_len: u64, durability: Durability) -> io::Result<()> {
+    ftruncate(file, original_len).map_err(io_error)?;
+    seek(file, SeekFrom::End(0)).map_err(io_error)?;
+    if durability != Durability::None {
+        fsync(file).map_err(io_error)?;
+    }
+    Ok(())
+}
+
+fn civil_from_days(days_since_epoch: i64) -> Option<(i64, u32, u32)> {
+    // Convert a non-negative Unix day number to the proleptic Gregorian date
+    // using only checked integer arithmetic, avoiding locale and libc state in
+    // the security-sensitive postmark path.
+    let shifted = days_since_epoch.checked_add(719_468)?;
+    let era = shifted / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era.checked_add(era.checked_mul(400)?)?;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    Some((year, u32::try_from(month).ok()?, u32::try_from(day).ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{self, Read};
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{MAX_POSTMARK_LEN, MboxFile, Postmark, PostmarkError, write_record};
+    use crate::delivery::maildir::Durability;
 
     fn temporary_path(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -269,6 +450,20 @@ mod tests {
     }
 
     #[test]
+    fn generates_stable_utc_postmark() {
+        assert_eq!(
+            Postmark::generated(UNIX_EPOCH).unwrap().as_bytes(),
+            b"From MAILER-DAEMON Thu Jan  1 00:00:00 1970\n"
+        );
+        assert_eq!(
+            Postmark::generated(UNIX_EPOCH + Duration::from_secs(951_827_696))
+                .unwrap()
+                .as_bytes(),
+            b"From MAILER-DAEMON Tue Feb 29 12:34:56 2000\n"
+        );
+    }
+
+    #[test]
     fn opens_regular_mailbox_without_following_symlinks_or_hard_links() {
         let directory = temporary_path("open");
         fs::create_dir(&directory).unwrap();
@@ -305,6 +500,51 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
 
         first.unlock().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn append_publishes_complete_record_and_reports_path() {
+        let directory = temporary_path("append");
+        fs::create_dir(&directory).unwrap();
+        let mailbox = directory.join("mailbox");
+        let published = MboxFile::open(&mailbox)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .append(b"Subject: test\n\nFrom body", Durability::File)
+            .unwrap();
+
+        assert_eq!(published.last_folder(), mailbox);
+        let bytes = fs::read(&mailbox).unwrap();
+        assert!(bytes.starts_with(b"From MAILER-DAEMON "));
+        assert!(bytes.ends_with(b"Subject: test\n\n>From body\n\n"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn append_failure_restores_original_length() {
+        let directory = temporary_path("rollback");
+        fs::create_dir(&directory).unwrap();
+        let mailbox = directory.join("mailbox");
+        fs::write(&mailbox, b"existing").unwrap();
+        let locked = MboxFile::open(&mailbox).unwrap().lock().unwrap();
+
+        let error = locked
+            .append_with(Durability::None, |file| {
+                rustix::io::write(file, b"partial").map_err(super::io_error)?;
+                Err(io::Error::from_raw_os_error(28))
+            })
+            .unwrap_err();
+
+        assert!(!error.published());
+        assert!(!error.rollback_failed());
+        let mut bytes = Vec::new();
+        fs::File::open(&mailbox)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"existing");
         fs::remove_dir_all(directory).unwrap();
     }
 }
