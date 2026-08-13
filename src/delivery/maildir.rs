@@ -13,7 +13,7 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use rustix::fd::OwnedFd;
-use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, fsync, openat, renameat_with, unlinkat};
+use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, fsync, linkat, openat, renameat_with};
 use rustix::rand::{GetRandomFlags, getrandom};
 
 use super::{PendingSink, PublishedDelivery, SinkCommitError};
@@ -66,9 +66,7 @@ pub struct MaildirSink {
     file: OwnedFd,
     tmp_dir: OwnedFd,
     new_dir: OwnedFd,
-    name: String,
     maildir: PathBuf,
-    pending: bool,
     durability: Durability,
 }
 
@@ -89,55 +87,42 @@ impl MaildirSink {
         let new_dir = open_directory_at(&maildir, OsStr::new("new"))?;
         let _cur_dir = open_directory_at(&maildir, OsStr::new("cur"))?;
 
-        let (file, name) = create_unique_pending_file(&tmp_dir, unique_name)?;
+        let file = create_unnamed_pending_file(&tmp_dir)?;
         Ok(Self {
             file,
             tmp_dir,
             new_dir,
-            name,
             maildir: path.to_owned(),
-            pending: true,
             durability,
         })
     }
-
-    fn cleanup(&mut self) -> io::Result<()> {
-        if !self.pending {
-            return Ok(());
-        }
-        match unlinkat(&self.tmp_dir, self.name.as_str(), AtFlags::empty()) {
-            Ok(()) | Err(rustix::io::Errno::NOENT) => {
-                self.pending = false;
-                Ok(())
-            }
-            Err(error) => Err(io_error(error)),
-        }
-    }
 }
 
-fn create_pending_file(dir: &OwnedFd, name: &str) -> Result<OwnedFd, rustix::io::Errno> {
-    // CREATE and EXCL make checking the candidate name and claiming it one
-    // filesystem operation. NOFOLLOW additionally prevents a pre-existing
-    // symlink from turning creation into an open of another path.
+fn create_unnamed_pending_file(dir: &OwnedFd) -> io::Result<OwnedFd> {
+    // Keeping the inode unnamed until commit makes abort a close-only
+    // operation. No directory entry needs deletion when validation or a write
+    // fails, so another process cannot substitute a victim for cleanup.
     openat(
         dir,
-        name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        ".",
+        OFlags::WRONLY | OFlags::TMPFILE | OFlags::CLOEXEC,
         Mode::from_raw_mode(MAILDIR_FILE_MODE),
     )
+    .map_err(io_error)
 }
 
-fn create_unique_pending_file(
+fn link_unique_pending_file(
+    file: &OwnedFd,
     dir: &OwnedFd,
     mut next_name: impl FnMut() -> io::Result<String>,
-) -> io::Result<(OwnedFd, String)> {
+) -> io::Result<String> {
     // Retry only collisions: another error describes a condition that choosing
     // another name cannot repair. The fixed attempt count also prevents a bad
     // random source or a hostile directory from keeping delivery in this loop.
     for _ in 0..MAX_NAME_ATTEMPTS {
         let name = next_name()?;
-        match create_pending_file(dir, &name) {
-            Ok(file) => return Ok((file, name)),
+        match linkat(file, "", dir, name.as_str(), AtFlags::EMPTY_PATH) {
+            Ok(()) => return Ok(name),
             Err(rustix::io::Errno::EXIST) => continue,
             Err(error) => return Err(io_error(error)),
         }
@@ -147,6 +132,10 @@ fn create_unique_pending_file(
         io::ErrorKind::AlreadyExists,
         format!("cannot allocate a unique Maildir name after {MAX_NAME_ATTEMPTS} attempts"),
     ))
+}
+
+fn publish_linked_file(tmp_dir: &OwnedFd, new_dir: &OwnedFd, name: &str) -> io::Result<()> {
+    renameat_with(tmp_dir, name, new_dir, name, RenameFlags::NOREPLACE).map_err(io_error)
 }
 
 impl Write for MaildirSink {
@@ -160,26 +149,22 @@ impl Write for MaildirSink {
 }
 
 impl PendingSink for MaildirSink {
-    fn commit(mut self: Box<Self>) -> Result<PublishedDelivery, SinkCommitError> {
+    fn commit(self: Box<Self>) -> Result<PublishedDelivery, SinkCommitError> {
         if self.durability != Durability::None {
             fsync(&self.file)
                 .map_err(|error| SinkCommitError::before_publication(io_error(error)))?;
         }
 
+        let name = link_unique_pending_file(&self.file, &self.tmp_dir, unique_name)
+            .map_err(SinkCommitError::before_publication)?;
+
         // Publish with one descriptor-relative rename so readers observe
         // either no entry or the complete file. A cross-mount layout fails
         // with EXDEV; falling back to copy-and-remove would expose partial
         // contents and is deliberately not attempted.
-        match renameat_with(
-            &self.tmp_dir,
-            self.name.as_str(),
-            &self.new_dir,
-            self.name.as_str(),
-            RenameFlags::NOREPLACE,
-        ) {
+        match publish_linked_file(&self.tmp_dir, &self.new_dir, &name) {
             Ok(()) => {
-                self.pending = false;
-                let published = PublishedDelivery::new(self.maildir.join("new").join(&self.name));
+                let published = PublishedDelivery::new(self.maildir.join("new").join(&name));
                 if self.durability == Durability::Full {
                     for directory in [&self.tmp_dir, &self.new_dir] {
                         if let Err(error) = fsync(directory) {
@@ -192,29 +177,12 @@ impl PendingSink for MaildirSink {
                 }
                 Ok(published)
             }
-            Err(error) => {
-                let rename_error = io_error(error);
-                match self.cleanup() {
-                    Ok(()) => Err(SinkCommitError::before_publication(rename_error)),
-                    Err(cleanup_error) => Err(SinkCommitError::before_publication(io::Error::new(
-                        rename_error.kind(),
-                        format!(
-                            "{rename_error}; cannot remove pending Maildir file: {cleanup_error}"
-                        ),
-                    ))),
-                }
-            }
+            Err(error) => Err(SinkCommitError::before_publication(error)),
         }
     }
 
-    fn abort(mut self: Box<Self>) -> io::Result<()> {
-        self.cleanup()
-    }
-}
-
-impl Drop for MaildirSink {
-    fn drop(&mut self) {
-        let _ = self.cleanup();
+    fn abort(self: Box<Self>) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -308,7 +276,7 @@ fn io_error(error: rustix::io::Errno) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
     use super::*;
@@ -425,8 +393,9 @@ mod tests {
         fs::write(&path, b"owned by another delivery").unwrap();
         let tmp_dir = open_directory_path(&maildir.path().join("tmp")).unwrap();
 
-        let error = create_pending_file(&tmp_dir, &name).unwrap_err();
-        assert_eq!(error, rustix::io::Errno::EXIST);
+        let file = create_unnamed_pending_file(&tmp_dir).unwrap();
+        let error = link_unique_pending_file(&file, &tmp_dir, || Ok(name.clone())).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(path).unwrap(), b"owned by another delivery");
     }
 
@@ -440,7 +409,8 @@ mod tests {
         let tmp_dir = open_directory_path(&tmp_path).unwrap();
         let mut attempts = 0u64;
 
-        let (file, name) = create_unique_pending_file(&tmp_dir, || {
+        let file = create_unnamed_pending_file(&tmp_dir).unwrap();
+        let name = link_unique_pending_file(&file, &tmp_dir, || {
             attempts += 1;
             Ok(if attempts < MAX_NAME_ATTEMPTS {
                 occupied.to_owned()
@@ -452,7 +422,6 @@ mod tests {
 
         assert_eq!(attempts, MAX_NAME_ATTEMPTS);
         assert_eq!(name, available);
-        drop(file);
         fs::remove_file(tmp_path.join(available)).unwrap();
     }
 
@@ -465,7 +434,8 @@ mod tests {
         let tmp_dir = open_directory_path(&tmp_path).unwrap();
         let mut attempts = 0u64;
 
-        let error = create_unique_pending_file(&tmp_dir, || {
+        let file = create_unnamed_pending_file(&tmp_dir).unwrap();
+        let error = link_unique_pending_file(&file, &tmp_dir, || {
             attempts += 1;
             Ok(occupied.to_owned())
         })
@@ -480,33 +450,32 @@ mod tests {
     fn commit_atomically_moves_the_complete_file_from_tmp_to_new() {
         let maildir = TestMaildir::create();
         let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
-        let name = sink.name.clone();
         sink.write_all(b"Subject: test\n\nbody").unwrap();
 
-        assert!(maildir.path().join("tmp").join(&name).is_file());
-        assert!(!maildir.path().join("new").join(&name).exists());
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
 
         let published = PendingSink::commit(sink).unwrap();
-        assert_eq!(
-            published.last_folder(),
-            maildir.path().join("new").join(&name)
+        assert!(
+            published
+                .last_folder()
+                .starts_with(maildir.path().join("new"))
         );
-        assert!(!maildir.path().join("tmp").join(&name).exists());
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
         assert_eq!(
-            fs::read(maildir.path().join("new").join(name)).unwrap(),
+            fs::read(published.last_folder()).unwrap(),
             b"Subject: test\n\nbody"
         );
     }
 
     #[test]
-    fn abort_removes_only_the_pending_file() {
+    fn abort_closes_the_unnamed_file_without_removing_a_path() {
         let maildir = TestMaildir::create();
         let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
-        let name = sink.name.clone();
         sink.write_all(b"partial").unwrap();
 
         PendingSink::abort(sink).unwrap();
-        assert!(!maildir.path().join("tmp").join(name).exists());
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
         assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
     }
 
@@ -514,9 +483,9 @@ mod tests {
     fn creates_a_file_without_group_or_other_access() {
         let maildir = TestMaildir::create();
         let sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
-        let metadata = fs::metadata(maildir.path().join("tmp").join(&sink.name)).unwrap();
+        let metadata = rustix::fs::fstat(&sink.file).unwrap();
 
-        assert_eq!(metadata.mode() & 0o777 & !MAILDIR_FILE_MODE, 0);
+        assert_eq!(metadata.st_mode & 0o777 & !MAILDIR_FILE_MODE, 0);
         PendingSink::abort(sink).unwrap();
     }
 
@@ -560,18 +529,20 @@ mod tests {
     #[test]
     fn commit_never_replaces_an_existing_new_file() {
         let maildir = TestMaildir::create();
-        let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
-        let name = sink.name.clone();
-        sink.write_all(b"new message").unwrap();
-        fs::write(maildir.path().join("new").join(&name), b"existing").unwrap();
+        let tmp_dir = open_directory_path(&maildir.path().join("tmp")).unwrap();
+        let new_dir = open_directory_path(&maildir.path().join("new")).unwrap();
+        let file = create_unnamed_pending_file(&tmp_dir).unwrap();
+        let name = "procmail-rs.collision";
+        linkat(&file, "", &tmp_dir, name, AtFlags::EMPTY_PATH).unwrap();
+        fs::write(maildir.path().join("new").join(name), b"existing").unwrap();
 
-        let error = PendingSink::commit(sink).unwrap_err();
+        let error = publish_linked_file(&tmp_dir, &new_dir, name).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(
-            fs::read(maildir.path().join("new").join(&name)).unwrap(),
+            fs::read(maildir.path().join("new").join(name)).unwrap(),
             b"existing"
         );
-        assert!(!maildir.path().join("tmp").join(name).exists());
+        assert!(maildir.path().join("tmp").join(name).exists());
     }
 
     #[test]
