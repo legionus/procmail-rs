@@ -10,6 +10,8 @@ use crate::message::{Message, MessageHead, MessageReadError, StreamedMessage};
 #[cfg(target_os = "linux")]
 pub mod maildir;
 #[cfg(target_os = "linux")]
+pub mod mbox;
+#[cfg(target_os = "linux")]
 pub mod staging;
 
 pub const MAX_PENDING_SINKS: usize = 256;
