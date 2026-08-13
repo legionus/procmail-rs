@@ -17,13 +17,45 @@ pub const MAX_PENDING_SINKS: usize = 256;
 /// A destination which keeps written bytes private until `commit` succeeds.
 ///
 /// Implementations must arrange for dropping the sink, or calling `abort`, to
-/// leave no visible delivery behind. `commit` may make the delivery visible;
-/// if it returns an error, it must not have published the delivery and must
-/// clean up its private state.
+/// leave no visible delivery behind. `commit` can fail after publication when
+/// a requested durability operation fails; that error must carry the exact
+/// visible destination.
 pub trait PendingSink: Write {
     /// Publishes the pending bytes and reports the exact visible destination.
     fn commit(self: Box<Self>) -> Result<PublishedDelivery, SinkCommitError>;
     fn abort(self: Box<Self>) -> io::Result<()>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryFailureClass {
+    Retryable,
+    Permanent,
+    Internal,
+}
+
+impl DeliveryFailureClass {
+    pub fn from_io_kind(kind: io::ErrorKind) -> Self {
+        match kind {
+            io::ErrorKind::AlreadyExists
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::OutOfMemory
+            | io::ErrorKind::ResourceBusy
+            | io::ErrorKind::StorageFull
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::WriteZero => Self::Retryable,
+            io::ErrorKind::InvalidData
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::IsADirectory
+            | io::ErrorKind::NotADirectory
+            | io::ErrorKind::NotFound
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::ReadOnlyFilesystem
+            | io::ErrorKind::Unsupported => Self::Permanent,
+            _ => Self::Internal,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -53,6 +85,10 @@ impl SinkCommitError {
 
     pub fn kind(&self) -> io::ErrorKind {
         self.source.kind()
+    }
+
+    pub fn class(&self) -> DeliveryFailureClass {
+        DeliveryFailureClass::from_io_kind(self.kind())
     }
 }
 
@@ -99,7 +135,7 @@ pub struct StreamDeliveryError {
 
 #[derive(Debug)]
 pub struct CommitError {
-    source: io::Error,
+    source: SinkCommitError,
     published: Vec<PublishedDelivery>,
     abort_failures: usize,
 }
@@ -333,7 +369,7 @@ impl ValidatedFanout {
                         .map(|sink| usize::from(sink.abort().is_err()))
                         .fold(0usize, usize::saturating_add);
                     return Err(CommitError {
-                        source: io::Error::other(source),
+                        source,
                         published,
                         abort_failures,
                     });
@@ -431,6 +467,10 @@ impl CommitError {
     pub fn abort_failures(&self) -> usize {
         self.abort_failures
     }
+
+    pub fn class(&self) -> DeliveryFailureClass {
+        self.source.class()
+    }
 }
 
 impl fmt::Display for CommitError {
@@ -461,6 +501,10 @@ impl std::error::Error for CommitError {
 impl AppendError {
     pub fn abort_failures(&self) -> usize {
         self.abort_failures
+    }
+
+    pub fn class(&self) -> DeliveryFailureClass {
+        DeliveryFailureClass::from_io_kind(self.source.kind())
     }
 }
 
@@ -784,6 +828,37 @@ mod tests {
         assert_eq!(error.committed(), 1);
         assert_eq!(error.last_folder(), Some(Path::new("test-folder")));
         assert_eq!(state.borrow().visible.as_deref(), Some(input.as_slice()));
+    }
+
+    #[test]
+    fn delivery_errors_preserve_retry_categories_through_fanout() {
+        for (kind, expected) in [
+            (io::ErrorKind::StorageFull, DeliveryFailureClass::Retryable),
+            (
+                io::ErrorKind::PermissionDenied,
+                DeliveryFailureClass::Permanent,
+            ),
+            (io::ErrorKind::Other, DeliveryFailureClass::Internal),
+        ] {
+            let error = SinkCommitError::before_publication(io::Error::from(kind));
+            assert_eq!(error.class(), expected);
+        }
+
+        let input = b"\nbody";
+        let first = Rc::new(RefCell::new(SinkState::default()));
+        let second = Rc::new(RefCell::new(SinkState::default()));
+        let (head, mut reader) = read_head(input, MessageLimits::default());
+        let pending = PendingFanout::new(vec![
+            TestSink::boxed(first),
+            TestSink::failing_commit(second),
+        ])
+        .unwrap();
+        let (validated, _) = pending.stream(head, &mut reader).unwrap();
+
+        assert_eq!(
+            validated.commit().unwrap_err().class(),
+            DeliveryFailureClass::Internal
+        );
     }
 
     #[test]
