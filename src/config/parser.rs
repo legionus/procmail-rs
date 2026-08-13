@@ -490,7 +490,8 @@ fn parse_condition(
                 format!("rc regex count exceeds the hard limit of {MAX_RC_REGEXES}"),
             ));
         }
-        if input.len() > MAX_REGEX_PATTERN_LEN {
+        let (target, pattern) = condition_regex_target(input, line)?;
+        if pattern.len() > MAX_REGEX_PATTERN_LEN {
             return Err(ParseError::new(
                 line,
                 format!(
@@ -498,16 +499,22 @@ fn parse_condition(
                 ),
             ));
         }
-        let compiled = build_regex(input, case_sensitive).map_err(|error| {
+        let compiled = build_regex(pattern, case_sensitive).map_err(|error| {
             ParseError::new(line, format!("invalid regular expression: {error}"))
         })?;
-        (
-            ConditionKind::Regex(RegexCondition {
-                pattern: input.to_owned(),
-                compiled,
-            }),
-            true,
-        )
+        let regex = RegexCondition {
+            pattern: pattern.to_owned(),
+            compiled,
+        };
+        match target {
+            Some(ConditionRegexTarget::Variable(name)) => {
+                (ConditionKind::VariableRegex { name, regex }, true)
+            }
+            Some(ConditionRegexTarget::Area(area)) => {
+                (ConditionKind::AreaRegex { area, regex }, true)
+            }
+            None => (ConditionKind::Regex(regex), true),
+        }
     };
 
     Ok((
@@ -518,6 +525,50 @@ fn parse_condition(
         },
         is_regex,
     ))
+}
+
+enum ConditionRegexTarget {
+    Variable(String),
+    Area(ConditionInput),
+}
+
+fn condition_regex_target(
+    input: &str,
+    line: usize,
+) -> Result<(Option<ConditionRegexTarget>, &str), ParseError> {
+    let name_len = input
+        .bytes()
+        .take_while(|byte| *byte == b'_' || byte.is_ascii_alphanumeric())
+        .count();
+    let name = &input[..name_len];
+    let rest = input[name_len..].trim_start();
+    let Some(pattern) = rest.strip_prefix("??") else {
+        return Ok((None, input));
+    };
+    if name.is_empty()
+        || !name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
+    {
+        return Err(ParseError::new(
+            line,
+            "variable condition has an invalid name",
+        ));
+    }
+    if name.len() > MAX_ASSIGNMENT_NAME_LEN {
+        return Err(ParseError::new(
+            line,
+            format!("variable name exceeds the hard limit of {MAX_ASSIGNMENT_NAME_LEN} bytes"),
+        ));
+    }
+    let target = match name {
+        "H" => ConditionRegexTarget::Area(ConditionInput::Headers),
+        "B" => ConditionRegexTarget::Area(ConditionInput::Body),
+        "HB" | "BH" => ConditionRegexTarget::Area(ConditionInput::Message),
+        _ => ConditionRegexTarget::Variable(name.to_owned()),
+    };
+    Ok((Some(target), pattern.trim_start()))
 }
 
 fn parse_size(input: &str, line: usize) -> Result<usize, ParseError> {
@@ -792,6 +843,40 @@ mod tests {
 
         assert_eq!(error.line, 2);
         assert!(error.message.starts_with("invalid regular expression:"));
+    }
+
+    #[test]
+    fn parses_variable_regex_condition() {
+        let config = parse(":0\n* CATEGORY ?? ^alerts$\nmaildir:matched\n").unwrap();
+        let [Statement::Recipe(recipe)] = config.statements.as_slice() else {
+            panic!("expected one recipe");
+        };
+        let ConditionKind::VariableRegex { name, regex } = &recipe.conditions[0].kind else {
+            panic!("expected a variable regex condition");
+        };
+
+        assert_eq!(name, "CATEGORY");
+        assert_eq!(regex.pattern(), "^alerts$");
+    }
+
+    #[test]
+    fn parses_special_procmail_condition_areas() {
+        for (name, expected) in [
+            ("H", ConditionInput::Headers),
+            ("B", ConditionInput::Body),
+            ("HB", ConditionInput::Message),
+            ("BH", ConditionInput::Message),
+        ] {
+            let config = parse(&format!(":0\n* {name} ?? pattern\nmaildir:matched\n")).unwrap();
+            let Statement::Recipe(recipe) = &config.statements[0] else {
+                panic!("expected recipe");
+            };
+            let ConditionKind::AreaRegex { area, regex } = &recipe.conditions[0].kind else {
+                panic!("expected an area regex condition");
+            };
+            assert_eq!(*area, expected);
+            assert_eq!(regex.pattern(), "pattern");
+        }
     }
 
     #[test]

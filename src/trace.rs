@@ -401,6 +401,7 @@ fn condition_kind_name(kind: ConditionKind) -> &'static str {
         ConditionKind::HeaderRegex => "header-regex",
         ConditionKind::BodyRegex => "body-regex",
         ConditionKind::MessageRegex => "message-regex",
+        ConditionKind::VariableRegex => "variable-regex",
         ConditionKind::SmallerThan => "smaller-than",
         ConditionKind::LargerThan => "larger-than",
     }
@@ -597,6 +598,7 @@ pub enum ConditionKind {
     HeaderRegex,
     BodyRegex,
     MessageRegex,
+    VariableRegex,
     SmallerThan,
     LargerThan,
 }

@@ -86,6 +86,7 @@ enum CompiledConditionKind {
     HeaderRegex(Regex),
     BodyRegex(Regex),
     MessageRegex(Regex),
+    VariableRegex { name: String, regex: Regex },
     SmallerThan(usize),
     LargerThan(usize),
 }
@@ -231,6 +232,7 @@ pub enum ConditionKindExplanation {
     HeaderRegex,
     BodyRegex,
     MessageRegex,
+    VariableRegex,
     SmallerThan,
     LargerThan,
 }
@@ -349,6 +351,10 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
     BodyWasNotBuffered,
+    VariableValueTooLarge {
+        name: String,
+        size: usize,
+    },
     Expansion(crate::config::ExpansionError),
     Delivery {
         destination: String,
@@ -362,6 +368,11 @@ impl fmt::Display for EvalError {
             Self::BodyWasNotBuffered => {
                 formatter.write_str("execution plan requires body contents that were not buffered")
             }
+            Self::VariableValueTooLarge { name, size } => write!(
+                formatter,
+                "variable {name} has {size} bytes, exceeding the hard limit of {} bytes",
+                crate::config::MAX_ASSIGNMENT_VALUE_LEN
+            ),
             Self::Expansion(error) => write!(formatter, "cannot resolve destination: {error}"),
             Self::Delivery {
                 destination,
@@ -428,7 +439,7 @@ impl CompiledSequence {
             // level. Child sequences therefore cannot overwrite the state
             // used by the next sibling recipe.
             let conditions_matched =
-                recipe.execution_gate(state) && recipe.matches(message, trace)?;
+                recipe.execution_gate(state) && recipe.matches(message, runtime, trace)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
 
             let (action, control) = if conditions_matched {
@@ -477,7 +488,7 @@ impl CompiledSequence {
             apply_assignments(&recipe.assignments, context.runtime, context.trace);
             let conditions_matched = recipe.execution_gate(state)
                 && recipe
-                    .matches_complete(context.message, context.trace)
+                    .matches_complete(context.message, context.runtime, context.trace)
                     .map_err(OrderedExecutionError::Evaluation)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let (action, control) = if conditions_matched {
@@ -536,7 +547,7 @@ impl CompiledSequence {
         for (index, recipe) in self.recipes.iter().enumerate().skip(start) {
             apply_assignments(&recipe.assignments, runtime, trace);
             let conditions_matched =
-                recipe.planning_gate(state) && recipe.matches_complete(message, trace)?;
+                recipe.planning_gate(state) && recipe.matches_complete(message, runtime, trace)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let has_error_handler = self.has_error_handler(index);
 
@@ -585,7 +596,7 @@ impl CompiledSequence {
             apply_assignments(&recipe.assignments, runtime, trace);
             let gate = recipe.planning_gate(state);
             let (matched, condition_results) = if gate {
-                recipe.matches_headers(head, trace)
+                recipe.matches_headers(head, runtime, trace)?
             } else {
                 (PartialMatch::False, Vec::new())
             };
@@ -775,7 +786,7 @@ impl CompiledSequence {
             (true, control)
         } else {
             let conditions_matched = recipe.planning_gate(state)
-                && recipe.matches_resumed(message, &frame.condition_results, trace)?;
+                && recipe.matches_resumed(message, &frame.condition_results, runtime, trace)?;
             let control = if conditions_matched {
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
@@ -898,9 +909,15 @@ impl CompiledNode {
         }
     }
 
-    fn matches(&self, message: &Message, trace: &mut impl TraceSink) -> Result<bool, EvalError> {
+    fn matches(
+        &self,
+        message: &Message,
+        runtime: &RuntimeVariables,
+        trace: &mut impl TraceSink,
+    ) -> Result<bool, EvalError> {
         for (index, condition) in self.conditions.iter().enumerate() {
-            let matched = condition.matches_complete(CompleteMessage::Buffered(message))?;
+            let matched =
+                condition.matches_complete(CompleteMessage::Buffered(message), runtime)?;
             condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
             if !matched {
                 return Ok(false);
@@ -912,10 +929,11 @@ impl CompiledNode {
     fn matches_complete(
         &self,
         message: CompleteMessage<'_>,
+        runtime: &RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<bool, EvalError> {
         for (index, condition) in self.conditions.iter().enumerate() {
-            let matched = condition.matches_complete(message)?;
+            let matched = condition.matches_complete(message, runtime)?;
             condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
             if !matched {
                 return Ok(false);
@@ -927,19 +945,20 @@ impl CompiledNode {
     fn matches_headers(
         &self,
         head: &MessageHead,
+        runtime: &RuntimeVariables,
         trace: &mut impl TraceSink,
-    ) -> (PartialMatch, Vec<Option<bool>>) {
+    ) -> Result<(PartialMatch, Vec<Option<bool>>), EvalError> {
         let mut result = PartialMatch::True;
         let mut condition_results = Vec::with_capacity(self.conditions.len());
         for (index, condition) in self.conditions.iter().enumerate() {
-            let matched = condition.matches_headers(head);
+            let matched = condition.matches_headers(head, runtime)?;
             if matched != PartialMatch::Deferred {
                 condition.trace_result(self.line, index, matched, trace);
             }
             match matched {
                 PartialMatch::False => {
                     condition_results.push(Some(false));
-                    return (PartialMatch::False, condition_results);
+                    return Ok((PartialMatch::False, condition_results));
                 }
                 PartialMatch::Deferred => {
                     condition_results.push(None);
@@ -948,20 +967,21 @@ impl CompiledNode {
                 PartialMatch::True => condition_results.push(Some(true)),
             }
         }
-        (result, condition_results)
+        Ok((result, condition_results))
     }
 
     fn matches_resumed(
         &self,
         message: CompleteMessage<'_>,
         header_results: &[Option<bool>],
+        runtime: &RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<bool, EvalError> {
         for (index, condition) in self.conditions.iter().enumerate() {
             let matched = match header_results.get(index).copied().flatten() {
                 Some(matched) => matched,
                 None => {
-                    let matched = condition.matches_complete(message)?;
+                    let matched = condition.matches_complete(message, runtime)?;
                     condition.trace_result(
                         self.line,
                         index,
@@ -1502,6 +1522,18 @@ fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
                     RegexArea::Message => CompiledConditionKind::MessageRegex(regex),
                 }
             }
+            ConditionKind::AreaRegex { area, regex } => {
+                let regex = regex.compiled().clone();
+                match area {
+                    ConditionInput::Headers => CompiledConditionKind::HeaderRegex(regex),
+                    ConditionInput::Body => CompiledConditionKind::BodyRegex(regex),
+                    ConditionInput::Message => CompiledConditionKind::MessageRegex(regex),
+                }
+            }
+            ConditionKind::VariableRegex { name, regex } => CompiledConditionKind::VariableRegex {
+                name: name.clone(),
+                regex: regex.compiled().clone(),
+            },
         };
         conditions.push(CompiledCondition {
             line: condition.line,
@@ -1530,6 +1562,7 @@ impl CompiledCondition {
             CompiledConditionKind::HeaderRegex(_) => TraceConditionKind::HeaderRegex,
             CompiledConditionKind::BodyRegex(_) => TraceConditionKind::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => TraceConditionKind::MessageRegex,
+            CompiledConditionKind::VariableRegex { .. } => TraceConditionKind::VariableRegex,
             CompiledConditionKind::SmallerThan(_) => TraceConditionKind::SmallerThan,
             CompiledConditionKind::LargerThan(_) => TraceConditionKind::LargerThan,
         };
@@ -1548,6 +1581,7 @@ impl CompiledCondition {
             CompiledConditionKind::HeaderRegex(_) => ConditionKindExplanation::HeaderRegex,
             CompiledConditionKind::BodyRegex(_) => ConditionKindExplanation::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => ConditionKindExplanation::MessageRegex,
+            CompiledConditionKind::VariableRegex { .. } => ConditionKindExplanation::VariableRegex,
             CompiledConditionKind::SmallerThan(_) => ConditionKindExplanation::SmallerThan,
             CompiledConditionKind::LargerThan(_) => ConditionKindExplanation::LargerThan,
         };
@@ -1570,6 +1604,7 @@ impl CompiledCondition {
                     needs_end_of_message: true,
                 }
             }
+            CompiledConditionKind::VariableRegex { .. } => InputRequirements::default(),
             CompiledConditionKind::SmallerThan(_) | CompiledConditionKind::LargerThan(_) => {
                 InputRequirements {
                     needs_end_of_message: true,
@@ -1579,33 +1614,53 @@ impl CompiledCondition {
         }
     }
 
-    fn matches_headers(&self, head: &MessageHead) -> PartialMatch {
+    fn matches_headers(
+        &self,
+        head: &MessageHead,
+        runtime: &RuntimeVariables,
+    ) -> Result<PartialMatch, EvalError> {
         let matched = match &self.kind {
             CompiledConditionKind::HeaderRegex(regex) => {
-                return PartialMatch::from_bool(regex.is_match(head.as_bytes()) ^ self.negated);
+                return Ok(PartialMatch::from_bool(
+                    regex.is_match(head.as_bytes()) ^ self.negated,
+                ));
             }
             CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
-                return PartialMatch::Deferred;
+                return Ok(PartialMatch::Deferred);
+            }
+            CompiledConditionKind::VariableRegex { name, regex } => {
+                let value = runtime.get(name).unwrap_or_default();
+                if value.len() > crate::config::MAX_ASSIGNMENT_VALUE_LEN {
+                    return Err(EvalError::VariableValueTooLarge {
+                        name: name.clone(),
+                        size: value.len(),
+                    });
+                }
+                regex.is_match(value.as_bytes())
             }
             CompiledConditionKind::SmallerThan(size) => {
                 if head.len() >= *size {
                     false
                 } else {
-                    return PartialMatch::Deferred;
+                    return Ok(PartialMatch::Deferred);
                 }
             }
             CompiledConditionKind::LargerThan(size) => {
                 if head.len() > *size {
                     true
                 } else {
-                    return PartialMatch::Deferred;
+                    return Ok(PartialMatch::Deferred);
                 }
             }
         };
-        PartialMatch::from_bool(matched ^ self.negated)
+        Ok(PartialMatch::from_bool(matched ^ self.negated))
     }
 
-    fn matches_complete(&self, message: CompleteMessage<'_>) -> Result<bool, EvalError> {
+    fn matches_complete(
+        &self,
+        message: CompleteMessage<'_>,
+        runtime: &RuntimeVariables,
+    ) -> Result<bool, EvalError> {
         let matched = match &self.kind {
             CompiledConditionKind::HeaderRegex(regex) => regex.is_match(message.header_bytes()),
             CompiledConditionKind::BodyRegex(regex) => {
@@ -1613,6 +1668,16 @@ impl CompiledCondition {
             }
             CompiledConditionKind::MessageRegex(regex) => {
                 regex.is_match(message.full().ok_or(EvalError::BodyWasNotBuffered)?)
+            }
+            CompiledConditionKind::VariableRegex { name, regex } => {
+                let value = runtime.get(name).unwrap_or_default();
+                if value.len() > crate::config::MAX_ASSIGNMENT_VALUE_LEN {
+                    return Err(EvalError::VariableValueTooLarge {
+                        name: name.clone(),
+                        size: value.len(),
+                    });
+                }
+                regex.is_match(value.as_bytes())
             }
             CompiledConditionKind::SmallerThan(size) => message.len() < *size,
             CompiledConditionKind::LargerThan(size) => message.len() > *size,
@@ -2034,6 +2099,109 @@ mod tests {
             destinations(&skipped),
             [Destination::Maildir("fallback".into())]
         );
+    }
+
+    #[test]
+    fn variable_regex_uses_the_current_bounded_runtime_value() {
+        let plan = compile(":0\n* CATEGORY ?? ^alerts$\nmaildir:matched\n");
+        let head = head(b"Subject: unrelated\n\nbody");
+        let mut runtime = RuntimeVariables::default();
+        runtime.set("CATEGORY", "alerts");
+
+        let HeaderEvaluation::Decided(delivery) =
+            plan.evaluate_headers_with_runtime(&head, &mut runtime)
+        else {
+            panic!("expected a header decision");
+        };
+
+        assert_eq!(
+            destinations(&delivery),
+            [Destination::Maildir("matched".into())]
+        );
+        assert_eq!(plan.requirements(), InputRequirements::default());
+    }
+
+    #[test]
+    fn special_area_condition_overrides_recipe_input_flags() {
+        let body_plan = compile(":0 H\n* B ?? needle\nmaildir:body\n");
+        assert_eq!(
+            body_plan.requirements(),
+            InputRequirements {
+                needs_headers: true,
+                needs_body_contents: true,
+                needs_end_of_message: true,
+            }
+        );
+        let body_delivery = body_plan
+            .evaluate_full(&Message::from_bytes(
+                b"Subject: unrelated\n\nneedle".to_vec(),
+            ))
+            .unwrap();
+        assert_eq!(
+            destinations(&body_delivery),
+            [Destination::Maildir("body".into())]
+        );
+
+        let header_plan = compile(":0 B\n* H ?? ^Subject: wanted$\nmaildir:headers\n");
+        assert_eq!(
+            header_plan.requirements(),
+            InputRequirements {
+                needs_headers: true,
+                ..InputRequirements::default()
+            }
+        );
+        let HeaderEvaluation::Decided(header_delivery) =
+            header_plan.evaluate_headers(&head(b"Subject: wanted\n\nbody"))
+        else {
+            panic!("expected a header decision");
+        };
+        assert_eq!(
+            destinations(&header_delivery),
+            [Destination::Maildir("headers".into())]
+        );
+    }
+
+    #[test]
+    fn missing_variable_matches_as_an_empty_value() {
+        let plan = compile(":0\n* MISSING ?? ^$\nmaildir:matched\n");
+
+        let HeaderEvaluation::Decided(delivery) =
+            plan.evaluate_headers(&head(b"Subject: test\n\nbody"))
+        else {
+            panic!("expected a header decision");
+        };
+
+        assert_eq!(
+            destinations(&delivery),
+            [Destination::Maildir("matched".into())]
+        );
+    }
+
+    #[test]
+    fn variable_regex_enforces_the_runtime_value_limit_at_the_boundary() {
+        let plan = compile(":0\n* VALUE ?? ^x+$\nmaildir:matched\n");
+        for size in [
+            crate::config::MAX_ASSIGNMENT_VALUE_LEN - 1,
+            crate::config::MAX_ASSIGNMENT_VALUE_LEN,
+            crate::config::MAX_ASSIGNMENT_VALUE_LEN + 1,
+        ] {
+            let mut runtime = RuntimeVariables::default();
+            runtime.set("VALUE", "x".repeat(size));
+            let result =
+                plan.evaluate_headers_with_runtime(&head(b"Subject: test\n\nbody"), &mut runtime);
+
+            if size <= crate::config::MAX_ASSIGNMENT_VALUE_LEN {
+                assert!(matches!(result, HeaderEvaluation::Decided(_)));
+            } else {
+                assert!(matches!(
+                    result,
+                    HeaderEvaluation::Error(EvalError::VariableValueTooLarge {
+                        name,
+                        size: actual
+                    }) if name == "VALUE" && actual == size
+                ));
+            }
+        }
     }
 
     #[test]

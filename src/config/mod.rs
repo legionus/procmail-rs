@@ -173,6 +173,14 @@ pub struct Condition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConditionKind {
     Regex(RegexCondition),
+    AreaRegex {
+        area: ConditionInput,
+        regex: RegexCondition,
+    },
+    VariableRegex {
+        name: String,
+        regex: RegexCondition,
+    },
     SmallerThan(usize),
     LargerThan(usize),
 }

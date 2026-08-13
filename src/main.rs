@@ -245,6 +245,7 @@ fn write_plan_explanation(
                 ConditionKindExplanation::HeaderRegex => "header-regex",
                 ConditionKindExplanation::BodyRegex => "body-regex",
                 ConditionKindExplanation::MessageRegex => "message-regex",
+                ConditionKindExplanation::VariableRegex => "variable-regex",
                 ConditionKindExplanation::SmallerThan => "smaller-than",
                 ConditionKindExplanation::LargerThan => "larger-than",
             };
