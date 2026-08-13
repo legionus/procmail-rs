@@ -108,14 +108,14 @@ struct OrderedTreeExecution<'a, E, D, T> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct PlanningExecution {
+struct FanoutPlanState {
     deliveries: Vec<PlannedDelivery>,
     original_delivered: bool,
 }
 
 #[derive(Debug, Default)]
-struct HeaderPlanning {
-    execution: PlanningExecution,
+struct HeaderPlanState {
+    execution: FanoutPlanState,
     frames: Vec<ContinuationFrame>,
     requirements: InputRequirements,
 }
@@ -317,7 +317,7 @@ pub enum HeaderEvaluation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Continuation {
     frames: Vec<ContinuationFrame>,
-    execution: PlanningExecution,
+    execution: FanoutPlanState,
     runtime: RuntimeVariables,
     requirements: InputRequirements,
 }
@@ -427,30 +427,9 @@ impl CompiledSequence {
             // Control-flow flags inspect only results produced at this block
             // level. Child sequences therefore cannot overwrite the state
             // used by the next sibling recipe.
-            let gate = match recipe.control {
-                ControlFlow::Independent => true,
-                ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
-                ControlFlow::AfterPreviousSuccess => {
-                    state.previous.is_some_and(|result: RecipeExecution| {
-                        result.conditions_matched && result.action == ActionExecution::Succeeded
-                    })
-                }
-                ControlFlow::Else => state
-                    .previous
-                    .is_none_or(|result: RecipeExecution| !result.else_handled),
-                ControlFlow::AfterPreviousError => {
-                    state.previous.is_some_and(|result: RecipeExecution| {
-                        result.action == ActionExecution::Failed
-                    })
-                }
-            };
-
-            let conditions_matched = gate && recipe.matches(message, trace)?;
-            let else_handled = if recipe.control == ControlFlow::Else {
-                state.previous.is_some_and(|result| result.else_handled) || conditions_matched
-            } else {
-                conditions_matched
-            };
+            let conditions_matched =
+                recipe.execution_gate(state) && recipe.matches(message, trace)?;
+            let else_handled = recipe.else_handled(state, conditions_matched);
 
             let (action, control) = if conditions_matched {
                 trace.record(TraceEvent::RecipeEvaluated {
@@ -466,18 +445,7 @@ impl CompiledSequence {
                 (ActionExecution::NotAttempted, SequenceControl::Continue)
             };
 
-            let result = RecipeExecution {
-                conditions_matched,
-                else_handled,
-                action,
-            };
-            state.previous = Some(result);
-            if !matches!(
-                recipe.control,
-                ControlFlow::AfterChainMatch | ControlFlow::AfterPreviousSuccess
-            ) {
-                state.chain_base_matched = Some(conditions_matched);
-            }
+            state.record(recipe.control, conditions_matched, action, else_handled);
             if control == SequenceControl::Stop {
                 return Ok(SequenceControl::Stop);
             }
@@ -504,18 +472,7 @@ impl CompiledSequence {
 
         for recipe in &self.recipes {
             apply_assignments(&recipe.assignments, context.runtime, context.trace);
-            let gate = match recipe.control {
-                ControlFlow::Independent => true,
-                ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
-                ControlFlow::AfterPreviousSuccess => state.previous.is_some_and(|result| {
-                    result.conditions_matched && result.action == ActionExecution::Succeeded
-                }),
-                ControlFlow::Else => state.previous.is_none_or(|result| !result.else_handled),
-                ControlFlow::AfterPreviousError => state
-                    .previous
-                    .is_some_and(|result| result.action == ActionExecution::Failed),
-            };
-            let conditions_matched = gate
+            let conditions_matched = recipe.execution_gate(state)
                 && recipe
                     .matches_complete(context.message, context.trace)
                     .map_err(OrderedExecutionError::Evaluation)?;
@@ -552,7 +509,7 @@ impl CompiledSequence {
         message: CompleteMessage<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
-        execution: &mut PlanningExecution,
+        execution: &mut FanoutPlanState,
     ) -> Result<SequenceControl, EvalError> {
         self.plan_complete_from(
             0,
@@ -571,7 +528,7 @@ impl CompiledSequence {
         message: CompleteMessage<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
-        execution: &mut PlanningExecution,
+        execution: &mut FanoutPlanState,
     ) -> Result<SequenceControl, EvalError> {
         for (index, recipe) in self.recipes.iter().enumerate().skip(start) {
             apply_assignments(&recipe.assignments, runtime, trace);
@@ -580,9 +537,6 @@ impl CompiledSequence {
             let else_handled = recipe.else_handled(state, conditions_matched);
             let has_error_handler = self.has_error_handler(index);
 
-            // Planning retains actions whose final selection depends on a
-            // preceding delivery. Ordered publication later resolves a/a and
-            // e from the actual result without discarding their destinations.
             let control = if conditions_matched {
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
@@ -619,7 +573,7 @@ impl CompiledSequence {
         head: &MessageHead,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
-        planning: &mut HeaderPlanning,
+        planning: &mut HeaderPlanState,
         following: InputRequirements,
     ) -> Result<HeaderControl, EvalError> {
         let mut state = SequenceState::default();
@@ -791,7 +745,7 @@ impl CompiledSequence {
         message: CompleteMessage<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
-        execution: &mut PlanningExecution,
+        execution: &mut FanoutPlanState,
     ) -> Result<SequenceControl, EvalError> {
         let frame = frames.get(depth).ok_or(EvalError::BodyWasNotBuffered)?;
         let recipe = self
@@ -1021,7 +975,25 @@ impl CompiledNode {
         Ok(true)
     }
 
+    fn execution_gate(&self, state: SequenceState) -> bool {
+        match self.control {
+            ControlFlow::Independent => true,
+            ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
+            ControlFlow::AfterPreviousSuccess => state.previous.is_some_and(|result| {
+                result.conditions_matched && result.action == ActionExecution::Succeeded
+            }),
+            ControlFlow::Else => state.previous.is_none_or(|result| !result.else_handled),
+            ControlFlow::AfterPreviousError => state
+                .previous
+                .is_some_and(|result| result.action == ActionExecution::Failed),
+        }
+    }
+
     fn planning_gate(&self, state: SequenceState) -> bool {
+        // Fan-out planning never observes a publication result. Treat a/e as
+        // reachable after a matching predecessor so header analysis can
+        // defer before either branch is discarded; ordered execution later
+        // selects the branch from the real action result.
         match self.control {
             ControlFlow::Independent => true,
             ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
@@ -1170,7 +1142,7 @@ impl CompiledNode {
         message: CompleteMessage<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
-        execution: &mut PlanningExecution,
+        execution: &mut FanoutPlanState,
         has_error_handler: bool,
     ) -> Result<SequenceControl, EvalError> {
         match &self.action {
@@ -1186,7 +1158,7 @@ impl CompiledNode {
     fn plan_delivery(
         &self,
         runtime: &RuntimeVariables,
-        execution: &mut PlanningExecution,
+        execution: &mut FanoutPlanState,
         has_error_handler: bool,
     ) -> Result<SequenceControl, EvalError> {
         let CompiledAction::Deliver {
@@ -1313,12 +1285,12 @@ impl ExecutionPlan {
                     condition_results: Vec::new(),
                     assignments_applied: false,
                 }],
-                execution: PlanningExecution::default(),
+                execution: FanoutPlanState::default(),
                 runtime: runtime.clone(),
                 requirements: self.requirements(),
             });
         }
-        let mut planning = HeaderPlanning::default();
+        let mut planning = HeaderPlanState::default();
         match self.root.plan_headers(
             head,
             runtime,
@@ -1415,7 +1387,7 @@ impl ExecutionPlan {
     }
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
-        let mut execution = PlanningExecution::default();
+        let mut execution = FanoutPlanState::default();
         self.root.plan_complete(
             CompleteMessage::Buffered(message),
             &mut RuntimeVariables::default(),
