@@ -284,10 +284,11 @@ pub struct Continuation {
     requirements: InputRequirements,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ContinuationFrame {
     recipe_index: usize,
     state: SequenceState,
+    condition_results: Vec<Option<bool>>,
 }
 
 impl Continuation {
@@ -448,33 +449,35 @@ impl CompiledSequence {
         trace: &mut impl TraceSink,
         execution: &mut PlanningExecution,
     ) -> Result<SequenceControl, EvalError> {
-        let mut state = SequenceState::default();
+        self.plan_complete_from(
+            0,
+            SequenceState::default(),
+            message,
+            runtime,
+            trace,
+            execution,
+        )
+    }
 
-        for (index, recipe) in self.recipes.iter().enumerate() {
+    fn plan_complete_from(
+        &self,
+        start: usize,
+        mut state: SequenceState,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut PlanningExecution,
+    ) -> Result<SequenceControl, EvalError> {
+        for (index, recipe) in self.recipes.iter().enumerate().skip(start) {
             apply_assignments(&recipe.assignments, runtime, trace);
+            let conditions_matched =
+                recipe.planning_gate(state) && recipe.matches_complete(message, trace)?;
+            let else_handled = recipe.else_handled(state, conditions_matched);
+            let has_error_handler = self.has_error_handler(index);
 
             // Planning retains actions whose final selection depends on a
             // preceding delivery. Ordered publication later resolves a/a and
             // e from the actual result without discarding their destinations.
-            let gate = match recipe.control {
-                ControlFlow::Independent => true,
-                ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
-                ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError => state
-                    .previous
-                    .is_some_and(|result| result.conditions_matched),
-                ControlFlow::Else => state.previous.is_none_or(|result| !result.else_handled),
-            };
-            let conditions_matched = gate && recipe.matches_complete(message, trace)?;
-            let else_handled = if recipe.control == ControlFlow::Else {
-                state.previous.is_some_and(|result| result.else_handled) || conditions_matched
-            } else {
-                conditions_matched
-            };
-            let has_error_handler = self
-                .recipes
-                .get(index + 1)
-                .is_some_and(|next| next.control == ControlFlow::AfterPreviousError);
-
             let control = if conditions_matched {
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
@@ -488,21 +491,16 @@ impl CompiledSequence {
                 });
                 SequenceControl::Continue
             };
-            state.previous = Some(RecipeExecution {
+            state.record(
+                recipe.control,
                 conditions_matched,
-                else_handled,
-                action: if conditions_matched {
+                if conditions_matched {
                     ActionExecution::Succeeded
                 } else {
                     ActionExecution::NotAttempted
                 },
-            });
-            if !matches!(
-                recipe.control,
-                ControlFlow::AfterChainMatch | ControlFlow::AfterPreviousSuccess
-            ) {
-                state.chain_base_matched = Some(conditions_matched);
-            }
+                else_handled,
+            );
             if control == SequenceControl::Stop {
                 return Ok(SequenceControl::Stop);
             }
@@ -524,10 +522,10 @@ impl CompiledSequence {
         for (index, recipe) in self.recipes.iter().enumerate() {
             apply_assignments(&recipe.assignments, runtime, trace);
             let gate = recipe.planning_gate(state);
-            let matched = if gate {
+            let (matched, condition_results) = if gate {
                 recipe.matches_headers(head, trace)
             } else {
-                PartialMatch::False
+                (PartialMatch::False, Vec::new())
             };
             if matched == PartialMatch::Deferred {
                 trace.record(TraceEvent::RecipeEvaluated {
@@ -537,6 +535,7 @@ impl CompiledSequence {
                 planning.frames.push(ContinuationFrame {
                     recipe_index: index,
                     state,
+                    condition_results,
                 });
                 planning.requirements = self.requirements_from(index).union(following);
                 return Ok(HeaderControl::Deferred);
@@ -553,6 +552,7 @@ impl CompiledSequence {
                 planning.frames.push(ContinuationFrame {
                     recipe_index: index,
                     state,
+                    condition_results,
                 });
                 planning.requirements = self.requirements_from(index).union(following);
                 return Ok(HeaderControl::Deferred);
@@ -578,6 +578,7 @@ impl CompiledSequence {
                         planning.frames.push(ContinuationFrame {
                             recipe_index: index,
                             state,
+                            condition_results: Vec::new(),
                         });
                         let child_following = self.requirements_from(index + 1).union(following);
                         let child = children.plan_headers(
@@ -673,6 +674,83 @@ impl CompiledSequence {
                 }
             }
         }
+    }
+
+    fn resume_from_frames(
+        &self,
+        frames: &[ContinuationFrame],
+        depth: usize,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut PlanningExecution,
+    ) -> Result<SequenceControl, EvalError> {
+        let frame = frames.get(depth).ok_or(EvalError::BodyWasNotBuffered)?;
+        let recipe = self
+            .recipes
+            .get(frame.recipe_index)
+            .ok_or(EvalError::BodyWasNotBuffered)?;
+        let mut state = frame.state;
+
+        let (conditions_matched, control) = if depth + 1 < frames.len() {
+            let CompiledAction::Block(children) = &recipe.action else {
+                return Err(EvalError::BodyWasNotBuffered);
+            };
+            let control = children.resume_from_frames(
+                frames,
+                depth + 1,
+                message,
+                runtime,
+                trace,
+                execution,
+            )?;
+            (true, control)
+        } else {
+            let conditions_matched = recipe.planning_gate(state)
+                && recipe.matches_resumed(message, &frame.condition_results, trace)?;
+            let control = if conditions_matched {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Selected,
+                });
+                recipe.plan_action(
+                    message,
+                    runtime,
+                    trace,
+                    execution,
+                    self.has_error_handler(frame.recipe_index),
+                )?
+            } else {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
+                SequenceControl::Continue
+            };
+            (conditions_matched, control)
+        };
+
+        if control == SequenceControl::Stop {
+            return Ok(control);
+        }
+        state.record(
+            recipe.control,
+            conditions_matched,
+            if conditions_matched {
+                ActionExecution::Succeeded
+            } else {
+                ActionExecution::NotAttempted
+            },
+            recipe.else_handled(state, conditions_matched),
+        );
+        self.plan_complete_from(
+            frame.recipe_index + 1,
+            state,
+            message,
+            runtime,
+            trace,
+            execution,
+        )
     }
 }
 
@@ -785,20 +863,58 @@ impl CompiledNode {
         Ok(true)
     }
 
-    fn matches_headers(&self, head: &MessageHead, trace: &mut impl TraceSink) -> PartialMatch {
+    fn matches_headers(
+        &self,
+        head: &MessageHead,
+        trace: &mut impl TraceSink,
+    ) -> (PartialMatch, Vec<Option<bool>>) {
         let mut result = PartialMatch::True;
+        let mut condition_results = Vec::with_capacity(self.conditions.len());
         for (index, condition) in self.conditions.iter().enumerate() {
             let matched = condition.matches_headers(head);
             if matched != PartialMatch::Deferred {
                 condition.trace_result(self.line, index, matched, trace);
             }
             match matched {
-                PartialMatch::False => return PartialMatch::False,
-                PartialMatch::Deferred => result = PartialMatch::Deferred,
-                PartialMatch::True => {}
+                PartialMatch::False => {
+                    condition_results.push(Some(false));
+                    return (PartialMatch::False, condition_results);
+                }
+                PartialMatch::Deferred => {
+                    condition_results.push(None);
+                    result = PartialMatch::Deferred;
+                }
+                PartialMatch::True => condition_results.push(Some(true)),
             }
         }
-        result
+        (result, condition_results)
+    }
+
+    fn matches_resumed(
+        &self,
+        message: CompleteMessage<'_>,
+        header_results: &[Option<bool>],
+        trace: &mut impl TraceSink,
+    ) -> Result<bool, EvalError> {
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let matched = match header_results.get(index).copied().flatten() {
+                Some(matched) => matched,
+                None => {
+                    let matched = condition.matches_complete(message)?;
+                    condition.trace_result(
+                        self.line,
+                        index,
+                        PartialMatch::from_bool(matched),
+                        trace,
+                    );
+                    matched
+                }
+            };
+            if !matched {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn planning_gate(&self, state: SequenceState) -> bool {
@@ -1150,17 +1266,23 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
-        // Keep the bounded path in the continuation now, while complete
-        // planning temporarily replays the tree. The next refactoring step
-        // will resume directly from these frames and remove duplicate trace
-        // events from the header prefix.
-        debug_assert!(!continuation.frames.is_empty());
-        let early_destinations = continuation.execution.destinations;
+        if continuation.frames.is_empty() {
+            return Err(EvalError::BodyWasNotBuffered);
+        }
         *runtime = continuation.runtime;
-        let mut execution = PlanningExecution::default();
-        self.root
-            .plan_complete(message, runtime, trace, &mut execution)?;
-        debug_assert!(execution.destinations.starts_with(&early_destinations));
+        let mut execution = continuation.execution;
+
+        // Resume at the deepest pending recipe and then unwind through its
+        // parent sequences. Earlier siblings are neither evaluated nor
+        // logged again, and their selected destinations remain unchanged.
+        self.root.resume_from_frames(
+            &continuation.frames,
+            0,
+            message,
+            runtime,
+            trace,
+            &mut execution,
+        )?;
         Ok(DeliveryPlan {
             destinations: execution.destinations,
             after_error: execution.after_error,
@@ -2018,6 +2140,51 @@ mod tests {
         assert_eq!(
             delivery.destinations(),
             [Destination::Maildir("nested".into())]
+        );
+    }
+
+    #[test]
+    fn resume_does_not_repeat_the_header_prefix_trace() {
+        let plan = compile("BOX=copy\n:0 c\nmaildir:$BOX\n:0 B\n* needle\nmaildir:body\n");
+        let raw = b"Subject: test\n\nneedle";
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = MemoryTrace::default();
+        let HeaderEvaluation::NeedsMessage(continuation) =
+            plan.evaluate_headers_with_trace(&head(raw), &mut runtime, &mut trace)
+        else {
+            panic!("expected body condition to defer");
+        };
+
+        plan.resume_mapped_with_trace(
+            continuation,
+            raw,
+            b"Subject: test\n\n".len(),
+            &mut runtime,
+            &mut trace,
+        )
+        .unwrap();
+
+        assert_eq!(
+            trace
+                .events()
+                .iter()
+                .filter(|event| matches!(event, TraceEvent::VariableAssigned { line: Some(1), .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            trace
+                .events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    TraceEvent::RecipeEvaluated {
+                        line: 2,
+                        decision: RecipeDecision::Selected,
+                    }
+                ))
+                .count(),
+            1
         );
     }
 
