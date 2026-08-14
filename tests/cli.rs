@@ -207,6 +207,114 @@ fn external_filter_stderr_is_appended_to_logfile() {
 }
 
 #[test]
+fn regular_pipe_delivers_to_program_and_discards_stdout() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let captured = base.join("captured.eml");
+    let unreachable = base.join("unreachable");
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nCAPTURE={}\n:0 w\n| cat > \"$CAPTURE\"; printf 'not a message'\n:0\nunreachable/\n",
+            base.display(),
+            captured.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: original\n\nbody")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert_eq!(fs::read(captured).unwrap(), b"Subject: original\n\nbody\n");
+    assert!(!unreachable.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn failed_regular_pipe_allows_error_recipe_to_deliver_original() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let fallback = base.join("fallback");
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0 w\n| exit 9\n:0 e\nfallback/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+
+    let original = b"Subject: original\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(original)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&fallback), [original.to_vec()]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn copy_pipe_continues_to_final_delivery() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let captured = base.join("captured.eml");
+    let selected = base.join("selected");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nCAPTURE={}\n:0 cw\n| cat > \"$CAPTURE\"\n:0\nselected/\n",
+            base.display(),
+            captured.display()
+        ),
+    )
+    .unwrap();
+
+    let original = b"Subject: original\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(original)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(fs::read(captured).unwrap(), b"Subject: original\n\nbody\n");
+    assert_eq!(delivered_messages(&selected), [original.to_vec()]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn check_recursively_validates_statically_resolved_includes() {
     let path = config_file("");
     let base = path.parent().unwrap();

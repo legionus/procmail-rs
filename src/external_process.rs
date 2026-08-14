@@ -18,6 +18,22 @@ pub struct FilterRun {
     child_exit: ChildExit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramRun {
+    input_write: InputWrite,
+    child_exit: ChildExit,
+}
+
+impl ProgramRun {
+    pub fn input_write(self) -> InputWrite {
+        self.input_write
+    }
+
+    pub fn child_exit(self) -> ChildExit {
+        self.child_exit
+    }
+}
+
 impl FilterRun {
     pub fn input_write(&self) -> InputWrite {
         self.input_write
@@ -111,6 +127,57 @@ pub fn run_filter(
     Ok(FilterRun {
         input_write,
         output,
+        child_exit: if status.success() {
+            ChildExit::Success
+        } else {
+            ChildExit::Failure
+        },
+    })
+}
+
+pub fn run_program(
+    policy: &ShellPolicy,
+    environment: &ProcessEnvironment,
+    command: &str,
+    input: &[u8],
+    output_ending: OutputEnding,
+    stderr: Stdio,
+) -> Result<ProgramRun, ExternalProcessError> {
+    let invocation = policy
+        .authorize(environment)
+        .map_err(|error| process_error(error.to_string()))?;
+    let mut child = Command::new(invocation.path())
+        .arg(invocation.flags())
+        .arg(command)
+        .env_clear()
+        .envs(environment.values())
+        .stdin(Stdio::piped())
+        // Original procmail closes stdout for a regular pipe delivery. The
+        // safe standard process API cannot request a closed descriptor, so
+        // discard output without buffering it or exposing it to our caller.
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn()
+        .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .expect("piped child stdin is available after spawn");
+
+    // Close the input pipe before waiting even when the command stops reading
+    // early. The direct child is then always reaped, while the caller's `i`
+    // policy decides whether a write error changes the recipe result.
+    let input_write = match write_action_input(&mut child_stdin, input, output_ending) {
+        Ok(()) => InputWrite::Complete,
+        Err(_) => InputWrite::Failed,
+    };
+    drop(child_stdin);
+    let status = child
+        .wait()
+        .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?;
+
+    Ok(ProgramRun {
+        input_write,
         child_exit: if status.success() {
             ChildExit::Success
         } else {
@@ -333,5 +400,38 @@ mod tests {
             error.to_string(),
             "shell execution is disabled by operator policy"
         );
+    }
+
+    #[test]
+    fn regular_program_discards_stdout_and_reports_completion() {
+        let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+        let run = run_program(
+            &policy,
+            &environment,
+            "cat >/dev/null; printf 'discarded output'",
+            b"Subject: test\n\nbody",
+            OutputEnding::Preserve,
+            Stdio::null(),
+        )
+        .unwrap();
+
+        assert_eq!(run.input_write(), InputWrite::Complete);
+        assert_eq!(run.child_exit(), ChildExit::Success);
+    }
+
+    #[test]
+    fn regular_program_reports_failed_exit_without_parsing_output() {
+        let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+        let run = run_program(
+            &policy,
+            &environment,
+            "printf 'not a message'; exit 19",
+            b"",
+            OutputEnding::Preserve,
+            Stdio::null(),
+        )
+        .unwrap();
+
+        assert_eq!(run.child_exit(), ChildExit::Failure);
     }
 }

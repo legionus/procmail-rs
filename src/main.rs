@@ -26,8 +26,8 @@ use procmail_rs::eval::{
     HeaderEvaluation, MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation,
     PlannedDelivery,
 };
-use procmail_rs::external_filter::{FilterOutput, decide_filter};
-use procmail_rs::external_process::run_filter;
+use procmail_rs::external_filter::{FilterOutput, decide_filter, decide_program};
+use procmail_rs::external_process::{run_filter, run_program};
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::RcFileLoader;
@@ -406,14 +406,7 @@ fn deliver_staged(
                     })
                 },
                 &mut |action, options, input, runtime, _| {
-                    if options.action_mode != ActionMode::Filter {
-                        return Err(DeliveryAttemptError::Recoverable(
-                            OperationalError::PermanentDestination(
-                                "non-filter pipe actions are not executable yet".to_owned(),
-                            ),
-                        ));
-                    }
-                    execute_external_filter(
+                    execute_external_action(
                         limits,
                         action.command.as_str(),
                         options,
@@ -458,12 +451,12 @@ fn deliver_staged(
     delivery_outcome(&plan)
 }
 
-fn execute_external_filter(
+fn execute_external_action(
     limits: MessageLimits,
     command: &str,
     options: procmail_rs::config::RecipeOptions,
     input: &[u8],
-    runtime: &RuntimeVariables,
+    runtime: &mut RuntimeVariables,
 ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
     let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
         recoverable_external_error(format!(
@@ -478,6 +471,38 @@ fn execute_external_filter(
     let stderr = external_stderr(runtime).map_err(|error| {
         recoverable_external_error(format!("cannot open external command log: {error}"))
     })?;
+    if options.action_mode == ActionMode::Deliver {
+        let run = run_program(
+            &shell_policy,
+            &environment,
+            command,
+            input,
+            options.output_ending,
+            stderr,
+        )
+        .map_err(|error| recoverable_external_error(error.to_string()))?;
+        let decision = decide_program(
+            options.child_status,
+            options.write_errors,
+            run.input_write(),
+            run.child_exit(),
+        );
+        if decision.report_child_failure() {
+            report_external_child_failure(runtime).map_err(|error| {
+                recoverable_external_error(format!(
+                    "cannot write external command failure diagnostic: {error}"
+                ))
+            })?;
+        }
+        return if decision.succeeded() {
+            runtime.set("LASTFOLDER", command);
+            Ok(None)
+        } else {
+            Err(recoverable_external_error(
+                "external program did not complete successfully",
+            ))
+        };
+    }
     let run = run_filter(
         &shell_policy,
         &environment,
