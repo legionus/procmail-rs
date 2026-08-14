@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::config::{
-    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, assignment_value_limit, variable_policy,
+    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING_LEN,
+    assignment_value_limit, variable_policy,
 };
 use crate::runtime::RuntimeVariables;
 
@@ -22,6 +23,22 @@ pub struct ProcessEnvironment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessEnvironmentError {
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellPolicy {
+    approved_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellInvocation<'a> {
+    path: &'a str,
+    flags: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellPolicyError {
     message: String,
 }
 
@@ -60,6 +77,56 @@ impl ProcessEnvironment {
     }
 }
 
+impl ShellPolicy {
+    pub fn disabled() -> Self {
+        Self {
+            approved_path: None,
+        }
+    }
+
+    pub fn approve(path: &str) -> Result<Self, ShellPolicyError> {
+        validate_shell_path(path)?;
+        Ok(Self {
+            approved_path: Some(path.to_owned()),
+        })
+    }
+
+    pub fn authorize<'a>(
+        &self,
+        environment: &'a ProcessEnvironment,
+    ) -> Result<ShellInvocation<'a>, ShellPolicyError> {
+        let approved = self
+            .approved_path
+            .as_deref()
+            .ok_or_else(|| shell_policy_error("shell execution is disabled by operator policy"))?;
+        let configured = environment
+            .get("SHELL")
+            .expect("process environment always supplies SHELL");
+        if configured != approved {
+            return Err(shell_policy_error(
+                "configured SHELL does not match the operator-approved shell",
+            ));
+        }
+        let flags = environment
+            .get("SHELLFLAGS")
+            .expect("process environment always supplies SHELLFLAGS");
+        Ok(ShellInvocation {
+            path: configured,
+            flags,
+        })
+    }
+}
+
+impl ShellInvocation<'_> {
+    pub fn path(&self) -> &str {
+        self.path
+    }
+
+    pub fn flags(&self) -> &str {
+        self.flags
+    }
+}
+
 impl fmt::Display for ProcessEnvironmentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
@@ -67,6 +134,33 @@ impl fmt::Display for ProcessEnvironmentError {
 }
 
 impl std::error::Error for ProcessEnvironmentError {}
+
+impl fmt::Display for ShellPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ShellPolicyError {}
+
+fn validate_shell_path(path: &str) -> Result<(), ShellPolicyError> {
+    if path.is_empty() || path.len() > MAX_SHELL_SETTING_LEN || path.as_bytes().contains(&0) {
+        return Err(shell_policy_error(
+            "approved shell must be a non-empty bounded path without NUL",
+        ));
+    }
+    if !path.starts_with('/')
+        || path.ends_with('/')
+        || path[1..]
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(shell_policy_error(
+            "approved shell must be an absolute path without '.' or '..' components",
+        ));
+    }
+    Ok(())
+}
 
 fn validate_entry(name: &str, value: &str) -> Result<(), ProcessEnvironmentError> {
     if name.is_empty()
@@ -121,6 +215,12 @@ fn error(message: impl Into<String>) -> ProcessEnvironmentError {
     }
 }
 
+fn shell_policy_error(message: impl Into<String>) -> ShellPolicyError {
+    ShellPolicyError {
+        message: message.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +250,47 @@ mod tests {
             runtime.set(format!("V{index}"), "x");
         }
         assert!(ProcessEnvironment::from_runtime(&runtime).is_err());
+    }
+
+    #[test]
+    fn shell_policy_requires_an_exact_operator_approved_path() {
+        let environment = ProcessEnvironment::from_runtime(&RuntimeVariables::default()).unwrap();
+        assert!(ShellPolicy::disabled().authorize(&environment).is_err());
+
+        let invocation = ShellPolicy::approve(DEFAULT_SHELL)
+            .unwrap()
+            .authorize(&environment)
+            .unwrap();
+        assert_eq!(invocation.path(), DEFAULT_SHELL);
+        assert_eq!(invocation.flags(), DEFAULT_SHELL_FLAGS);
+
+        let mut runtime = RuntimeVariables::default();
+        runtime.set("SHELL", "/usr/bin/sh");
+        let environment = ProcessEnvironment::from_runtime(&runtime).unwrap();
+        assert!(
+            ShellPolicy::approve(DEFAULT_SHELL)
+                .unwrap()
+                .authorize(&environment)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn shell_policy_accepts_only_bounded_absolute_normal_paths() {
+        for path in [
+            "",
+            "bin/sh",
+            "/",
+            "//bin/sh",
+            "/bin//sh",
+            "/bin/sh/",
+            "/bin/./sh",
+            "/bin/../bin/sh",
+            "/bin/s\0h",
+        ] {
+            assert!(ShellPolicy::approve(path).is_err(), "{path:?}");
+        }
+        assert!(ShellPolicy::approve(&format!("/{}", "x".repeat(MAX_SHELL_SETTING_LEN))).is_err());
+        assert!(ShellPolicy::approve("/bin/sh").is_ok());
     }
 }
