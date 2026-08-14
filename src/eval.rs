@@ -18,6 +18,8 @@ use crate::trace::{
     TraceValue, VariableSource as TraceVariableSource,
 };
 
+const MAX_RC_DIAGNOSTIC_LEN: usize = 1024;
+
 pub trait Delivery {
     fn deliver(&mut self, destination: &Destination, message: &Message) -> Result<(), String>;
 }
@@ -59,6 +61,7 @@ pub struct ExecutionPlan {
     rc_transitions: Cell<usize>,
     dynamic_ordered_delivery: Cell<bool>,
     dynamic_message_contents: Cell<bool>,
+    rc_diagnostics: RefCell<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -110,6 +113,7 @@ enum LoadedInclude {
     #[default]
     Unloaded,
     Empty,
+    Failed,
     Sequence(Box<CompiledSequence>),
 }
 
@@ -119,6 +123,7 @@ struct RcExecutionContext<'a> {
     transitions: &'a Cell<usize>,
     dynamic_ordered_delivery: &'a Cell<bool>,
     dynamic_message_contents: &'a Cell<bool>,
+    diagnostics: &'a RefCell<Vec<String>>,
     depth: usize,
 }
 
@@ -461,6 +466,17 @@ impl fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
+fn truncate_utf8(value: &mut String, limit: usize) {
+    if value.len() <= limit {
+        return;
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+}
+
 impl RcExecutionContext<'_> {
     fn descend(self) -> Result<Self, EvalError> {
         let depth = self
@@ -505,8 +521,28 @@ impl CompiledInclude {
                 line: self.expression.line,
                 statement: "INCLUDERC",
             })?
-            .load_config(&self.expression, runtime, child_context.depth)
-            .map_err(|error| EvalError::RuntimeRc(error.to_string()))?;
+            .load_config(&self.expression, runtime, child_context.depth);
+        let loaded = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) if error.is_resource_limit() => {
+                return Err(EvalError::RuntimeRc(format!(
+                    "line {}: INCLUDERC resource limit: {}",
+                    self.expression.line,
+                    error.safe_message()
+                )));
+            }
+            Err(error) => {
+                let mut diagnostic = format!(
+                    "line {}: INCLUDERC failed: {}",
+                    self.expression.line,
+                    error.safe_message()
+                );
+                truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
+                context.diagnostics.borrow_mut().push(diagnostic);
+                *self.loaded.borrow_mut() = LoadedInclude::Failed;
+                return Ok(());
+            }
+        };
         let Some(loaded) = loaded else {
             *self.loaded.borrow_mut() = LoadedInclude::Empty;
             return Ok(());
@@ -1700,6 +1736,7 @@ impl ExecutionPlan {
             rc_transitions: Cell::new(0),
             dynamic_ordered_delivery: Cell::new(false),
             dynamic_message_contents: Cell::new(false),
+            rc_diagnostics: RefCell::new(Vec::new()),
         }
     }
 
@@ -1709,8 +1746,13 @@ impl ExecutionPlan {
             transitions: &self.rc_transitions,
             dynamic_ordered_delivery: &self.dynamic_ordered_delivery,
             dynamic_message_contents: &self.dynamic_message_contents,
+            diagnostics: &self.rc_diagnostics,
             depth: 0,
         }
+    }
+
+    pub fn take_rc_diagnostics(&self) -> Vec<String> {
+        std::mem::take(&mut *self.rc_diagnostics.borrow_mut())
     }
 
     pub fn requirements(&self) -> InputRequirements {

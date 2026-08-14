@@ -44,6 +44,7 @@ pub struct LoadedRcConfig {
 pub struct RcFileError {
     path: PathBuf,
     message: String,
+    resource_limit: bool,
 }
 
 impl RcFileLoader {
@@ -75,24 +76,24 @@ impl RcFileLoader {
 
     pub fn load(&mut self, path: &Path, depth: usize) -> Result<LoadedRcFile, RcFileError> {
         if depth > MAX_RC_INCLUDE_DEPTH {
-            return Err(RcFileError::new(
+            return Err(RcFileError::limit(
                 path,
                 format!("rc nesting exceeds the hard limit of {MAX_RC_INCLUDE_DEPTH}"),
             ));
         }
         if self.files_read >= MAX_RC_FILE_COUNT {
-            return Err(RcFileError::new(
+            return Err(RcFileError::limit(
                 path,
                 format!("rc file count exceeds the hard limit of {MAX_RC_FILE_COUNT}"),
             ));
         }
         let remaining = MAX_RC_AGGREGATE_SIZE
             .checked_sub(self.bytes_read)
-            .ok_or_else(|| RcFileError::new(path, "aggregate rc byte count overflows"))?;
+            .ok_or_else(|| RcFileError::limit(path, "aggregate rc byte count overflows"))?;
         self.files_read = self
             .files_read
             .checked_add(1)
-            .ok_or_else(|| RcFileError::new(path, "rc file count overflows"))?;
+            .ok_or_else(|| RcFileError::limit(path, "rc file count overflows"))?;
 
         // Open the selected file and validate the descriptor itself. A
         // separate metadata lookup could approve one file and then let a
@@ -129,7 +130,7 @@ impl RcFileLoader {
         self.bytes_read = self
             .bytes_read
             .checked_add(source.len())
-            .ok_or_else(|| RcFileError::new(path, "aggregate rc byte count overflows"))?;
+            .ok_or_else(|| RcFileError::limit(path, "aggregate rc byte count overflows"))?;
         let source = String::from_utf8(source)
             .map_err(|_| RcFileError::new(path, "rc file is not valid UTF-8"))?;
         Ok(LoadedRcFile {
@@ -231,11 +232,28 @@ impl RcFileError {
         Self {
             path: path.to_owned(),
             message: message.into(),
+            resource_limit: false,
+        }
+    }
+
+    fn limit(path: &Path, message: impl Into<String>) -> Self {
+        Self {
+            path: path.to_owned(),
+            message: message.into(),
+            resource_limit: true,
         }
     }
 
     fn io(path: &Path, error: io::Error) -> Self {
         Self::new(path, error.to_string())
+    }
+
+    pub fn is_resource_limit(&self) -> bool {
+        self.resource_limit
+    }
+
+    pub fn safe_message(&self) -> &str {
+        &self.message
     }
 }
 
@@ -261,19 +279,19 @@ fn read_bounded(
     let limit = file_limit.min(aggregate_remaining);
     let read_limit = limit
         .checked_add(1)
-        .ok_or_else(|| RcFileError::new(path, "rc read limit overflows"))?;
+        .ok_or_else(|| RcFileError::limit(path, "rc read limit overflows"))?;
     let mut source = Vec::with_capacity(limit.min(64 * 1024));
     file.take(read_limit as u64)
         .read_to_end(&mut source)
         .map_err(|error| RcFileError::io(path, error))?;
     if source.len() > file_limit {
-        return Err(RcFileError::new(
+        return Err(RcFileError::limit(
             path,
             format!("rc file exceeds the hard limit of {file_limit} bytes"),
         ));
     }
     if source.len() > aggregate_remaining {
-        return Err(RcFileError::new(
+        return Err(RcFileError::limit(
             path,
             format!("aggregate rc size exceeds the hard limit of {MAX_RC_AGGREGATE_SIZE} bytes"),
         ));
@@ -375,7 +393,21 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("nesting exceeds"));
+        assert!(error.is_resource_limit());
         assert_eq!(loader.files_read(), 1);
+    }
+
+    #[test]
+    fn distinguishes_recoverable_open_errors_from_resource_limits() {
+        let directory = TestDirectory::new();
+        let root = directory.path("root.rc");
+        fs::write(&root, "ROOT=yes\n").unwrap();
+        let (mut loader, _) = RcFileLoader::for_root(&root).unwrap();
+
+        let error = loader.load(&directory.path("missing.rc"), 1).unwrap_err();
+
+        assert!(!error.is_resource_limit());
+        assert!(!error.safe_message().is_empty());
     }
 
     #[test]

@@ -154,7 +154,11 @@ fn run() -> Result<(), OperationalError> {
         )));
     }
 
-    match command.action {
+    // Runtime rc diagnostics belong to the completed attempt, including an
+    // attempt that later fails delivery. Run the action inside a closure so
+    // every `?` returns here first and the bounded diagnostic queue is always
+    // drained before this function returns to main.
+    let result = (|| match command.action {
         Action::Check => Ok(()),
         Action::Explain => {
             let mut stdout = io::stdout().lock();
@@ -207,7 +211,11 @@ fn run() -> Result<(), OperationalError> {
                 )),
             }
         }
+    })();
+    for diagnostic in plan.take_rc_diagnostics() {
+        eprintln!("procmail-rs: {diagnostic}");
     }
+    result
 }
 
 fn write_plan_explanation(

@@ -109,6 +109,90 @@ fn filter_executes_header_only_include_and_returns_to_caller() {
 }
 
 #[test]
+fn filter_reports_failed_include_without_exposing_its_path_and_continues() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let fallback = mailbase.join("fallback");
+    create_maildir(&mailbase);
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nINCLUDERC=private-selected-name.rc\n:0\nmaildir:fallback\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: failed include\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("line 2: INCLUDERC failed:"), "{stderr}");
+    assert!(stderr.contains("No such file or directory"), "{stderr}");
+    assert!(!stderr.contains("private-selected-name.rc"), "{stderr}");
+    assert!(
+        !stderr.contains(&mailbase.display().to_string()),
+        "{stderr}"
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn filter_reports_malformed_include_and_continues() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let fallback = mailbase.join("fallback");
+    create_maildir(&mailbase);
+    create_maildir(&fallback);
+    let child_rc = mailbase.join("malformed-private-name.rc");
+    fs::write(&child_rc, ":0\n* unterminated[\nmaildir:selected\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nINCLUDERC=malformed-private-name.rc\n:0\nmaildir:fallback\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: malformed include\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("line 2: INCLUDERC failed:"), "{stderr}");
+    assert!(!stderr.contains("malformed-private-name.rc"), "{stderr}");
+    assert!(
+        !stderr.contains(&mailbase.display().to_string()),
+        "{stderr}"
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn filter_stages_only_after_selected_include_requires_body() {
     let path = config_file("");
     let base = path.parent().unwrap();
