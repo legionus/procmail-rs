@@ -10,6 +10,7 @@ pub mod config;
 pub mod delivery;
 pub mod environment;
 pub mod eval;
+pub mod external_filter;
 pub mod limits;
 pub mod message;
 pub mod rc_file;
