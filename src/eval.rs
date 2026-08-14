@@ -58,12 +58,13 @@ pub struct ExecutionPlan {
 #[derive(Debug)]
 struct CompiledSequence {
     recipes: Vec<CompiledNode>,
+    trailing_statements: Vec<CompiledStatement>,
 }
 
 #[derive(Debug)]
 struct CompiledNode {
     line: usize,
-    assignments: Vec<CompiledAssignment>,
+    preceding_statements: Vec<CompiledStatement>,
     control: ControlFlow,
     conditions: Vec<CompiledCondition>,
     action: CompiledAction,
@@ -84,6 +85,11 @@ struct CompiledAssignment {
     value: String,
     line: Option<usize>,
     source: TraceVariableSource,
+}
+
+#[derive(Debug, Clone)]
+enum CompiledStatement {
+    Assignment(CompiledAssignment),
 }
 
 #[derive(Debug, Clone)]
@@ -411,22 +417,32 @@ impl fmt::Display for EvalError {
 impl std::error::Error for EvalError {}
 
 impl CompiledSequence {
-    fn compile(statements: &[Statement], assignments: &mut Vec<CompiledAssignment>) -> Self {
+    fn compile(statements: &[Statement], preceding: &mut Vec<CompiledStatement>) -> Self {
         let mut recipes = Vec::new();
         for statement in statements {
             match statement {
-                Statement::Assignment(assignment) => assignments.push(CompiledAssignment {
-                    name: assignment.name.clone(),
-                    value: assignment.value.clone(),
-                    line: Some(assignment.line),
-                    source: TraceVariableSource::RcFile,
-                }),
+                Statement::Assignment(assignment) => {
+                    preceding.push(CompiledStatement::Assignment(CompiledAssignment {
+                        name: assignment.name.clone(),
+                        value: assignment.value.clone(),
+                        line: Some(assignment.line),
+                        source: TraceVariableSource::RcFile,
+                    }))
+                }
                 Statement::Recipe(recipe) => {
-                    recipes.push(CompiledNode::compile(recipe, std::mem::take(assignments)));
+                    recipes.push(CompiledNode::compile(recipe, std::mem::take(preceding)));
                 }
             }
         }
-        Self { recipes }
+
+        // Keep statements after the final recipe instead of attaching every
+        // statement to a following recipe. Include and switch operations may
+        // legally terminate a file, so dropping this tail would make their
+        // behavior depend on whether an unrelated recipe follows them.
+        Self {
+            recipes,
+            trailing_statements: std::mem::take(preceding),
+        }
     }
 
     fn requirements(&self) -> InputRequirements {
@@ -466,7 +482,7 @@ impl CompiledSequence {
         let mut state = SequenceState::default();
 
         for recipe in &self.recipes {
-            apply_assignments(&recipe.assignments, runtime, trace);
+            execute_statements(&recipe.preceding_statements, runtime, trace);
 
             // Control-flow flags inspect only results produced at this block
             // level. Child sequences therefore cannot overwrite the state
@@ -495,6 +511,7 @@ impl CompiledSequence {
             }
         }
 
+        execute_statements(&self.trailing_statements, runtime, trace);
         Ok(SequenceControl::Continue)
     }
 
@@ -518,7 +535,7 @@ impl CompiledSequence {
         // An unhandled copy failure therefore escapes the block, while a
         // successful child error handler replaces that failure.
         for recipe in &self.recipes {
-            apply_assignments(&recipe.assignments, context.runtime, context.trace);
+            execute_statements(&recipe.preceding_statements, context.runtime, context.trace);
             let conditions_matched = recipe.execution_gate(state)
                 && recipe
                     .matches_complete(context.message, context.runtime, context.trace)
@@ -548,6 +565,7 @@ impl CompiledSequence {
             }
         }
 
+        execute_statements(&self.trailing_statements, context.runtime, context.trace);
         Ok((sequence_action, SequenceControl::Continue))
     }
 
@@ -578,7 +596,7 @@ impl CompiledSequence {
         execution: &mut FanoutPlanState,
     ) -> Result<SequenceControl, EvalError> {
         for (index, recipe) in self.recipes.iter().enumerate().skip(start) {
-            apply_assignments(&recipe.assignments, runtime, trace);
+            execute_statements(&recipe.preceding_statements, runtime, trace);
             let conditions_matched =
                 recipe.planning_gate(state) && recipe.matches_complete(message, runtime, trace)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
@@ -612,6 +630,7 @@ impl CompiledSequence {
             }
         }
 
+        execute_statements(&self.trailing_statements, runtime, trace);
         Ok(SequenceControl::Continue)
     }
 
@@ -626,7 +645,7 @@ impl CompiledSequence {
         let mut state = SequenceState::default();
 
         for (index, recipe) in self.recipes.iter().enumerate() {
-            apply_assignments(&recipe.assignments, runtime, trace);
+            execute_statements(&recipe.preceding_statements, runtime, trace);
             let gate = recipe.planning_gate(state);
             let (matched, condition_results) = if gate {
                 recipe.matches_headers(head, runtime, trace)?
@@ -724,6 +743,7 @@ impl CompiledSequence {
             }
         }
 
+        execute_statements(&self.trailing_statements, runtime, trace);
         Ok(HeaderControl::Continue)
     }
 
@@ -759,7 +779,7 @@ impl CompiledSequence {
         for recipe in &self.recipes {
             let mut conditions = inherited_conditions.to_vec();
             conditions.extend(recipe.conditions.iter().map(CompiledCondition::explain));
-            let assignment_count = inherited_assignments + recipe.assignments.len();
+            let assignment_count = inherited_assignments + recipe.preceding_statements.len();
             match &recipe.action {
                 CompiledAction::Deliver {
                     destination,
@@ -801,7 +821,7 @@ impl CompiledSequence {
             .ok_or(EvalError::BodyWasNotBuffered)?;
         let mut state = frame.state;
         if !frame.assignments_applied {
-            apply_assignments(&recipe.assignments, runtime, trace);
+            execute_statements(&recipe.preceding_statements, runtime, trace);
         }
 
         let (conditions_matched, control) = if depth + 1 < frames.len() {
@@ -898,7 +918,7 @@ impl SequenceState {
 }
 
 impl CompiledNode {
-    fn compile(recipe: &Recipe, assignments: Vec<CompiledAssignment>) -> Self {
+    fn compile(recipe: &Recipe, preceding_statements: Vec<CompiledStatement>) -> Self {
         let conditions = compile_conditions(recipe);
         let action = match &recipe.action {
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
@@ -911,7 +931,7 @@ impl CompiledNode {
         };
         Self {
             line: recipe.line,
-            assignments,
+            preceding_statements,
             control: recipe.options.control,
             conditions,
             action,
@@ -1243,40 +1263,46 @@ impl CompiledNode {
     }
 }
 
-fn apply_assignments(
-    assignments: &[CompiledAssignment],
+fn execute_statements(
+    statements: &[CompiledStatement],
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
 ) {
-    for assignment in assignments {
-        runtime.set(assignment.name.clone(), assignment.value.clone());
-        if let Ok(name) = TraceName::new(&assignment.name) {
-            trace.record(TraceEvent::VariableAssigned {
-                line: assignment.line,
-                name,
-                source: assignment.source,
-                value: trace
-                    .detail()
-                    .includes_variable_values()
-                    .then(|| TraceValue::new(assignment.value.as_bytes())),
-            });
+    for statement in statements {
+        match statement {
+            CompiledStatement::Assignment(assignment) => {
+                runtime.set(assignment.name.clone(), assignment.value.clone());
+                if let Ok(name) = TraceName::new(&assignment.name) {
+                    trace.record(TraceEvent::VariableAssigned {
+                        line: assignment.line,
+                        name,
+                        source: assignment.source,
+                        value: trace
+                            .detail()
+                            .includes_variable_values()
+                            .then(|| TraceValue::new(assignment.value.as_bytes())),
+                    });
+                }
+            }
         }
     }
 }
 
 impl ExecutionPlan {
     pub fn compile(config: &Config) -> Self {
-        let initial_assignments = config
+        let mut initial_statements = config
             .initial_variables()
             .iter()
-            .map(|(name, value)| CompiledAssignment {
-                name: name.clone(),
-                value: value.clone(),
-                line: None,
-                source: TraceVariableSource::CommandLine,
+            .map(|(name, value)| {
+                CompiledStatement::Assignment(CompiledAssignment {
+                    name: name.clone(),
+                    value: value.clone(),
+                    line: None,
+                    source: TraceVariableSource::CommandLine,
+                })
             })
             .collect::<Vec<_>>();
-        let root = CompiledSequence::compile(&config.statements, &mut initial_assignments.clone());
+        let root = CompiledSequence::compile(&config.statements, &mut initial_statements);
         let requires_ordered_delivery = root.requires_ordered_delivery();
 
         Self {
@@ -2181,6 +2207,22 @@ mod tests {
             ]
         );
         assert!(!trace.was_truncated());
+    }
+
+    #[test]
+    fn executes_assignments_after_the_final_recipe() {
+        let config = config::parse(":0\n* ^X-Never: yes$\nmaildir:unused\nAFTER=tail\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        let plan = ExecutionPlan::compile(&config);
+        let mut runtime = RuntimeVariables::default();
+
+        let result =
+            plan.evaluate_headers_with_runtime(&head(b"Subject: test\n\nbody"), &mut runtime);
+
+        assert!(matches!(result, HeaderEvaluation::Decided(_)));
+        assert_eq!(runtime.get("AFTER"), Some("tail"));
     }
 
     #[test]
