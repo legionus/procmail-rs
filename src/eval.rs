@@ -44,6 +44,23 @@ impl<'a> MatchingMessage<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MappedMessageInput<'a> {
+    raw: &'a [u8],
+    header_len: usize,
+    matching: Option<MatchingMessage<'a>>,
+}
+
+impl<'a> MappedMessageInput<'a> {
+    pub fn new(raw: &'a [u8], header_len: usize, matching: Option<MatchingMessage<'a>>) -> Self {
+        Self {
+            raw,
+            header_len,
+            matching,
+        }
+    }
+}
+
 impl InputRequirements {
     fn union(self, other: Self) -> Self {
         Self {
@@ -87,8 +104,8 @@ enum CompiledAction {
         continuation: ContinuationMode,
     },
     Pipe {
-        _action: PipeAction,
-        _options: RecipeOptions,
+        action: PipeAction,
+        options: RecipeOptions,
     },
     Block(CompiledSequence),
 }
@@ -166,13 +183,53 @@ struct SequenceExecution {
 
 struct OrderedTreeExecution<'a, E, D, T> {
     message: CompleteMessage<'a>,
+    replacement: Option<OwnedCompleteMessage>,
     runtime: &'a mut RuntimeVariables,
     trace: &'a mut T,
     deliver: &'a mut D,
     published: usize,
     original_delivered: bool,
     pending_error: Option<E>,
+    external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
     rc: RcExecutionContext<'a>,
+}
+
+type ExternalActionExecutor<'a, E, T> = dyn FnMut(
+        &PipeAction,
+        RecipeOptions,
+        &[u8],
+        &mut RuntimeVariables,
+        &mut T,
+    ) -> Result<Option<Message>, DeliveryAttemptError<E>>
+    + 'a;
+
+#[derive(Debug)]
+struct OwnedCompleteMessage {
+    message: Message,
+    matching_full: Option<Vec<u8>>,
+}
+
+impl<E, D, T> OrderedTreeExecution<'_, E, D, T> {
+    fn replace_message(&mut self, message: Message) {
+        let matching_full = message.matching_message();
+        self.replacement = Some(OwnedCompleteMessage {
+            message,
+            matching_full,
+        });
+    }
+}
+
+fn current_ordered_message<'a>(
+    original: CompleteMessage<'a>,
+    replacement: Option<&'a OwnedCompleteMessage>,
+) -> CompleteMessage<'a> {
+    match replacement {
+        Some(replacement) => CompleteMessage::Buffered {
+            message: &replacement.message,
+            matching_full: replacement.matching_full.as_deref(),
+        },
+        None => original,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -440,6 +497,10 @@ pub enum EvalError {
     ExternalActionUnsupported {
         line: usize,
     },
+    InvalidExternalActionResult {
+        line: usize,
+        reason: &'static str,
+    },
     Delivery {
         destination: String,
         message: String,
@@ -479,6 +540,10 @@ impl fmt::Display for EvalError {
                     "line {line}: external action is not executable yet"
                 )
             }
+            Self::InvalidExternalActionResult { line, reason } => write!(
+                formatter,
+                "line {line}: invalid external action result: {reason}"
+            ),
             Self::Delivery {
                 destination,
                 message,
@@ -747,7 +812,11 @@ impl CompiledSequence {
             }
             let conditions_matched = recipe.execution_gate(state)
                 && recipe
-                    .matches_complete(context.message, context.runtime, context.trace)
+                    .matches_complete(
+                        current_ordered_message(context.message, context.replacement.as_ref()),
+                        context.runtime,
+                        context.trace,
+                    )
                     .map_err(OrderedExecutionError::Evaluation)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let (action, control) = if conditions_matched {
@@ -1218,8 +1287,8 @@ impl CompiledNode {
         let conditions = compile_conditions(recipe);
         let action = match &recipe.action {
             RecipeAction::Pipe(action) => CompiledAction::Pipe {
-                _action: action.clone(),
-                _options: recipe.options,
+                action: action.clone(),
+                options: recipe.options,
             },
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
                 destination: destination.clone(),
@@ -1479,9 +1548,58 @@ impl CompiledNode {
         T: TraceSink,
     {
         match &self.action {
-            CompiledAction::Pipe { .. } => Err(OrderedExecutionError::Evaluation(
-                EvalError::ExternalActionUnsupported { line: self.line },
-            )),
+            CompiledAction::Pipe { action, options } => {
+                let input = current_ordered_message(context.message, context.replacement.as_ref())
+                    .action_input(options.action_input)
+                    .ok_or(EvalError::BodyWasNotBuffered)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                let Some(external) = context.external.as_deref_mut() else {
+                    return Err(OrderedExecutionError::Evaluation(
+                        EvalError::ExternalActionUnsupported { line: self.line },
+                    ));
+                };
+
+                // Keep the old message alive until the external executor has
+                // completed and validated all output. Only an accepted filter
+                // result replaces the owned current version used by later
+                // recipes in this sequence.
+                match external(action, *options, input, context.runtime, context.trace) {
+                    Ok(replacement) => {
+                        context.pending_error = None;
+                        if options.action_mode == crate::config::ActionMode::Filter {
+                            let message = replacement.ok_or_else(|| {
+                                OrderedExecutionError::Evaluation(
+                                    EvalError::InvalidExternalActionResult {
+                                        line: self.line,
+                                        reason: "filter completed without a replacement message",
+                                    },
+                                )
+                            })?;
+                            context.replace_message(message);
+                            Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                        } else if replacement.is_some() {
+                            Err(OrderedExecutionError::Evaluation(
+                                EvalError::InvalidExternalActionResult {
+                                    line: self.line,
+                                    reason: "non-filter pipe returned a replacement message",
+                                },
+                            ))
+                        } else if options.continuation == ContinuationMode::Stop {
+                            context.original_delivered = true;
+                            Ok((ActionExecution::Succeeded, SequenceControl::Stop))
+                        } else {
+                            Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                        }
+                    }
+                    Err(DeliveryAttemptError::Recoverable(error)) => {
+                        context.pending_error = Some(error);
+                        Ok((ActionExecution::Failed, SequenceControl::Continue))
+                    }
+                    Err(DeliveryAttemptError::Fatal(error)) => {
+                        Err(OrderedExecutionError::Delivery(error))
+                    }
+                }
+            }
             CompiledAction::Deliver {
                 destination,
                 continuation,
@@ -1490,11 +1608,11 @@ impl CompiledNode {
                     .bind_with(|name| context.runtime.get(name).map(str::to_owned))
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                let message = context
-                    .message
-                    .full()
-                    .ok_or(EvalError::BodyWasNotBuffered)
-                    .map_err(OrderedExecutionError::Evaluation)?;
+                let message =
+                    current_ordered_message(context.message, context.replacement.as_ref())
+                        .raw()
+                        .ok_or(EvalError::BodyWasNotBuffered)
+                        .map_err(OrderedExecutionError::Evaluation)?;
                 match (context.deliver)(&destination, message, context.runtime, context.trace) {
                     Ok(()) => {
                         context.published += 1;
@@ -2195,6 +2313,64 @@ impl ExecutionPlan {
         ) -> Result<(), DeliveryAttemptError<E>>,
         T: TraceSink,
     {
+        self.execute_mapped_ordered_inner(
+            MappedMessageInput::new(raw, header_len, matching),
+            runtime,
+            trace,
+            deliver,
+            None,
+        )
+    }
+
+    pub fn execute_mapped_ordered_with_external_trace<E, D, X, T>(
+        &self,
+        message: MappedMessageInput<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut T,
+        deliver: &mut D,
+        external: &mut X,
+    ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        X: FnMut(
+            &PipeAction,
+            RecipeOptions,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        self.execute_mapped_ordered_inner(message, runtime, trace, deliver, Some(external))
+    }
+
+    fn execute_mapped_ordered_inner<'a, E, D, T>(
+        &'a self,
+        message: MappedMessageInput<'a>,
+        runtime: &'a mut RuntimeVariables,
+        trace: &'a mut T,
+        deliver: &'a mut D,
+        external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
+    ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        let MappedMessageInput {
+            raw,
+            header_len,
+            matching,
+        } = message;
         if header_len > raw.len() {
             return Err(OrderedExecutionError::Evaluation(
                 EvalError::BodyWasNotBuffered,
@@ -2221,12 +2397,14 @@ impl ExecutionPlan {
                 matching_header,
                 matching_raw,
             },
+            replacement: None,
             runtime,
             trace,
             deliver,
             published: 0,
             original_delivered: false,
             pending_error: None,
+            external,
             rc: self.rc_context(),
         };
         self.root.execute_ordered(&mut context)?;
@@ -2575,6 +2753,32 @@ fn matching_views_are_valid(
 }
 
 impl<'a> CompleteMessage<'a> {
+    fn raw(self) -> Option<&'a [u8]> {
+        match self {
+            Self::Buffered { message, .. } => Some(message.as_bytes()),
+            Self::Streamed(_) => None,
+            Self::Mapped { raw, .. } => Some(raw),
+        }
+    }
+
+    fn raw_header(self) -> &'a [u8] {
+        match self {
+            Self::Buffered { message, .. } => message.header(),
+            Self::Streamed(message) => message.header(),
+            Self::Mapped {
+                raw, header_len, ..
+            } => &raw[..header_len],
+        }
+    }
+
+    fn action_input(self, input: crate::config::ActionInput) -> Option<&'a [u8]> {
+        match input {
+            crate::config::ActionInput::Message => self.raw(),
+            crate::config::ActionInput::Headers => Some(self.raw_header()),
+            crate::config::ActionInput::Body => self.body(),
+        }
+    }
+
     fn header_bytes(self) -> &'a [u8] {
         match self {
             Self::Buffered { message, .. } => message.matching_header(),
@@ -3683,6 +3887,102 @@ mod tests {
         assert_eq!(attempted, ["primary", "fallback"]);
         assert_eq!(outcome.published(), 1);
         assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn successful_filter_replaces_bytes_for_later_conditions_and_delivery() {
+        let plan = compile(":0 fw\n| rewrite\n:0\n* ^X-State: new$\nmaildir:selected\n");
+        let original = b"X-State: old\n\nold body";
+        let replacement = b"X-State: new\n\nnew body";
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = NoTrace;
+        let mut delivered = Vec::new();
+        let mut external_calls = 0usize;
+
+        let outcome = plan
+            .execute_mapped_ordered_with_external_trace(
+                MappedMessageInput::new(original, b"X-State: old\n\n".len(), None),
+                &mut runtime,
+                &mut trace,
+                &mut |destination, message, _, _| {
+                    delivered.push((destination.path().to_owned(), message.to_vec()));
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+                &mut |action, options, input, _, _| {
+                    external_calls += 1;
+                    assert_eq!(action.command, "rewrite");
+                    assert_eq!(options.action_mode, crate::config::ActionMode::Filter);
+                    assert_eq!(input, original);
+                    Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(
+                        replacement.to_vec(),
+                    )))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(external_calls, 1);
+        assert_eq!(delivered, [("selected".to_owned(), replacement.to_vec())]);
+        assert_eq!(outcome.published(), 1);
+        assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn failed_filter_keeps_old_message_for_error_handler() {
+        let plan = compile(":0 fw\n| fail\n:0 e\nmaildir:fallback\n");
+        let original = b"Subject: original\n\nbody";
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = NoTrace;
+        let mut delivered = Vec::new();
+
+        let outcome = plan
+            .execute_mapped_ordered_with_external_trace(
+                MappedMessageInput::new(original, b"Subject: original\n\n".len(), None),
+                &mut runtime,
+                &mut trace,
+                &mut |destination, message, _, _| {
+                    delivered.push((destination.path().to_owned(), message.to_vec()));
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+                &mut |_, _, input, _, _| {
+                    assert_eq!(input, original);
+                    Err(DeliveryAttemptError::Recoverable("filter failed"))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(delivered, [("fallback".to_owned(), original.to_vec())]);
+        assert_eq!(outcome.published(), 1);
+        assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn pipe_action_receives_only_its_selected_message_area() {
+        for (flags, expected) in [
+            ("fh", &b"Subject: original\n\n"[..]),
+            ("fb", &b"body"[..]),
+            ("fhb", &b"Subject: original\n\nbody"[..]),
+        ] {
+            let plan = compile(&format!(":0 {flags}\n| rewrite\n:0\nmaildir:selected\n"));
+            let original = b"Subject: original\n\nbody";
+            let mut runtime = RuntimeVariables::default();
+            let mut trace = NoTrace;
+
+            let outcome = plan
+                .execute_mapped_ordered_with_external_trace(
+                    MappedMessageInput::new(original, b"Subject: original\n\n".len(), None),
+                    &mut runtime,
+                    &mut trace,
+                    &mut |_, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+                    &mut |_, _, input, _, _| {
+                        assert_eq!(input, expected, "flags {flags}");
+                        Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(
+                            original.to_vec(),
+                        )))
+                    },
+                )
+                .unwrap();
+            assert!(outcome.original_delivered());
+        }
     }
 
     #[test]

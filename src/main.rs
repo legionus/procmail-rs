@@ -7,19 +7,27 @@
 compile_error!("procmail-rs currently supports only 64-bit Linux targets");
 
 use std::env;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
 
-use procmail_rs::config::{self, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
+use procmail_rs::config::{
+    self, ActionMode, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable,
+};
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
 use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
+use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{
     ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind, ExecutionPlan,
-    HeaderEvaluation, MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery,
+    HeaderEvaluation, MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation,
+    PlannedDelivery,
 };
+use procmail_rs::external_filter::{FilterOutput, decide_filter};
+use procmail_rs::external_process::run_filter;
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::RcFileLoader;
@@ -153,13 +161,12 @@ fn run() -> Result<(), OperationalError> {
         for warning in warnings {
             eprintln!("procmail-rs: warning: {warning}");
         }
+        if config.has_pipe_actions() {
+            eprintln!(
+                "procmail-rs: warning: configuration contains external shell actions; no command was executed"
+            );
+        }
         return Ok(());
-    }
-
-    if command.action == Action::Filter && config.has_pipe_actions() {
-        return Err(OperationalError::Configuration(
-            "pipe actions are parsed but not executable yet".to_owned(),
-        ));
     }
 
     let plan = ExecutionPlan::compile_with_loader(&config, rc_loader);
@@ -227,6 +234,7 @@ fn run() -> Result<(), OperationalError> {
                         },
                         &mut runtime,
                         &mut trace,
+                        limits,
                     )
                 }
                 HeaderEvaluation::Error(error) => Err(OperationalError::PermanentDestination(
@@ -328,6 +336,7 @@ fn deliver_staged(
     options: StagingOptions<'_>,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
+    limits: MessageLimits,
 ) -> Result<(), OperationalError> {
     let early_count = continuation.pending_deliveries().len();
     let early_sinks = if execution.requires_ordered_delivery() {
@@ -372,10 +381,8 @@ fn deliver_staged(
 
     if execution.requires_ordered_delivery() {
         let outcome = execution
-            .execute_mapped_ordered_with_matching_trace(
-                staged.as_bytes(),
-                staged.header_len(),
-                matching,
+            .execute_mapped_ordered_with_external_trace(
+                MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                 runtime,
                 trace,
                 &mut |destination, message, runtime, trace| {
@@ -397,6 +404,22 @@ fn deliver_staged(
                             DeliveryAttemptError::Fatal(error.error)
                         }
                     })
+                },
+                &mut |action, options, input, runtime, _| {
+                    if options.action_mode != ActionMode::Filter {
+                        return Err(DeliveryAttemptError::Recoverable(
+                            OperationalError::PermanentDestination(
+                                "non-filter pipe actions are not executable yet".to_owned(),
+                            ),
+                        ));
+                    }
+                    execute_external_filter(
+                        limits,
+                        action.command.as_str(),
+                        options,
+                        input,
+                        runtime,
+                    )
                 },
             )
             .map_err(|error| match error {
@@ -433,6 +456,116 @@ fn deliver_staged(
     commit_delivery(validated, plan.deliveries(), runtime, trace)?;
 
     delivery_outcome(&plan)
+}
+
+fn execute_external_filter(
+    limits: MessageLimits,
+    command: &str,
+    options: procmail_rs::config::RecipeOptions,
+    input: &[u8],
+    runtime: &RuntimeVariables,
+) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
+    let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
+        recoverable_external_error(format!(
+            "cannot build external command environment: {error}"
+        ))
+    })?;
+    let configured_shell = environment
+        .get("SHELL")
+        .expect("bounded process environment always contains SHELL");
+    let shell_policy = ShellPolicy::approve(configured_shell)
+        .map_err(|error| recoverable_external_error(error.to_string()))?;
+    let stderr = external_stderr(runtime).map_err(|error| {
+        recoverable_external_error(format!("cannot open external command log: {error}"))
+    })?;
+    let run = run_filter(
+        &shell_policy,
+        &environment,
+        command,
+        input,
+        options.output_ending,
+        limits,
+        stderr,
+    )
+    .map_err(|error| recoverable_external_error(error.to_string()))?;
+    let decision = decide_filter(
+        options.child_status,
+        options.write_errors,
+        run.input_write(),
+        run.output_state(),
+        run.child_exit(),
+    );
+    if decision.report_child_failure() {
+        report_external_child_failure(runtime).map_err(|error| {
+            recoverable_external_error(format!(
+                "cannot write external command failure diagnostic: {error}"
+            ))
+        })?;
+    }
+
+    // Read and validate stdout before consulting the status decision. This
+    // keeps the detailed bounded-input error available while the previous
+    // message remains owned by the evaluator for a following error recipe.
+    if run.output_state() == FilterOutput::Failed {
+        let error = run
+            .into_output()
+            .expect_err("failed filter output retains its validation error");
+        return Err(recoverable_external_error(format!(
+            "external filter returned an invalid message: {error}"
+        )));
+    }
+    if !decision.succeeded() {
+        return Err(recoverable_external_error(
+            "external filter did not complete successfully",
+        ));
+    }
+    Ok(Some(
+        run.into_output()
+            .expect("successful filter output was validated"),
+    ))
+}
+
+fn recoverable_external_error(
+    message: impl Into<String>,
+) -> DeliveryAttemptError<OperationalError> {
+    DeliveryAttemptError::Recoverable(OperationalError::TemporaryDelivery(message.into()))
+}
+
+fn external_stderr(runtime: &RuntimeVariables) -> io::Result<Stdio> {
+    Ok(match open_external_log(runtime)? {
+        Some(file) => Stdio::from(file),
+        None => Stdio::inherit(),
+    })
+}
+
+fn report_external_child_failure(runtime: &RuntimeVariables) -> io::Result<()> {
+    let diagnostic = b"procmail-rs: external command exited unsuccessfully\n";
+    match open_external_log(runtime)? {
+        Some(mut file) => file.write_all(diagnostic),
+        None => io::stderr().lock().write_all(diagnostic),
+    }
+}
+
+fn open_external_log(runtime: &RuntimeVariables) -> io::Result<Option<File>> {
+    let Some(path) = runtime.get("LOGFILE").filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(
+            i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
+                .expect("Linux O_NOFOLLOW fits in the std custom-flags type"),
+        )
+        .open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "LOGFILE is not a regular file",
+        ));
+    }
+    Ok(Some(file))
 }
 
 fn stage_matching_message(

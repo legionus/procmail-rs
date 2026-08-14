@@ -70,6 +70,13 @@ fn check_and_explain_accept_pipe_actions_without_executing_them() {
         .output()
         .unwrap();
     assert_eq!(check.status.code(), Some(0), "{:?}", check.stderr);
+    let check_stderr = String::from_utf8(check.stderr).unwrap();
+    assert!(
+        check_stderr.contains("external shell actions"),
+        "{check_stderr}"
+    );
+    assert!(!check_stderr.contains("private-command"), "{check_stderr}");
+    assert!(!check_stderr.contains("secret"), "{check_stderr}");
 
     let explain = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["explain", "--config"])
@@ -85,27 +92,118 @@ fn check_and_explain_accept_pipe_actions_without_executing_them() {
 }
 
 #[test]
-fn filter_rejects_unimplemented_pipe_action_without_reading_stdin() {
-    let path = config_file(":0 fw\n| command\n");
-    let input_path = path.parent().unwrap().join("input.eml");
-    fs::write(&input_path, b"Subject: private\n\nbody").unwrap();
-    let mut input = fs::File::open(&input_path).unwrap();
+fn allowed_filter_replaces_message_before_later_delivery() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0 fw\n| sed 's/^Subject: old$/Subject: new/'\n:0\n* ^Subject: new$\nselected/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["filter", "--config"])
         .arg(&path)
-        .stdin(Stdio::from(input.try_clone().unwrap()))
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: old\n\nbody")?;
+            child.wait_with_output()
+        })
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(78), "{:?}", output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(
+        delivered_messages(&selected),
+        [b"Subject: new\n\nbody\n".to_vec()]
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn failed_waited_filter_keeps_original_for_error_recipe() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let fallback = base.join("fallback");
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0 fw\n| cat; exit 7\n:0 e\nfallback/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+
+    let original = b"Subject: original\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(original)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("pipe actions are parsed but not executable yet")
+            .contains("external command exited unsuccessfully")
     );
-    assert_eq!(input.stream_position().unwrap(), 0);
-    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    assert_eq!(delivered_messages(&fallback), [original.to_vec()]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn external_filter_stderr_is_appended_to_logfile() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    let logfile = base.join("filter.log");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nLOGFILE={}\n:0 fw\n| printf 'filter diagnostic' >&2; cat\n:0\nselected/\n",
+            base.display(),
+            logfile.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: original\n\nbody")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(fs::read(&logfile).unwrap(), b"filter diagnostic");
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
