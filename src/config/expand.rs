@@ -91,6 +91,10 @@ impl RcFileExpression {
         if value.is_empty() {
             return Ok(value);
         }
+
+        // procmail treats MAILDIR as its current directory. Resolve against
+        // its value at the moment the statement executes; when it is unset,
+        // leave the path relative so the loader uses the process directory.
         let base = lookup("MAILDIR");
         let value = resolve_relative_path(&value, base.as_deref(), self.line)?;
         validate_filesystem_path(&value, self.line, "rc file", false)?;

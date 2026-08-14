@@ -109,6 +109,102 @@ fn filter_executes_header_only_include_and_returns_to_caller() {
 }
 
 #[test]
+fn relative_include_and_switch_use_the_process_working_directory() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let working = base.join("working");
+    let selected = base.join("selected");
+    let unreachable = base.join("unreachable");
+    fs::create_dir(&working).unwrap();
+    create_maildir(&selected);
+    create_maildir(&unreachable);
+    let include_rc = working.join("include.rc");
+    let switch_rc = working.join("switch.rc");
+    fs::write(&include_rc, "SWITCHRC=switch.rc\n").unwrap();
+    fs::write(&switch_rc, format!(":0\nmaildir:{}\n", selected.display())).unwrap();
+    fs::set_permissions(&include_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&switch_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "INCLUDERC=include.rc\n:0\nmaildir:{}\n",
+            unreachable.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: process cwd\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .current_dir(&working)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [input.to_vec()]);
+    assert!(delivered_messages(&unreachable).is_empty());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn runtime_maildir_changes_the_base_for_include_and_switch() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let initial = base.join("initial");
+    let runtime_base = base.join("runtime");
+    let fallback = initial.join("fallback");
+    create_maildir(&initial);
+    create_maildir(&runtime_base);
+    create_maildir(&fallback);
+
+    for (statement, rc_name, destination_name) in [
+        ("INCLUDERC", "included.rc", "included"),
+        ("SWITCHRC", "switched.rc", "switched"),
+    ] {
+        let destination = runtime_base.join(destination_name);
+        create_maildir(&destination);
+        let selected_rc = runtime_base.join(rc_name);
+        fs::write(&selected_rc, format!(":0\nmaildir:{destination_name}\n")).unwrap();
+        fs::set_permissions(&selected_rc, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "MAILDIR={}\nNEXT={}\n:0\n* ^X-Select: yes$\n{{\nMAILDIR=$NEXT\n{statement}={rc_name}\n}}\n:0\nmaildir:fallback\n",
+                initial.display(),
+                runtime_base.display()
+            ),
+        )
+        .unwrap();
+        let input = format!("X-Select: yes\nSubject: runtime {statement}\n\nbody");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_eq!(delivered_messages(&destination), [input.into_bytes()]);
+    }
+    assert!(delivered_messages(&fallback).is_empty());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn filter_reports_failed_include_without_exposing_its_path_and_continues() {
     let path = config_file("");
     let base = path.parent().unwrap();
