@@ -11,9 +11,11 @@ use regex::bytes::Regex;
 
 pub use expand::ExpansionError;
 pub use parser::parse;
+pub(crate) use parser::parse_with_state;
 pub use variables::{
-    AssignmentTarget, MAX_COMMAND_LINE_VARIABLES, MessageLimitVariable, SuppliedVariable,
-    SuppliedVariableError, VariablePolicy, VariableSource, assignment_value_limit, variable_policy,
+    AssignmentTarget, MAX_COMMAND_LINE_VARIABLES, MessageLimitVariable, RcLimitVariable,
+    SuppliedVariable, SuppliedVariableError, VariablePolicy, VariableSource,
+    assignment_value_limit, variable_policy,
 };
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;
@@ -28,11 +30,22 @@ pub const MAX_REGEX_COMPILED_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_REGEX_PATTERN_LEN: usize = 64 * 1024;
 pub const MAX_REGEX_CAPTURES: usize = 64;
 pub const MAX_MATCH_BYTES: usize = MAX_ASSIGNMENT_VALUE_LEN;
-pub const MAX_RC_REGEXES: usize = 32;
+pub const MAX_RC_REGEXES: usize = 256;
 pub const MAX_RC_SIZE: usize = 1024 * 1024;
 pub const MAX_RC_CONDITIONS: usize = 4096;
 pub const MAX_RC_RECIPES: usize = 1024;
 pub const MAX_RC_STATEMENTS: usize = 4096;
+pub const MAX_RC_ASSIGNMENTS: usize = 4096;
+
+// These ceilings allow operational tuning without permitting an rc file to
+// turn a count setting into an effectively unbounded allocation request.
+pub const HARD_MAX_CONDITIONS_PER_RECIPE: usize = 4096;
+pub const HARD_MAX_RECIPE_NESTING_DEPTH: usize = 256;
+pub const HARD_MAX_RC_ASSIGNMENTS: usize = 65_536;
+pub const HARD_MAX_RC_CONDITIONS: usize = 65_536;
+pub const HARD_MAX_RC_RECIPES: usize = 16_384;
+pub const HARD_MAX_RC_REGEXES: usize = 1024;
+pub const HARD_MAX_RC_STATEMENTS: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -43,10 +56,66 @@ pub struct Config {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct RcParseCounts {
+    pub(crate) assignments: usize,
     pub(crate) statements: usize,
     pub(crate) recipes: usize,
     pub(crate) conditions: usize,
     pub(crate) regexes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RcLimits {
+    pub(crate) assignments: usize,
+    pub(crate) statements: usize,
+    pub(crate) recipes: usize,
+    pub(crate) conditions: usize,
+    pub(crate) regexes: usize,
+    pub(crate) conditions_per_recipe: usize,
+    pub(crate) nesting_depth: usize,
+}
+
+impl Default for RcLimits {
+    fn default() -> Self {
+        Self {
+            assignments: MAX_RC_ASSIGNMENTS,
+            statements: MAX_RC_STATEMENTS,
+            recipes: MAX_RC_RECIPES,
+            conditions: MAX_RC_CONDITIONS,
+            regexes: MAX_RC_REGEXES,
+            conditions_per_recipe: MAX_CONDITIONS_PER_RECIPE,
+            nesting_depth: MAX_RECIPE_NESTING_DEPTH,
+        }
+    }
+}
+
+impl RcLimits {
+    pub(crate) fn set(&mut self, kind: RcLimitVariable, value: usize) -> Result<(), usize> {
+        let (slot, hard_limit) = match kind {
+            RcLimitVariable::Assignments => (&mut self.assignments, HARD_MAX_RC_ASSIGNMENTS),
+            RcLimitVariable::Statements => (&mut self.statements, HARD_MAX_RC_STATEMENTS),
+            RcLimitVariable::Recipes => (&mut self.recipes, HARD_MAX_RC_RECIPES),
+            RcLimitVariable::Conditions => (&mut self.conditions, HARD_MAX_RC_CONDITIONS),
+            RcLimitVariable::Regexes => (&mut self.regexes, HARD_MAX_RC_REGEXES),
+            RcLimitVariable::ConditionsPerRecipe => (
+                &mut self.conditions_per_recipe,
+                HARD_MAX_CONDITIONS_PER_RECIPE,
+            ),
+            RcLimitVariable::NestingDepth => {
+                (&mut self.nesting_depth, HARD_MAX_RECIPE_NESTING_DEPTH)
+            }
+        };
+        if value > hard_limit {
+            return Err(hard_limit);
+        }
+        *slot = value;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RcParseState {
+    pub(crate) counts: RcParseCounts,
+    pub(crate) limits: RcLimits,
 }
 
 impl Config {
@@ -364,6 +433,7 @@ impl PathExpression {
 pub struct ParseError {
     pub line: usize,
     pub message: String,
+    resource_limit: bool,
 }
 
 impl ParseError {
@@ -371,7 +441,20 @@ impl ParseError {
         Self {
             line,
             message: message.into(),
+            resource_limit: false,
         }
+    }
+
+    fn limit(line: usize, message: impl Into<String>) -> Self {
+        Self {
+            line,
+            message: message.into(),
+            resource_limit: true,
+        }
+    }
+
+    pub(crate) fn is_resource_limit(&self) -> bool {
+        self.resource_limit
     }
 }
 

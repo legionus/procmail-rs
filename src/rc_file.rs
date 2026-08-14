@@ -12,10 +12,13 @@ use rustix::fd::OwnedFd;
 use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 
 use crate::config::{
-    self, AssignmentTarget, Config, MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE,
-    MAX_RC_STATEMENTS, RcFileExpression, RcParseCounts, RecipeAction, Statement,
+    self, AssignmentTarget, Config, MAX_RC_SIZE, RcFileExpression, RcLimitVariable, RcLimits,
+    RcParseState, RecipeAction, Statement,
 };
 use crate::runtime::RuntimeVariables;
+
+#[cfg(test)]
+use crate::config::{MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_STATEMENTS};
 
 pub const MAX_RC_FILE_COUNT: usize = 32;
 pub const MAX_RC_AGGREGATE_SIZE: usize = 4 * 1024 * 1024;
@@ -28,7 +31,7 @@ pub struct RcFileLoader {
     trusted_uid: u32,
     files_read: usize,
     bytes_read: usize,
-    parse_counts: RcParseCounts,
+    parse_state: RcParseState,
 }
 
 #[derive(Debug)]
@@ -72,7 +75,7 @@ impl RcFileLoader {
                 trusted_uid: metadata.uid(),
                 files_read: 1,
                 bytes_read: source_len,
-                parse_counts: RcParseCounts::default(),
+                parse_state: RcParseState::default(),
             },
             loaded,
         ))
@@ -156,10 +159,11 @@ impl RcFileLoader {
             return Ok(None);
         }
         let loaded = self.load(Path::new(&path), depth)?;
-        let config = config::parse(loaded.source()).map_err(|error| {
-            RcFileError::new(loaded.path(), format!("invalid rc syntax: {error}"))
-        })?;
-        self.account_config(loaded.path(), &config)?;
+        self.activate_runtime_limits(runtime, loaded.path())?;
+        let mut next_parse_state = self.parse_state;
+        let config = config::parse_with_state(loaded.source(), &mut next_parse_state)
+            .map_err(|error| parse_file_error(loaded.path(), error))?;
+        self.parse_state = next_parse_state;
         let config = config
             .expand_with_runtime_values(runtime.values())
             .map_err(|error| {
@@ -190,10 +194,11 @@ impl RcFileLoader {
             return Ok(None);
         }
         let loaded = self.load(Path::new(&path), depth)?;
-        let config = config::parse(loaded.source()).map_err(|error| {
-            RcFileError::new(loaded.path(), format!("invalid rc syntax: {error}"))
-        })?;
-        self.account_config(loaded.path(), &config)?;
+        self.activate_runtime_limits(runtime, loaded.path())?;
+        let mut next_parse_state = self.parse_state;
+        let config = config::parse_with_state(loaded.source(), &mut next_parse_state)
+            .map_err(|error| parse_file_error(loaded.path(), error))?;
+        self.parse_state = next_parse_state;
         let config = config
             .prepare_for_check(runtime.values())
             .map_err(|error| {
@@ -212,7 +217,51 @@ impl RcFileLoader {
     }
 
     pub fn account_root_config(&mut self, config: &Config) -> Result<(), RcFileError> {
-        self.account_config(Path::new("<root rc>"), config)
+        self.parse_state.counts = config.parse_counts();
+        self.parse_state.limits = RcLimits::default();
+        Ok(())
+    }
+
+    fn activate_runtime_limits(
+        &mut self,
+        runtime: &RuntimeVariables,
+        path: &Path,
+    ) -> Result<(), RcFileError> {
+        const LIMITS: [(&str, RcLimitVariable); 7] = [
+            ("LIMIT_MAX_ASSIGNMENTS", RcLimitVariable::Assignments),
+            ("LIMIT_RC_STATEMENTS", RcLimitVariable::Statements),
+            ("LIMIT_RC_RECIPES", RcLimitVariable::Recipes),
+            ("LIMIT_RC_CONDITIONS", RcLimitVariable::Conditions),
+            ("LIMIT_RC_REGEXES", RcLimitVariable::Regexes),
+            (
+                "LIMIT_RECIPE_CONDITIONS",
+                RcLimitVariable::ConditionsPerRecipe,
+            ),
+            ("LIMIT_RECIPE_NESTING", RcLimitVariable::NestingDepth),
+        ];
+        // Rebuild the active limits from assignments that have really run.
+        // Keeping the parser's final values would let an assignment after an
+        // include change how that earlier include is parsed.
+        let mut limits = RcLimits::default();
+        for (name, kind) in LIMITS {
+            let Some(value) = runtime.get(name) else {
+                continue;
+            };
+            let value = value.parse::<usize>().map_err(|_| {
+                RcFileError::new(
+                    path,
+                    format!("runtime {name} is not an unsigned decimal integer"),
+                )
+            })?;
+            if let Err(hard_limit) = limits.set(kind, value) {
+                return Err(RcFileError::limit(
+                    path,
+                    format!("runtime {name} exceeds the hard limit of {hard_limit}"),
+                ));
+            }
+        }
+        self.parse_state.limits = limits;
+        Ok(())
     }
 
     pub fn check_resolvable_files(&mut self, config: &Config) -> Result<Vec<String>, RcFileError> {
@@ -298,49 +347,6 @@ impl RcFileLoader {
         Ok(())
     }
 
-    fn account_config(&mut self, path: &Path, config: &Config) -> Result<(), RcFileError> {
-        let added = config.parse_counts();
-
-        // Calculate every total before updating the loader. A rejected file
-        // still consumes its file and byte budgets, but must not leave only a
-        // subset of the syntax counters changed.
-        let statements = add_parse_count(
-            path,
-            "statement",
-            self.parse_counts.statements,
-            added.statements,
-            MAX_RC_STATEMENTS,
-        )?;
-        let recipes = add_parse_count(
-            path,
-            "recipe",
-            self.parse_counts.recipes,
-            added.recipes,
-            MAX_RC_RECIPES,
-        )?;
-        let conditions = add_parse_count(
-            path,
-            "condition",
-            self.parse_counts.conditions,
-            added.conditions,
-            MAX_RC_CONDITIONS,
-        )?;
-        let regexes = add_parse_count(
-            path,
-            "regex",
-            self.parse_counts.regexes,
-            added.regexes,
-            MAX_RC_REGEXES,
-        )?;
-        self.parse_counts = RcParseCounts {
-            statements,
-            recipes,
-            conditions,
-            regexes,
-        };
-        Ok(())
-    }
-
     pub fn files_read(&self) -> usize {
         self.files_read
     }
@@ -354,6 +360,15 @@ impl RcFileLoader {
 struct RcCheckWarnings {
     messages: Vec<String>,
     omitted: usize,
+}
+
+fn parse_file_error(path: &Path, error: config::ParseError) -> RcFileError {
+    let message = format!("invalid rc syntax: {error}");
+    if error.is_resource_limit() {
+        RcFileError::limit(path, message)
+    } else {
+        RcFileError::new(path, message)
+    }
 }
 
 impl RcCheckWarnings {
@@ -386,25 +401,6 @@ impl RcCheckWarnings {
     }
 }
 
-fn add_parse_count(
-    path: &Path,
-    name: &str,
-    current: usize,
-    added: usize,
-    limit: usize,
-) -> Result<usize, RcFileError> {
-    let total = current
-        .checked_add(added)
-        .ok_or_else(|| RcFileError::limit(path, format!("aggregate rc {name} count overflows")))?;
-    if total > limit {
-        return Err(RcFileError::limit(
-            path,
-            format!("aggregate rc {name} count exceeds the hard limit of {limit}"),
-        ));
-    }
-    Ok(total)
-}
-
 fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &str)> {
     for statement in statements {
         match statement {
@@ -416,6 +412,7 @@ fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &st
                         | AssignmentTarget::Shell
                         | AssignmentTarget::ShellFlags
                         | AssignmentTarget::Path
+                        | AssignmentTarget::RcLimit(_)
                 ) =>
             {
                 return Err((assignment.line, assignment.name.as_str()));
@@ -774,10 +771,51 @@ mod tests {
             assert!(
                 error
                     .safe_message()
-                    .contains(&format!("aggregate rc {name} count exceeds")),
+                    .contains(&format!("rc {name} count exceeds the active limit")),
                 "{name}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn runtime_file_uses_limits_reached_before_its_include() {
+        let directory = TestDirectory::new();
+        let root = directory.path("root.rc");
+        let child = directory.path("child.rc");
+        let child_source = format!(
+            ":0 c\n{}maildir:x\n:0\n* extra\nmaildir:y\n",
+            "* pattern\n".repeat(MAX_RC_REGEXES)
+        );
+        fs::write(&root, "LIMIT_RC_REGEXES=257\n").unwrap();
+        fs::write(&child, child_source).unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+        let expression_config = config::parse(&format!("INCLUDERC={}\n", child.display())).unwrap();
+        let Statement::Include(expression) = &expression_config.statements[0] else {
+            panic!("expected include");
+        };
+
+        let (mut raised_loader, _) = RcFileLoader::for_root(&root).unwrap();
+        let root_config = config::parse("LIMIT_RC_REGEXES=257\n").unwrap();
+        raised_loader.account_root_config(&root_config).unwrap();
+        let mut raised_runtime = RuntimeVariables::default();
+        raised_runtime.set("LIMIT_RC_REGEXES".to_owned(), "257".to_owned());
+        assert!(
+            raised_loader
+                .load_config(expression, &raised_runtime, 1)
+                .is_ok()
+        );
+
+        let (mut default_loader, _) = RcFileLoader::for_root(&root).unwrap();
+        default_loader.account_root_config(&root_config).unwrap();
+        let error = default_loader
+            .load_config(expression, &RuntimeVariables::default(), 1)
+            .unwrap_err();
+        assert!(error.is_resource_limit());
+        assert!(
+            error
+                .safe_message()
+                .contains("rc regex count exceeds the active limit of 256")
+        );
     }
 
     #[test]

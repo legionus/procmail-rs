@@ -17,6 +17,17 @@ pub enum MessageLimitVariable {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcLimitVariable {
+    Assignments,
+    Statements,
+    Recipes,
+    Conditions,
+    Regexes,
+    ConditionsPerRecipe,
+    NestingDepth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignmentTarget {
     Maildir,
     LogFile,
@@ -29,6 +40,7 @@ pub enum AssignmentTarget {
     ExitCode,
     Host,
     MessageLimit(MessageLimitVariable),
+    RcLimit(RcLimitVariable),
     User,
 }
 
@@ -165,6 +177,27 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LIMIT_HEADER_FIELD" => VariablePolicy::RcOnly(AssignmentTarget::MessageLimit(
             MessageLimitVariable::HeaderFieldSize,
         )),
+        "LIMIT_MAX_ASSIGNMENTS" => {
+            VariablePolicy::RcOnly(AssignmentTarget::RcLimit(RcLimitVariable::Assignments))
+        }
+        "LIMIT_RC_STATEMENTS" => {
+            VariablePolicy::RcOnly(AssignmentTarget::RcLimit(RcLimitVariable::Statements))
+        }
+        "LIMIT_RC_RECIPES" => {
+            VariablePolicy::RcOnly(AssignmentTarget::RcLimit(RcLimitVariable::Recipes))
+        }
+        "LIMIT_RC_CONDITIONS" => {
+            VariablePolicy::RcOnly(AssignmentTarget::RcLimit(RcLimitVariable::Conditions))
+        }
+        "LIMIT_RC_REGEXES" => {
+            VariablePolicy::RcOnly(AssignmentTarget::RcLimit(RcLimitVariable::Regexes))
+        }
+        "LIMIT_RECIPE_CONDITIONS" => VariablePolicy::RcOnly(AssignmentTarget::RcLimit(
+            RcLimitVariable::ConditionsPerRecipe,
+        )),
+        "LIMIT_RECIPE_NESTING" => {
+            VariablePolicy::RcOnly(AssignmentTarget::RcLimit(RcLimitVariable::NestingDepth))
+        }
         _ => VariablePolicy::RcOrCommandLine(AssignmentTarget::User),
     }
 }
@@ -181,6 +214,7 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
         | AssignmentTarget::ExitCode
         | AssignmentTarget::Host
         | AssignmentTarget::MessageLimit(_)
+        | AssignmentTarget::RcLimit(_)
         | AssignmentTarget::User => MAX_ASSIGNMENT_VALUE_LEN,
     }
 }

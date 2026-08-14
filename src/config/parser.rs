@@ -6,49 +6,72 @@ use regex::bytes::RegexBuilder;
 use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaseMode, ChildStatusMode, Condition,
     ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination,
-    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE,
-    MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_CONDITIONS, MAX_RC_RECIPES,
-    MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_CAPTURES,
-    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression,
-    PipeAction, RcFileExpression, Recipe, RecipeAction, RecipeOptions, RegexCondition, Statement,
-    VariableSource, WriteErrorMode, variable_policy,
+    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_PATH_EXPRESSION_LEN,
+    MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE,
+    MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression, PipeAction, RcFileExpression,
+    RcLimits, RcParseCounts, RcParseState, Recipe, RecipeAction, RecipeOptions, RegexCondition,
+    Statement, VariableSource, WriteErrorMode, variable_policy,
+};
+
+#[cfg(test)]
+use super::{
+    HARD_MAX_CONDITIONS_PER_RECIPE, HARD_MAX_RC_ASSIGNMENTS, HARD_MAX_RC_CONDITIONS,
+    HARD_MAX_RC_RECIPES, HARD_MAX_RC_REGEXES, HARD_MAX_RC_STATEMENTS,
+    HARD_MAX_RECIPE_NESTING_DEPTH, MAX_CONDITIONS_PER_RECIPE, MAX_RC_CONDITIONS, MAX_RC_RECIPES,
+    MAX_RC_REGEXES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
+    let mut state = RcParseState::default();
+    parse_with_state(input, &mut state)
+}
+
+pub(crate) fn parse_with_state(
+    input: &str,
+    state: &mut RcParseState,
+) -> Result<Config, ParseError> {
     if input.len() > MAX_RC_SIZE {
-        return Err(ParseError::new(
+        return Err(ParseError::limit(
             1,
             format!("rc file exceeds the hard limit of {MAX_RC_SIZE} bytes"),
         ));
     }
 
     let lines: Vec<&str> = input.lines().collect();
-    let mut counts = ParseCounts::default();
-    let (statements, _) = parse_statements(&lines, 0, 0, &mut counts)?;
+    let initial = state.counts;
+    let (statements, _) = parse_statements(&lines, 0, 0, state)?;
 
     Ok(Config {
         statements,
         initial_variables: Vec::new(),
-        parse_counts: counts.into(),
+        parse_counts: state.counts.subtract(initial)?,
     })
 }
 
-#[derive(Default)]
-struct ParseCounts {
-    statements: usize,
-    recipes: usize,
-    conditions: usize,
-    regexes: usize,
-}
-
-impl From<ParseCounts> for super::RcParseCounts {
-    fn from(counts: ParseCounts) -> Self {
-        Self {
-            statements: counts.statements,
-            recipes: counts.recipes,
-            conditions: counts.conditions,
-            regexes: counts.regexes,
-        }
+impl RcParseCounts {
+    fn subtract(self, earlier: Self) -> Result<Self, ParseError> {
+        Ok(Self {
+            assignments: self
+                .assignments
+                .checked_sub(earlier.assignments)
+                .ok_or_else(|| ParseError::new(1, "rc assignment count moved backwards"))?,
+            statements: self
+                .statements
+                .checked_sub(earlier.statements)
+                .ok_or_else(|| ParseError::new(1, "rc statement count moved backwards"))?,
+            recipes: self
+                .recipes
+                .checked_sub(earlier.recipes)
+                .ok_or_else(|| ParseError::new(1, "rc recipe count moved backwards"))?,
+            conditions: self
+                .conditions
+                .checked_sub(earlier.conditions)
+                .ok_or_else(|| ParseError::new(1, "rc condition count moved backwards"))?,
+            regexes: self
+                .regexes
+                .checked_sub(earlier.regexes)
+                .ok_or_else(|| ParseError::new(1, "rc regex count moved backwards"))?,
+        })
     }
 }
 
@@ -56,7 +79,7 @@ fn parse_statements(
     lines: &[&str],
     mut index: usize,
     depth: usize,
-    counts: &mut ParseCounts,
+    state: &mut RcParseState,
 ) -> Result<(Vec<Statement>, usize), ParseError> {
     let mut statements = Vec::new();
     while index < lines.len() {
@@ -78,32 +101,52 @@ fn parse_statements(
             return Ok((statements, index + 1));
         }
 
-        check_statement_limit(counts.statements, line_number)?;
+        check_count_limit(
+            state.counts.statements,
+            state.limits.statements,
+            line_number,
+            "statement",
+        )?;
 
         if line.starts_with(':') {
-            check_recipe_limit(counts.recipes, line_number)?;
-            counts.recipes = counts
+            check_count_limit(
+                state.counts.recipes,
+                state.limits.recipes,
+                line_number,
+                "recipe",
+            )?;
+            state.counts.recipes = state
+                .counts
                 .recipes
                 .checked_add(1)
                 .ok_or_else(|| ParseError::new(line_number, "rc recipe count overflows"))?;
-            counts.statements = counts
+            state.counts.statements = state
+                .counts
                 .statements
                 .checked_add(1)
                 .ok_or_else(|| ParseError::new(line_number, "rc statement count overflows"))?;
-            let (recipe, next) = parse_recipe(
-                lines,
-                index,
-                depth,
-                counts.conditions,
-                counts.regexes,
-                counts,
-            )?;
+            let (recipe, next) = parse_recipe(lines, index, depth, state)?;
             statements.push(Statement::Recipe(recipe));
             index = next;
             continue;
         }
 
         if let Some(assignment) = parse_assignment(line, line_number)? {
+            check_count_limit(
+                state.counts.assignments,
+                state.limits.assignments,
+                line_number,
+                "assignment",
+            )?;
+            if depth != 0 && matches!(assignment.target, AssignmentTarget::RcLimit(_)) {
+                return Err(ParseError::new(
+                    line_number,
+                    format!(
+                        "variable {} cannot be assigned inside a recipe block",
+                        assignment.name
+                    ),
+                ));
+            }
             let statement = match assignment.name.as_str() {
                 "INCLUDERC" => Statement::Include(RcFileExpression {
                     line: assignment.line,
@@ -117,11 +160,20 @@ fn parse_statements(
                 }),
                 _ => Statement::Assignment(assignment),
             };
-            statements.push(statement);
-            counts.statements = counts
+            state.counts.assignments = state
+                .counts
+                .assignments
+                .checked_add(1)
+                .ok_or_else(|| ParseError::new(line_number, "rc assignment count overflows"))?;
+            state.counts.statements = state
+                .counts
                 .statements
                 .checked_add(1)
                 .ok_or_else(|| ParseError::new(line_number, "rc statement count overflows"))?;
+            if let Statement::Assignment(assignment) = &statement {
+                apply_rc_limit(assignment, &mut state.limits)?;
+            }
+            statements.push(statement);
             index += 1;
             continue;
         }
@@ -141,21 +193,35 @@ fn parse_statements(
     Ok((statements, index))
 }
 
-fn check_recipe_limit(count: usize, line: usize) -> Result<(), ParseError> {
-    if count >= MAX_RC_RECIPES {
-        return Err(ParseError::new(
+fn check_count_limit(
+    count: usize,
+    limit: usize,
+    line: usize,
+    name: &str,
+) -> Result<(), ParseError> {
+    if count >= limit {
+        return Err(ParseError::limit(
             line,
-            format!("rc recipe count exceeds the hard limit of {MAX_RC_RECIPES}"),
+            format!("rc {name} count exceeds the active limit of {limit}"),
         ));
     }
     Ok(())
 }
 
-fn check_statement_limit(count: usize, line: usize) -> Result<(), ParseError> {
-    if count >= MAX_RC_STATEMENTS {
-        return Err(ParseError::new(
-            line,
-            format!("rc statement count exceeds the hard limit of {MAX_RC_STATEMENTS}"),
+fn apply_rc_limit(assignment: &Assignment, limits: &mut RcLimits) -> Result<(), ParseError> {
+    let AssignmentTarget::RcLimit(kind) = assignment.target else {
+        return Ok(());
+    };
+    let value = assignment.value.parse::<usize>().map_err(|_| {
+        ParseError::new(
+            assignment.line,
+            format!("{} must be an unsigned decimal integer", assignment.name),
+        )
+    })?;
+    if let Err(hard_limit) = limits.set(kind, value) {
+        return Err(ParseError::limit(
+            assignment.line,
+            format!("{} exceeds the hard limit of {hard_limit}", assignment.name),
         ));
     }
     Ok(())
@@ -231,9 +297,7 @@ fn parse_recipe(
     lines: &[&str],
     start: usize,
     depth: usize,
-    prior_conditions: usize,
-    prior_regexes: usize,
-    counts: &mut ParseCounts,
+    state: &mut RcParseState,
 ) -> Result<(Recipe, usize), ParseError> {
     let header = lines[start].trim();
     let rest = header
@@ -255,13 +319,14 @@ fn parse_recipe(
             // or compile a regular expression. The local and file-wide
             // budgets are separate because either shape can make later plan
             // construction disproportionately expensive.
-            check_condition_limits(conditions.len(), prior_conditions, index + 1)?;
+            check_condition_limits(conditions.len(), state, index + 1)?;
             let (condition, is_regex) = parse_condition(
                 condition,
                 index + 1,
                 options.case_mode == CaseMode::Sensitive,
-                prior_regexes,
+                state.counts.regexes,
                 regex_count,
+                state.limits.regexes,
             )?;
             conditions.push(condition);
             regex_count = regex_count
@@ -281,11 +346,13 @@ fn parse_recipe(
     // Charge the parent recipe before descending into a block so nested
     // parsing cannot temporarily hide conditions or regexes from file-wide
     // limits.
-    counts.conditions = counts
+    state.counts.conditions = state
+        .counts
         .conditions
         .checked_add(conditions.len())
         .ok_or_else(|| ParseError::new(start + 1, "rc condition count overflows"))?;
-    counts.regexes = counts
+    state.counts.regexes = state
+        .counts
         .regexes
         .checked_add(regex_count)
         .ok_or_else(|| ParseError::new(start + 1, "rc regex count overflows"))?;
@@ -330,11 +397,12 @@ fn parse_recipe(
         let next_depth = depth
             .checked_add(1)
             .ok_or_else(|| ParseError::new(index + 1, "recipe nesting depth overflows"))?;
-        if next_depth > MAX_RECIPE_NESTING_DEPTH {
-            return Err(ParseError::new(
+        if next_depth > state.limits.nesting_depth {
+            return Err(ParseError::limit(
                 index + 1,
                 format!(
-                    "recipe nesting depth {next_depth} exceeds the hard limit of {MAX_RECIPE_NESTING_DEPTH}"
+                    "recipe nesting depth {next_depth} exceeds the active limit of {}",
+                    state.limits.nesting_depth
                 ),
             ));
         }
@@ -350,7 +418,7 @@ fn parse_recipe(
                 "copy flag 'c' on recipe blocks is not supported yet",
             ));
         }
-        let (statements, next) = parse_statements(lines, index + 1, next_depth, counts)?;
+        let (statements, next) = parse_statements(lines, index + 1, next_depth, state)?;
         (RecipeAction::Block(statements), next)
     } else if action.starts_with('{') {
         return Err(ParseError::new(
@@ -434,7 +502,7 @@ fn parse_pipe_command(lines: &[&str], start: usize) -> Result<(String, usize), P
             .checked_add(added)
             .ok_or_else(|| ParseError::new(start + 1, "pipe command size overflows"))?;
         if new_len > MAX_PIPE_COMMAND_LEN {
-            return Err(ParseError::new(
+            return Err(ParseError::limit(
                 start + 1,
                 format!("pipe command exceeds the hard limit of {MAX_PIPE_COMMAND_LEN} bytes"),
             ));
@@ -463,22 +531,30 @@ fn parse_pipe_command(lines: &[&str], start: usize) -> Result<(String, usize), P
 
 fn check_condition_limits(
     recipe_count: usize,
-    prior_conditions: usize,
+    state: &RcParseState,
     line: usize,
 ) -> Result<(), ParseError> {
-    if recipe_count >= MAX_CONDITIONS_PER_RECIPE {
-        return Err(ParseError::new(
+    if recipe_count >= state.limits.conditions_per_recipe {
+        return Err(ParseError::limit(
             line,
-            format!("recipe condition count exceeds the hard limit of {MAX_CONDITIONS_PER_RECIPE}"),
+            format!(
+                "recipe condition count exceeds the active limit of {}",
+                state.limits.conditions_per_recipe
+            ),
         ));
     }
-    let total = prior_conditions
+    let total = state
+        .counts
+        .conditions
         .checked_add(recipe_count)
         .ok_or_else(|| ParseError::new(line, "rc condition count overflows"))?;
-    if total >= MAX_RC_CONDITIONS {
-        return Err(ParseError::new(
+    if total >= state.limits.conditions {
+        return Err(ParseError::limit(
             line,
-            format!("rc condition count exceeds the hard limit of {MAX_RC_CONDITIONS}"),
+            format!(
+                "rc condition count exceeds the active limit of {}",
+                state.limits.conditions
+            ),
         ));
     }
     Ok(())
@@ -601,6 +677,7 @@ fn parse_condition(
     case_sensitive: bool,
     prior_regexes: usize,
     recipe_regexes: usize,
+    regex_limit: usize,
 ) -> Result<(Condition, bool), ParseError> {
     let mut input = input.trim();
     let mut negated = false;
@@ -621,10 +698,10 @@ fn parse_condition(
         let total_regexes = prior_regexes
             .checked_add(recipe_regexes)
             .ok_or_else(|| ParseError::new(line, "rc regex count overflows"))?;
-        if total_regexes >= MAX_RC_REGEXES {
-            return Err(ParseError::new(
+        if total_regexes >= regex_limit {
+            return Err(ParseError::limit(
                 line,
-                format!("rc regex count exceeds the hard limit of {MAX_RC_REGEXES}"),
+                format!("rc regex count exceeds the active limit of {regex_limit}"),
             ));
         }
         let (target, pattern) = condition_regex_target(input, line)?;
@@ -970,6 +1047,133 @@ mod tests {
     }
 
     #[test]
+    fn rc_limits_change_only_following_syntax() {
+        let raised = format!(
+            "LIMIT_RC_REGEXES={}\n{}",
+            MAX_RC_REGEXES + 1,
+            config_with_regexes(MAX_RC_REGEXES + 1)
+        );
+        assert!(parse(&raised).is_ok());
+
+        let lowered = "LIMIT_RC_RECIPES=0\n:0\ninbox/\n";
+        let error = parse(lowered).unwrap_err();
+        assert_eq!(error.line, 2);
+        assert_eq!(
+            error.message,
+            "rc recipe count exceeds the active limit of 0"
+        );
+
+        let late_raise = format!(
+            "{}LIMIT_RC_REGEXES={}\n",
+            config_with_regexes(MAX_RC_REGEXES + 1),
+            MAX_RC_REGEXES + 1
+        );
+        assert_eq!(
+            parse(&late_raise).unwrap_err().message,
+            format!("rc regex count exceeds the active limit of {MAX_RC_REGEXES}")
+        );
+    }
+
+    #[test]
+    fn zero_assignment_limit_prevents_further_limit_changes() {
+        let error = parse("LIMIT_MAX_ASSIGNMENTS=0\nLIMIT_RC_RECIPES=10\n").unwrap_err();
+
+        assert_eq!(error.line, 2);
+        assert_eq!(
+            error.message,
+            "rc assignment count exceeds the active limit of 0"
+        );
+    }
+
+    #[test]
+    fn every_structural_limit_rejects_the_next_matching_item() {
+        let cases = [
+            (
+                "LIMIT_RC_STATEMENTS=1\nA=1\n",
+                2,
+                "rc statement count exceeds the active limit of 1",
+            ),
+            (
+                "LIMIT_RC_CONDITIONS=0\n:0\n* < 1\ninbox/\n",
+                3,
+                "rc condition count exceeds the active limit of 0",
+            ),
+            (
+                "LIMIT_RC_REGEXES=0\n:0\n* pattern\ninbox/\n",
+                3,
+                "rc regex count exceeds the active limit of 0",
+            ),
+            (
+                "LIMIT_RECIPE_CONDITIONS=0\n:0\n* < 1\ninbox/\n",
+                3,
+                "recipe condition count exceeds the active limit of 0",
+            ),
+            (
+                "LIMIT_RECIPE_NESTING=0\n:0\n{\n}\n",
+                3,
+                "recipe nesting depth 1 exceeds the active limit of 0",
+            ),
+        ];
+
+        for (source, line, message) in cases {
+            let error = parse(source).unwrap_err();
+            assert_eq!(error.line, line, "source: {source:?}");
+            assert_eq!(error.message, message, "source: {source:?}");
+        }
+    }
+
+    #[test]
+    fn lowering_below_the_used_count_fails_on_the_next_item() {
+        let error = parse(":0 c\ninbox/\nLIMIT_RC_RECIPES=0\n:0\ninbox/\n").unwrap_err();
+
+        assert_eq!(error.line, 4);
+        assert_eq!(
+            error.message,
+            "rc recipe count exceeds the active limit of 0"
+        );
+    }
+
+    #[test]
+    fn rejects_rc_limit_assignments_inside_recipe_blocks() {
+        let error = parse(":0\n{\nLIMIT_RC_REGEXES=100\n}\n").unwrap_err();
+
+        assert_eq!(error.line, 3);
+        assert_eq!(
+            error.message,
+            "variable LIMIT_RC_REGEXES cannot be assigned inside a recipe block"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_and_excessive_rc_limits() {
+        let invalid = parse("LIMIT_RC_RECIPES=1k\n").unwrap_err();
+        assert_eq!(invalid.line, 1);
+        assert_eq!(
+            invalid.message,
+            "LIMIT_RC_RECIPES must be an unsigned decimal integer"
+        );
+
+        let cases = [
+            ("LIMIT_MAX_ASSIGNMENTS", HARD_MAX_RC_ASSIGNMENTS),
+            ("LIMIT_RC_STATEMENTS", HARD_MAX_RC_STATEMENTS),
+            ("LIMIT_RC_RECIPES", HARD_MAX_RC_RECIPES),
+            ("LIMIT_RC_CONDITIONS", HARD_MAX_RC_CONDITIONS),
+            ("LIMIT_RC_REGEXES", HARD_MAX_RC_REGEXES),
+            ("LIMIT_RECIPE_CONDITIONS", HARD_MAX_CONDITIONS_PER_RECIPE),
+            ("LIMIT_RECIPE_NESTING", HARD_MAX_RECIPE_NESTING_DEPTH),
+        ];
+        for (name, hard_limit) in cases {
+            let error = parse(&format!("{name}={}\n", hard_limit + 1)).unwrap_err();
+            assert_eq!(error.line, 1, "limit: {name}");
+            assert_eq!(
+                error.message,
+                format!("{name} exceeds the hard limit of {hard_limit}"),
+                "limit: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_bare_host_as_an_empty_assignment() {
         let config = parse("HOST\n").unwrap();
         let Statement::Assignment(assignment) = &config.statements[0] else {
@@ -1138,7 +1342,7 @@ mod tests {
                 assert_eq!(
                     error.message,
                     format!(
-                        "recipe nesting depth {depth} exceeds the hard limit of {MAX_RECIPE_NESTING_DEPTH}"
+                        "recipe nesting depth {depth} exceeds the active limit of {MAX_RECIPE_NESTING_DEPTH}"
                     )
                 );
             }
@@ -1405,20 +1609,31 @@ mod tests {
     #[test]
     fn enforces_regex_count_at_the_boundary() {
         for count in [MAX_RC_REGEXES - 1, MAX_RC_REGEXES, MAX_RC_REGEXES + 1] {
-            let source = format!(":0\n{}inbox/\n", "* pattern\n".repeat(count));
+            let source = config_with_regexes(count);
             let result = parse(&source);
 
             if count <= MAX_RC_REGEXES {
                 assert!(result.is_ok());
             } else {
                 let error = result.unwrap_err();
-                assert_eq!(error.line, MAX_RC_REGEXES + 2);
                 assert_eq!(
                     error.message,
-                    format!("rc regex count exceeds the hard limit of {MAX_RC_REGEXES}")
+                    format!("rc regex count exceeds the active limit of {MAX_RC_REGEXES}")
                 );
             }
         }
+    }
+
+    fn config_with_regexes(mut count: usize) -> String {
+        let mut source = String::new();
+        while count > 0 {
+            let recipe_regexes = count.min(MAX_CONDITIONS_PER_RECIPE);
+            source.push_str(":0 c\n");
+            source.push_str(&"* pattern\n".repeat(recipe_regexes));
+            source.push_str("inbox/\n");
+            count -= recipe_regexes;
+        }
+        source
     }
 
     #[test]
@@ -1440,7 +1655,7 @@ mod tests {
         assert_eq!(error.line, MAX_RC_REGEXES * 3 + 2);
         assert_eq!(
             error.message,
-            format!("rc regex count exceeds the hard limit of {MAX_RC_REGEXES}")
+            format!("rc regex count exceeds the active limit of {MAX_RC_REGEXES}")
         );
     }
 
@@ -1646,7 +1861,7 @@ mod tests {
                 assert_eq!(error.line, MAX_RC_STATEMENTS + 1);
                 assert_eq!(
                     error.message,
-                    format!("rc statement count exceeds the hard limit of {MAX_RC_STATEMENTS}")
+                    format!("rc statement count exceeds the active limit of {MAX_RC_STATEMENTS}")
                 );
             }
         }
@@ -1673,7 +1888,7 @@ mod tests {
                 assert_eq!(error.line, 2 * MAX_RC_RECIPES + 1);
                 assert_eq!(
                     error.message,
-                    format!("rc recipe count exceeds the hard limit of {MAX_RC_RECIPES}")
+                    format!("rc recipe count exceeds the active limit of {MAX_RC_RECIPES}")
                 );
             }
         }
@@ -1709,7 +1924,7 @@ mod tests {
                 assert_eq!(
                     error.message,
                     format!(
-                        "recipe condition count exceeds the hard limit of {MAX_CONDITIONS_PER_RECIPE}"
+                        "recipe condition count exceeds the active limit of {MAX_CONDITIONS_PER_RECIPE}"
                     )
                 );
             }
@@ -1735,7 +1950,7 @@ mod tests {
                 assert_eq!(error.line, expected_line);
                 assert_eq!(
                     error.message,
-                    format!("rc condition count exceeds the hard limit of {MAX_RC_CONDITIONS}")
+                    format!("rc condition count exceeds the active limit of {MAX_RC_CONDITIONS}")
                 );
             }
         }
