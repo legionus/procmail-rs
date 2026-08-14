@@ -109,6 +109,155 @@ fn filter_executes_header_only_include_and_returns_to_caller() {
 }
 
 #[test]
+fn header_only_runtime_include_does_not_touch_staging() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    let staging = mailbase.join(".procmail-rs-staging");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    fs::create_dir(&staging).unwrap();
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o777)).unwrap();
+    let child_rc = mailbase.join("header.rc");
+    fs::write(&child_rc, ":0\n* ^Subject: selected$\nmaildir:selected\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!("MAILDIR={}\nINCLUDERC=header.rc\n", mailbase.display()),
+    )
+    .unwrap();
+    let input = b"Subject: selected\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [input.to_vec()]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn body_runtime_include_touches_staging_only_when_selected() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    let fallback = mailbase.join("fallback");
+    let staging = mailbase.join(".procmail-rs-staging");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    create_maildir(&fallback);
+    fs::create_dir(&staging).unwrap();
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o777)).unwrap();
+    let child_rc = mailbase.join("body.rc");
+    fs::write(&child_rc, ":0 B\n* needle\nmaildir:selected\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n* ^X-Use-Body: yes$\n{{\nINCLUDERC=body.rc\n}}\n:0\nmaildir:fallback\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+
+    let ordinary = b"Subject: ordinary\n\nneedle";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(ordinary).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&fallback), [ordinary.to_vec()]);
+
+    let selected_input = b"X-Use-Body: yes\n\nneedle";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(selected_input)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(75), "{:?}", output.stderr);
+    assert!(delivered_messages(&selected).is_empty());
+    assert_eq!(delivered_messages(&fallback), [ordinary.to_vec()]);
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("must not grant access to group or other users")
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn runtime_include_copy_waits_for_later_body_validation() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let copy = base.join("copy");
+    let final_maildir = base.join("final");
+    create_maildir(&base.join("mailbase"));
+    create_maildir(&copy);
+    create_maildir(&final_maildir);
+    let child_rc = base.join("mailbase/copy.rc");
+    fs::write(
+        &child_rc,
+        format!(":0 c\n* ^Subject: selected$\nmaildir:{}\n", copy.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nLIMIT_MSG_BODY=3\nINCLUDERC=copy.rc\n:0 B\n* body\nmaildir:{}\n",
+            base.join("mailbase").display(),
+            final_maildir.display()
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: selected\n\nbody")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(65), "{:?}", output.stderr);
+    assert!(delivered_messages(&copy).is_empty());
+    assert!(delivered_messages(&final_maildir).is_empty());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn relative_include_and_switch_use_the_process_working_directory() {
     let path = config_file("");
     let base = path.parent().unwrap();

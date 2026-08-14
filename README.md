@@ -101,6 +101,25 @@ user, or a final symlink will therefore be rejected by `procmail-rs`. A failed
 runtime include or switch is diagnosed and follows the documented procmail
 recovery behavior; resource-limit failures remain fatal.
 
+## Message input and staging
+
+`filter` first reads only the bounded header section. Runtime assignments,
+`INCLUDERC`, `SWITCHRC`, and header conditions execute while standard input
+remains positioned at the body. If this produces a final header-only delivery
+plan, the body is streamed directly from standard input to the selected sinks
+without creating a staging file.
+
+An executed body or whole-message condition, a final-size test, mbox delivery,
+or an order-dependent action requires a replayable message. In that case the
+complete bounded input is written to private staging under the `MAILDIR` active
+at the point where evaluation is deferred. A runtime rc file that is never
+selected cannot by itself trigger staging.
+
+When a copy destination is selected before a later rule needs the body, the
+copy and staging file receive the same input pass but remain private until the
+body has been read and validated. An input-limit or write failure therefore
+cannot publish that early copy.
+
 ## Mbox format
 
 Mbox delivery writes the **mboxrd** on-disk format, using the reversible
