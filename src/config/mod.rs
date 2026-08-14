@@ -47,6 +47,13 @@ impl Config {
         expand::expand(self, supplied)
     }
 
+    pub(crate) fn expand_with_runtime_values<'a>(
+        self,
+        values: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, ExpansionError> {
+        expand::expand_with_runtime_values(self, values)
+    }
+
     pub fn maildir(&self) -> Option<&str> {
         self.statements
             .iter()

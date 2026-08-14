@@ -25,6 +25,12 @@ impl RuntimeVariables {
         self.values.get(name).map(String::as_str)
     }
 
+    pub(crate) fn values(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+
     pub(crate) fn clear_match_values(&mut self) {
         self.values.retain(|name, _| {
             name != "MATCH"

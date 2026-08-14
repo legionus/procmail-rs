@@ -7,8 +7,9 @@ use std::path::Path;
 
 use super::{
     Assignment, AssignmentTarget, Config, Destination, ExpansionExpression, ExpansionPart,
-    MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression, Recipe,
-    RecipeAction, Statement, SuppliedVariable, VariablePolicy, variable_policy,
+    MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression,
+    RcFileExpression, Recipe, RecipeAction, Statement, SuppliedVariable, VariablePolicy,
+    variable_policy,
 };
 
 #[derive(Debug, Clone)]
@@ -63,6 +64,36 @@ impl Assignment {
         let base = lookup("MAILDIR");
         let value = resolve_relative_path(&value, base.as_deref(), self.line)?;
         validate_filesystem_path(&value, self.line, "MAILDIR", true)?;
+        Ok(value)
+    }
+}
+
+impl RcFileExpression {
+    pub(crate) fn resolve_with(
+        &self,
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<String, ExpansionError> {
+        let parsed;
+        let expression = if let Some(expression) = self.expansion.as_ref() {
+            expression
+        } else {
+            parsed = parse_expression(&self.value, self.line)?;
+            &parsed
+        };
+        let value = evaluate_expression(
+            expression,
+            self.line,
+            MAX_PATH_EXPRESSION_LEN,
+            &mut lookup,
+            0,
+        )?
+        .text;
+        if value.is_empty() {
+            return Ok(value);
+        }
+        let base = lookup("MAILDIR");
+        let value = resolve_relative_path(&value, base.as_deref(), self.line)?;
+        validate_filesystem_path(&value, self.line, "rc file", false)?;
         Ok(value)
     }
 }
@@ -152,7 +183,7 @@ impl Destination {
 }
 
 pub(super) fn expand(
-    mut config: Config,
+    config: Config,
     supplied: &[SuppliedVariable],
 ) -> Result<Config, ExpansionError> {
     let mut variables = BTreeMap::<String, ExpandedValue>::new();
@@ -162,6 +193,32 @@ pub(super) fn expand(
         initial_variables.push((variable.name().to_owned(), value.text.clone()));
         variables.insert(variable.name().to_owned(), value);
     }
+    expand_config(config, variables, initial_variables)
+}
+
+pub(super) fn expand_with_runtime_values<'a>(
+    config: Config,
+    values: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Result<Config, ExpansionError> {
+    let variables = values
+        .map(|(name, value)| {
+            (
+                name.to_owned(),
+                ExpandedValue {
+                    text: value.to_owned(),
+                    depth: 0,
+                },
+            )
+        })
+        .collect();
+    expand_config(config, variables, Vec::new())
+}
+
+fn expand_config(
+    mut config: Config,
+    mut variables: BTreeMap<String, ExpandedValue>,
+    initial_variables: Vec<(String, String)>,
+) -> Result<Config, ExpansionError> {
     config.initial_variables = initial_variables;
     let mut maildir: Option<String> = None;
 

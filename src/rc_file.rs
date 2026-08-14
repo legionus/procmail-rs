@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use rustix::fd::OwnedFd;
 use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 
-use crate::config::MAX_RC_SIZE;
+use crate::config::{self, Config, MAX_RC_SIZE, RcFileExpression};
+use crate::runtime::RuntimeVariables;
 
 pub const MAX_RC_FILE_COUNT: usize = 32;
 pub const MAX_RC_AGGREGATE_SIZE: usize = 4 * 1024 * 1024;
@@ -29,6 +30,12 @@ pub struct RcFileLoader {
 pub struct LoadedRcFile {
     path: PathBuf,
     source: String,
+}
+
+#[derive(Debug)]
+pub struct LoadedRcConfig {
+    path: PathBuf,
+    config: Config,
 }
 
 #[derive(Debug)]
@@ -129,6 +136,33 @@ impl RcFileLoader {
         })
     }
 
+    pub fn load_config(
+        &mut self,
+        expression: &RcFileExpression,
+        runtime: &RuntimeVariables,
+        depth: usize,
+    ) -> Result<Option<LoadedRcConfig>, RcFileError> {
+        let path = expression
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .map_err(|error| RcFileError::new(Path::new("<runtime rc path>"), error.to_string()))?;
+        if path.is_empty() {
+            return Ok(None);
+        }
+        let loaded = self.load(Path::new(&path), depth)?;
+        let config = config::parse(loaded.source()).map_err(|error| {
+            RcFileError::new(loaded.path(), format!("invalid rc syntax: {error}"))
+        })?;
+        let config = config
+            .expand_with_runtime_values(runtime.values())
+            .map_err(|error| {
+                RcFileError::new(loaded.path(), format!("cannot expand rc file: {error}"))
+            })?;
+        Ok(Some(LoadedRcConfig {
+            path: loaded.path,
+            config,
+        }))
+    }
+
     pub fn files_read(&self) -> usize {
         self.files_read
     }
@@ -145,6 +179,20 @@ impl LoadedRcFile {
 
     pub fn source(&self) -> &str {
         &self.source
+    }
+}
+
+impl LoadedRcConfig {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn into_config(self) -> Config {
+        self.config
     }
 }
 
@@ -315,5 +363,35 @@ mod tests {
         assert!(error.to_string().contains("not valid UTF-8"));
         assert_eq!(loader.files_read(), 2);
         assert_eq!(loader.bytes_read(), 10);
+    }
+
+    #[test]
+    fn resolves_runtime_include_path_and_expands_child_with_current_values() {
+        let directory = TestDirectory::new();
+        let root = directory.path("root.rc");
+        let child = directory.path("child.rc");
+        fs::write(&root, "ROOT=yes\n").unwrap();
+        fs::write(&child, "CHILD=$PARENT\n").unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+        let (mut loader, _) = RcFileLoader::for_root(&root).unwrap();
+        let parsed = config::parse("INCLUDERC=$SELECTED\n").unwrap();
+        let config::Statement::Include(expression) = &parsed.statements[0] else {
+            panic!("expected include");
+        };
+        let mut runtime = RuntimeVariables::default();
+        runtime.set("MAILDIR", directory.0.to_string_lossy());
+        runtime.set("SELECTED", "child.rc");
+        runtime.set("PARENT", "visible");
+
+        let loaded = loader
+            .load_config(expression, &runtime, 1)
+            .unwrap()
+            .unwrap();
+        let config::Statement::Assignment(assignment) = &loaded.config().statements[0] else {
+            panic!("expected assignment");
+        };
+
+        assert_eq!(loaded.path(), child);
+        assert_eq!(assignment.value, "visible");
     }
 }
