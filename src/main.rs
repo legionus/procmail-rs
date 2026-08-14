@@ -121,7 +121,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), OperationalError> {
     let command = parse_args().map_err(OperationalError::Configuration)?;
     let path = &command.config;
-    let (_rc_loader, root_rc) = RcFileLoader::for_root(path)
+    let (rc_loader, root_rc) = RcFileLoader::for_root(path)
         .map_err(|error| OperationalError::Configuration(error.to_string()))?;
     let config = config::parse(root_rc.source())
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
@@ -137,7 +137,7 @@ fn run() -> Result<(), OperationalError> {
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let durability = Durability::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile_with_loader(&config, rc_loader);
     let _trace_config = TraceConfig::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
 
@@ -179,12 +179,16 @@ fn run() -> Result<(), OperationalError> {
                     &mut trace,
                 ),
                 HeaderEvaluation::NeedsMessage(continuation) => {
-                    let staging_directory = staging_directory.as_deref().ok_or_else(|| {
-                        OperationalError::Internal(
-                            "internal error: deferred evaluation has no staging directory"
-                                .to_owned(),
-                        )
-                    })?;
+                    let runtime_staging = runtime.get("MAILDIR").map(PathBuf::from);
+                    let staging_directory = runtime_staging
+                        .as_deref()
+                        .or(staging_directory.as_deref())
+                        .ok_or_else(|| {
+                            OperationalError::Internal(
+                                "internal error: deferred evaluation has no staging directory"
+                                    .to_owned(),
+                            )
+                        })?;
                     deliver_staged(
                         head,
                         &mut stdin,

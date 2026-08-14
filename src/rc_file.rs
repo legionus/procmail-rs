@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use rustix::fd::OwnedFd;
 use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 
-use crate::config::{self, Config, MAX_RC_SIZE, RcFileExpression};
+use crate::config::{
+    self, AssignmentTarget, Config, MAX_RC_SIZE, RcFileExpression, RecipeAction, Statement,
+};
 use crate::runtime::RuntimeVariables;
 
 pub const MAX_RC_FILE_COUNT: usize = 32;
@@ -157,6 +159,12 @@ impl RcFileLoader {
             .map_err(|error| {
                 RcFileError::new(loaded.path(), format!("cannot expand rc file: {error}"))
             })?;
+        validate_runtime_settings(&config.statements).map_err(|(line, name)| {
+            RcFileError::new(
+                loaded.path(),
+                format!("line {line}: {name} must be set before message processing begins"),
+            )
+        })?;
         Ok(Some(LoadedRcConfig {
             path: loaded.path,
             config,
@@ -170,6 +178,28 @@ impl RcFileLoader {
     pub fn bytes_read(&self) -> usize {
         self.bytes_read
     }
+}
+
+fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &str)> {
+    for statement in statements {
+        match statement {
+            Statement::Assignment(assignment)
+                if !matches!(
+                    assignment.target,
+                    AssignmentTarget::User | AssignmentTarget::Maildir
+                ) =>
+            {
+                return Err((assignment.line, assignment.name.as_str()));
+            }
+            Statement::Recipe(recipe) => {
+                if let RecipeAction::Block(children) = &recipe.action {
+                    validate_runtime_settings(children)?;
+                }
+            }
+            Statement::Assignment(_) | Statement::Include(_) | Statement::Switch(_) => {}
+        }
+    }
+    Ok(())
 }
 
 impl LoadedRcFile {
@@ -393,5 +423,26 @@ mod tests {
 
         assert_eq!(loaded.path(), child);
         assert_eq!(assignment.value, "visible");
+    }
+
+    #[test]
+    fn rejects_runtime_include_that_changes_pre_input_settings() {
+        let directory = TestDirectory::new();
+        let root = directory.path("root.rc");
+        let child = directory.path("child.rc");
+        fs::write(&root, "ROOT=yes\n").unwrap();
+        fs::write(&child, "LIMIT_MSG_BODY=1k\n").unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+        let (mut loader, _) = RcFileLoader::for_root(&root).unwrap();
+        let parsed = config::parse(&format!("INCLUDERC={}\n", child.display())).unwrap();
+        let config::Statement::Include(expression) = &parsed.statements[0] else {
+            panic!("expected include");
+        };
+
+        let error = loader
+            .load_config(expression, &RuntimeVariables::default(), 1)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must be set before message"));
     }
 }

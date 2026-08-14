@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
+use std::cell::{Cell, RefCell};
 use std::fmt;
 
 use regex::bytes::Regex;
@@ -10,6 +11,7 @@ use crate::config::{
     ControlFlow, Destination, RcFileExpression, Recipe, RecipeAction, RegexCondition, Statement,
 };
 use crate::message::{Message, MessageHead, StreamedMessage};
+use crate::rc_file::{MAX_RC_TRANSITIONS, RcFileLoader};
 use crate::runtime::RuntimeVariables;
 use crate::trace::{
     ConditionKind as TraceConditionKind, NoTrace, RecipeDecision, TraceEvent, TraceName, TraceSink,
@@ -53,6 +55,10 @@ impl InputRequirements {
 pub struct ExecutionPlan {
     root: CompiledSequence,
     requires_ordered_delivery: bool,
+    runtime_rc: RefCell<Option<RcFileLoader>>,
+    rc_transitions: Cell<usize>,
+    dynamic_ordered_delivery: Cell<bool>,
+    dynamic_message_contents: Cell<bool>,
 }
 
 #[derive(Debug)]
@@ -86,11 +92,34 @@ struct CompiledAssignment {
     source: TraceVariableSource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum CompiledStatement {
     Assignment(CompiledAssignment),
-    Include(RcFileExpression),
+    Include(CompiledInclude),
     Switch(RcFileExpression),
+}
+
+#[derive(Debug)]
+struct CompiledInclude {
+    expression: RcFileExpression,
+    loaded: RefCell<LoadedInclude>,
+}
+
+#[derive(Debug, Default)]
+enum LoadedInclude {
+    #[default]
+    Unloaded,
+    Empty,
+    Sequence(Box<CompiledSequence>),
+}
+
+#[derive(Clone, Copy)]
+struct RcExecutionContext<'a> {
+    loader: &'a RefCell<Option<RcFileLoader>>,
+    transitions: &'a Cell<usize>,
+    dynamic_ordered_delivery: &'a Cell<bool>,
+    dynamic_message_contents: &'a Cell<bool>,
+    depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +156,7 @@ struct OrderedTreeExecution<'a, E, D, T> {
     published: usize,
     original_delivered: bool,
     pending_error: Option<E>,
+    rc: RcExecutionContext<'a>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -140,6 +170,7 @@ struct HeaderPlanState {
     execution: FanoutPlanState,
     frames: Vec<ContinuationFrame>,
     requirements: InputRequirements,
+    restart: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -343,6 +374,7 @@ pub struct Continuation {
     execution: FanoutPlanState,
     runtime: RuntimeVariables,
     requirements: InputRequirements,
+    restart: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +417,7 @@ pub enum EvalError {
         line: usize,
         statement: &'static str,
     },
+    RuntimeRc(String),
     Delivery {
         destination: String,
         message: String,
@@ -417,6 +450,7 @@ impl fmt::Display for EvalError {
                 formatter,
                 "line {line}: {statement} requires the runtime rc loader"
             ),
+            Self::RuntimeRc(message) => formatter.write_str(message),
             Self::Delivery {
                 destination,
                 message,
@@ -426,6 +460,70 @@ impl fmt::Display for EvalError {
 }
 
 impl std::error::Error for EvalError {}
+
+impl RcExecutionContext<'_> {
+    fn descend(self) -> Result<Self, EvalError> {
+        let depth = self
+            .depth
+            .checked_add(1)
+            .ok_or_else(|| EvalError::RuntimeRc("rc include depth overflows".to_owned()))?;
+        Ok(Self { depth, ..self })
+    }
+
+    fn record_transition(self) -> Result<(), EvalError> {
+        let transitions = self
+            .transitions
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| EvalError::RuntimeRc("rc transition count overflows".to_owned()))?;
+        if transitions > MAX_RC_TRANSITIONS {
+            return Err(EvalError::RuntimeRc(format!(
+                "rc transitions exceed the hard limit of {MAX_RC_TRANSITIONS}"
+            )));
+        }
+        self.transitions.set(transitions);
+        Ok(())
+    }
+}
+
+impl CompiledInclude {
+    fn ensure_loaded(
+        &self,
+        runtime: &RuntimeVariables,
+        context: RcExecutionContext<'_>,
+    ) -> Result<(), EvalError> {
+        context.record_transition()?;
+        if !matches!(*self.loaded.borrow(), LoadedInclude::Unloaded) {
+            return Ok(());
+        }
+        let child_context = context.descend()?;
+        let loaded = context
+            .loader
+            .borrow_mut()
+            .as_mut()
+            .ok_or(EvalError::RuntimeRcLoaderUnavailable {
+                line: self.expression.line,
+                statement: "INCLUDERC",
+            })?
+            .load_config(&self.expression, runtime, child_context.depth)
+            .map_err(|error| EvalError::RuntimeRc(error.to_string()))?;
+        let Some(loaded) = loaded else {
+            *self.loaded.borrow_mut() = LoadedInclude::Empty;
+            return Ok(());
+        };
+        let mut preceding = Vec::new();
+        let sequence = CompiledSequence::compile(&loaded.into_config().statements, &mut preceding);
+        let requirements = sequence.requirements();
+        if requirements.needs_body_contents {
+            context.dynamic_message_contents.set(true);
+        }
+        if sequence.requires_ordered_delivery() {
+            context.dynamic_ordered_delivery.set(true);
+        }
+        *self.loaded.borrow_mut() = LoadedInclude::Sequence(Box::new(sequence));
+        Ok(())
+    }
+}
 
 impl CompiledSequence {
     fn compile(statements: &[Statement], preceding: &mut Vec<CompiledStatement>) -> Self {
@@ -443,7 +541,10 @@ impl CompiledSequence {
                     recipes.push(CompiledNode::compile(recipe, std::mem::take(preceding)));
                 }
                 Statement::Include(expression) => {
-                    preceding.push(CompiledStatement::Include(expression.clone()));
+                    preceding.push(CompiledStatement::Include(CompiledInclude {
+                        expression: expression.clone(),
+                        loaded: RefCell::new(LoadedInclude::Unloaded),
+                    }));
                 }
                 Statement::Switch(expression) => {
                     preceding.push(CompiledStatement::Switch(expression.clone()));
@@ -551,8 +652,11 @@ impl CompiledSequence {
         // An unhandled copy failure therefore escapes the block, while a
         // successful child error handler replaces that failure.
         for recipe in &self.recipes {
-            execute_statements(&recipe.preceding_statements, context.runtime, context.trace)
-                .map_err(OrderedExecutionError::Evaluation)?;
+            if execute_statements_ordered(&recipe.preceding_statements, context)?
+                == SequenceControl::Stop
+            {
+                return Ok((sequence_action, SequenceControl::Stop));
+            }
             let conditions_matched = recipe.execution_gate(state)
                 && recipe
                     .matches_complete(context.message, context.runtime, context.trace)
@@ -582,8 +686,10 @@ impl CompiledSequence {
             }
         }
 
-        execute_statements(&self.trailing_statements, context.runtime, context.trace)
-            .map_err(OrderedExecutionError::Evaluation)?;
+        if execute_statements_ordered(&self.trailing_statements, context)? == SequenceControl::Stop
+        {
+            return Ok((sequence_action, SequenceControl::Stop));
+        }
         Ok((sequence_action, SequenceControl::Continue))
     }
 
@@ -593,6 +699,18 @@ impl CompiledSequence {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
         execution: &mut FanoutPlanState,
+        context: RcExecutionContext<'_>,
+    ) -> Result<SequenceControl, EvalError> {
+        self.plan_complete_with_context(message, runtime, trace, execution, context)
+    }
+
+    fn plan_complete_with_context(
+        &self,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut FanoutPlanState,
+        context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         self.plan_complete_from(
             0,
@@ -601,6 +719,7 @@ impl CompiledSequence {
             runtime,
             trace,
             execution,
+            context,
         )
     }
 
@@ -612,9 +731,20 @@ impl CompiledSequence {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
         execution: &mut FanoutPlanState,
+        context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         for (index, recipe) in self.recipes.iter().enumerate().skip(start) {
-            execute_statements(&recipe.preceding_statements, runtime, trace)?;
+            if plan_statements_complete(
+                &recipe.preceding_statements,
+                message,
+                runtime,
+                trace,
+                execution,
+                context,
+            )? == SequenceControl::Stop
+            {
+                return Ok(SequenceControl::Stop);
+            }
             let conditions_matched =
                 recipe.planning_gate(state) && recipe.matches_complete(message, runtime, trace)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
@@ -625,7 +755,14 @@ impl CompiledSequence {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
-                recipe.plan_action(message, runtime, trace, execution, has_error_handler)?
+                recipe.plan_action(
+                    message,
+                    runtime,
+                    trace,
+                    execution,
+                    has_error_handler,
+                    context,
+                )?
             } else {
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
@@ -648,7 +785,17 @@ impl CompiledSequence {
             }
         }
 
-        execute_statements(&self.trailing_statements, runtime, trace)?;
+        if plan_statements_complete(
+            &self.trailing_statements,
+            message,
+            runtime,
+            trace,
+            execution,
+            context,
+        )? == SequenceControl::Stop
+        {
+            return Ok(SequenceControl::Stop);
+        }
         Ok(SequenceControl::Continue)
     }
 
@@ -659,11 +806,24 @@ impl CompiledSequence {
         trace: &mut impl TraceSink,
         planning: &mut HeaderPlanState,
         following: InputRequirements,
+        context: RcExecutionContext<'_>,
     ) -> Result<HeaderControl, EvalError> {
         let mut state = SequenceState::default();
 
         for (index, recipe) in self.recipes.iter().enumerate() {
-            execute_statements(&recipe.preceding_statements, runtime, trace)?;
+            let statement_following = self.requirements_from(index).union(following);
+            let statement_control = plan_statements_headers(
+                &recipe.preceding_statements,
+                head,
+                runtime,
+                trace,
+                planning,
+                statement_following,
+                context,
+            )?;
+            if statement_control != HeaderControl::Continue {
+                return Ok(statement_control);
+            }
             let gate = recipe.planning_gate(state);
             let (matched, condition_results) = if gate {
                 recipe.matches_headers(head, runtime, trace)?
@@ -733,6 +893,7 @@ impl CompiledSequence {
                             trace,
                             planning,
                             child_following,
+                            context,
                         )?;
                         if child != HeaderControl::Deferred {
                             planning.frames.pop();
@@ -761,7 +922,18 @@ impl CompiledSequence {
             }
         }
 
-        execute_statements(&self.trailing_statements, runtime, trace)?;
+        let statement_control = plan_statements_headers(
+            &self.trailing_statements,
+            head,
+            runtime,
+            trace,
+            planning,
+            following,
+            context,
+        )?;
+        if statement_control != HeaderControl::Continue {
+            return Ok(statement_control);
+        }
         Ok(HeaderControl::Continue)
     }
 
@@ -831,6 +1003,7 @@ impl CompiledSequence {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
         execution: &mut FanoutPlanState,
+        context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         let frame = frames.get(depth).ok_or(EvalError::BodyWasNotBuffered)?;
         let recipe = self
@@ -853,6 +1026,7 @@ impl CompiledSequence {
                 runtime,
                 trace,
                 execution,
+                context,
             )?;
             (true, control)
         } else {
@@ -869,6 +1043,7 @@ impl CompiledSequence {
                     trace,
                     execution,
                     self.has_error_handler(frame.recipe_index),
+                    context,
                 )?
             } else {
                 trace.record(TraceEvent::RecipeEvaluated {
@@ -900,6 +1075,7 @@ impl CompiledSequence {
             runtime,
             trace,
             execution,
+            context,
         )
     }
 }
@@ -1236,13 +1412,14 @@ impl CompiledNode {
         trace: &mut impl TraceSink,
         execution: &mut FanoutPlanState,
         has_error_handler: bool,
+        context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         match &self.action {
             CompiledAction::Deliver { .. } => {
                 self.plan_delivery(runtime, execution, has_error_handler)
             }
             CompiledAction::Block(children) => {
-                children.plan_complete(message, runtime, trace, execution)
+                children.plan_complete(message, runtime, trace, execution, context)
             }
         }
     }
@@ -1289,26 +1466,11 @@ fn execute_statements(
     for statement in statements {
         match statement {
             CompiledStatement::Assignment(assignment) => {
-                let value = assignment
-                    .assignment
-                    .resolve_with(|name| runtime.get(name).map(str::to_owned))
-                    .map_err(EvalError::Expansion)?;
-                runtime.set(assignment.assignment.name.clone(), value.clone());
-                if let Ok(name) = TraceName::new(&assignment.assignment.name) {
-                    trace.record(TraceEvent::VariableAssigned {
-                        line: assignment.line,
-                        name,
-                        source: assignment.source,
-                        value: trace
-                            .detail()
-                            .includes_variable_values()
-                            .then(|| TraceValue::new(value.as_bytes())),
-                    });
-                }
+                execute_assignment(assignment, runtime, trace)?;
             }
-            CompiledStatement::Include(expression) => {
+            CompiledStatement::Include(include) => {
                 return Err(EvalError::RuntimeRcLoaderUnavailable {
-                    line: expression.line,
+                    line: include.expression.line,
                     statement: "INCLUDERC",
                 });
             }
@@ -1323,8 +1485,194 @@ fn execute_statements(
     Ok(())
 }
 
+fn execute_assignment(
+    assignment: &CompiledAssignment,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) -> Result<(), EvalError> {
+    let value = assignment
+        .assignment
+        .resolve_with(|name| runtime.get(name).map(str::to_owned))
+        .map_err(EvalError::Expansion)?;
+    runtime.set(assignment.assignment.name.clone(), value.clone());
+    if let Ok(name) = TraceName::new(&assignment.assignment.name) {
+        trace.record(TraceEvent::VariableAssigned {
+            line: assignment.line,
+            name,
+            source: assignment.source,
+            value: trace
+                .detail()
+                .includes_variable_values()
+                .then(|| TraceValue::new(value.as_bytes())),
+        });
+    }
+    Ok(())
+}
+
+fn plan_statements_complete(
+    statements: &[CompiledStatement],
+    message: CompleteMessage<'_>,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+    execution: &mut FanoutPlanState,
+    context: RcExecutionContext<'_>,
+) -> Result<SequenceControl, EvalError> {
+    for statement in statements {
+        match statement {
+            CompiledStatement::Assignment(assignment) => {
+                execute_assignment(assignment, runtime, trace)?;
+            }
+            CompiledStatement::Include(include) => {
+                include.ensure_loaded(runtime, context)?;
+                if let LoadedInclude::Sequence(sequence) = &*include.loaded.borrow()
+                    && sequence.plan_complete_with_context(
+                        message,
+                        runtime,
+                        trace,
+                        execution,
+                        context.descend()?,
+                    )? == SequenceControl::Stop
+                {
+                    return Ok(SequenceControl::Stop);
+                }
+            }
+            CompiledStatement::Switch(expression) => {
+                return Err(EvalError::RuntimeRcLoaderUnavailable {
+                    line: expression.line,
+                    statement: "SWITCHRC",
+                });
+            }
+        }
+    }
+    Ok(SequenceControl::Continue)
+}
+
+fn execute_statements_ordered<E, D, T>(
+    statements: &[CompiledStatement],
+    context: &mut OrderedTreeExecution<'_, E, D, T>,
+) -> Result<SequenceControl, OrderedExecutionError<E>>
+where
+    D: FnMut(
+        &Destination,
+        &[u8],
+        &mut RuntimeVariables,
+        &mut T,
+    ) -> Result<(), DeliveryAttemptError<E>>,
+    T: TraceSink,
+{
+    for statement in statements {
+        match statement {
+            CompiledStatement::Assignment(assignment) => {
+                execute_assignment(assignment, context.runtime, context.trace)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+            }
+            CompiledStatement::Include(include) => {
+                include
+                    .ensure_loaded(context.runtime, context.rc)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                if let LoadedInclude::Sequence(sequence) = &*include.loaded.borrow() {
+                    let previous = context.rc;
+                    context.rc = previous
+                        .descend()
+                        .map_err(OrderedExecutionError::Evaluation)?;
+                    let result = sequence.execute_ordered(context);
+                    context.rc = previous;
+                    let (_, control) = result?;
+                    if control == SequenceControl::Stop {
+                        return Ok(control);
+                    }
+                }
+            }
+            CompiledStatement::Switch(expression) => {
+                return Err(OrderedExecutionError::Evaluation(
+                    EvalError::RuntimeRcLoaderUnavailable {
+                        line: expression.line,
+                        statement: "SWITCHRC",
+                    },
+                ));
+            }
+        }
+    }
+    Ok(SequenceControl::Continue)
+}
+
+fn plan_statements_headers(
+    statements: &[CompiledStatement],
+    head: &MessageHead,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+    planning: &mut HeaderPlanState,
+    following: InputRequirements,
+    context: RcExecutionContext<'_>,
+) -> Result<HeaderControl, EvalError> {
+    for statement in statements {
+        match statement {
+            CompiledStatement::Assignment(assignment) => {
+                execute_assignment(assignment, runtime, trace)?;
+            }
+            CompiledStatement::Include(include) => {
+                include.ensure_loaded(runtime, context)?;
+                if let LoadedInclude::Sequence(sequence) = &*include.loaded.borrow() {
+                    if sequence.requires_ordered_delivery() {
+                        planning.frames.clear();
+                        planning.restart = true;
+                        planning.requirements =
+                            sequence
+                                .requirements()
+                                .union(following)
+                                .union(InputRequirements {
+                                    needs_end_of_message: true,
+                                    ..InputRequirements::default()
+                                });
+                        return Ok(HeaderControl::Deferred);
+                    }
+                    let child = sequence.plan_headers(
+                        head,
+                        runtime,
+                        trace,
+                        planning,
+                        following,
+                        context.descend()?,
+                    )?;
+                    if child == HeaderControl::Deferred {
+                        // Continuation frames point into the static root tree.
+                        // A dynamically loaded child cannot be represented by
+                        // that path, so replay the still-private plan once the
+                        // selected message sections have been staged.
+                        planning.frames.clear();
+                        planning.restart = true;
+                        planning.requirements = planning
+                            .requirements
+                            .union(sequence.requirements())
+                            .union(following);
+                        return Ok(HeaderControl::Deferred);
+                    }
+                    if child == HeaderControl::Stop {
+                        return Ok(HeaderControl::Stop);
+                    }
+                }
+            }
+            CompiledStatement::Switch(expression) => {
+                return Err(EvalError::RuntimeRcLoaderUnavailable {
+                    line: expression.line,
+                    statement: "SWITCHRC",
+                });
+            }
+        }
+    }
+    Ok(HeaderControl::Continue)
+}
+
 impl ExecutionPlan {
     pub fn compile(config: &Config) -> Self {
+        Self::compile_with_optional_loader(config, None)
+    }
+
+    pub fn compile_with_loader(config: &Config, loader: RcFileLoader) -> Self {
+        Self::compile_with_optional_loader(config, Some(loader))
+    }
+
+    fn compile_with_optional_loader(config: &Config, loader: Option<RcFileLoader>) -> Self {
         let mut initial_statements = config
             .initial_variables()
             .iter()
@@ -1348,26 +1696,45 @@ impl ExecutionPlan {
         Self {
             root,
             requires_ordered_delivery,
+            runtime_rc: RefCell::new(loader),
+            rc_transitions: Cell::new(0),
+            dynamic_ordered_delivery: Cell::new(false),
+            dynamic_message_contents: Cell::new(false),
+        }
+    }
+
+    fn rc_context(&self) -> RcExecutionContext<'_> {
+        RcExecutionContext {
+            loader: &self.runtime_rc,
+            transitions: &self.rc_transitions,
+            dynamic_ordered_delivery: &self.dynamic_ordered_delivery,
+            dynamic_message_contents: &self.dynamic_message_contents,
+            depth: 0,
         }
     }
 
     pub fn requirements(&self) -> InputRequirements {
-        if self.requires_ordered_delivery {
-            self.root.requirements().union(InputRequirements {
+        let mut requirements = self.root.requirements();
+        if self.dynamic_message_contents.get() {
+            requirements.needs_body_contents = true;
+            requirements.needs_end_of_message = true;
+        }
+        if self.requires_ordered_delivery() {
+            requirements.union(InputRequirements {
                 needs_end_of_message: true,
                 ..InputRequirements::default()
             })
         } else {
-            self.root.requirements()
+            requirements
         }
     }
 
     pub fn requires_ordered_delivery(&self) -> bool {
-        self.requires_ordered_delivery
+        self.requires_ordered_delivery || self.dynamic_ordered_delivery.get()
     }
 
     pub fn needs_message_contents(&self) -> bool {
-        self.root.needs_message_contents()
+        self.root.needs_message_contents() || self.dynamic_message_contents.get()
     }
 
     pub fn explain(&self) -> PlanExplanation {
@@ -1401,6 +1768,7 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> HeaderEvaluation {
+        let initial_runtime = runtime.clone();
         if self.requires_ordered_delivery {
             return HeaderEvaluation::NeedsMessage(Continuation {
                 frames: vec![ContinuationFrame {
@@ -1412,6 +1780,7 @@ impl ExecutionPlan {
                 execution: FanoutPlanState::default(),
                 runtime: runtime.clone(),
                 requirements: self.requirements(),
+                restart: false,
             });
         }
         let mut planning = HeaderPlanState::default();
@@ -1421,12 +1790,22 @@ impl ExecutionPlan {
             trace,
             &mut planning,
             InputRequirements::default(),
+            self.rc_context(),
         ) {
             Ok(HeaderControl::Deferred) => HeaderEvaluation::NeedsMessage(Continuation {
                 frames: planning.frames,
-                execution: planning.execution,
-                runtime: runtime.clone(),
+                execution: if planning.restart {
+                    FanoutPlanState::default()
+                } else {
+                    planning.execution
+                },
+                runtime: if planning.restart {
+                    initial_runtime
+                } else {
+                    runtime.clone()
+                },
                 requirements: planning.requirements,
+                restart: planning.restart,
             }),
             Ok(HeaderControl::Continue | HeaderControl::Stop) => {
                 HeaderEvaluation::Decided(DeliveryPlan {
@@ -1560,6 +1939,7 @@ impl ExecutionPlan {
             &mut RuntimeVariables::default(),
             &mut NoTrace,
             &mut execution,
+            self.rc_context(),
         )?;
         Ok(DeliveryPlan {
             deliveries: execution.deliveries,
@@ -1639,6 +2019,7 @@ impl ExecutionPlan {
             published: 0,
             original_delivered: false,
             pending_error: None,
+            rc: self.rc_context(),
         };
         self.root.execute_ordered(&mut context)?;
         if let Some(error) = context.pending_error {
@@ -1657,11 +2038,21 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
-        if continuation.frames.is_empty() {
+        if continuation.frames.is_empty() && !continuation.restart {
             return Err(EvalError::BodyWasNotBuffered);
         }
         *runtime = continuation.runtime;
         let mut execution = continuation.execution;
+
+        if continuation.restart {
+            self.rc_transitions.set(0);
+            self.root
+                .plan_complete(message, runtime, trace, &mut execution, self.rc_context())?;
+            return Ok(DeliveryPlan {
+                deliveries: execution.deliveries,
+                original_delivered: execution.original_delivered,
+            });
+        }
 
         // Resume at the deepest pending recipe and then unwind through its
         // parent sequences. Earlier siblings are neither evaluated nor
@@ -1673,6 +2064,7 @@ impl ExecutionPlan {
             runtime,
             trace,
             &mut execution,
+            self.rc_context(),
         )?;
         Ok(DeliveryPlan {
             deliveries: execution.deliveries,

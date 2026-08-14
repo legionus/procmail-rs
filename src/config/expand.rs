@@ -193,14 +193,20 @@ pub(super) fn expand(
         initial_variables.push((variable.name().to_owned(), value.text.clone()));
         variables.insert(variable.name().to_owned(), value);
     }
-    expand_config(config, variables, initial_variables)
+    expand_config(config, variables, initial_variables, None)
 }
 
 pub(super) fn expand_with_runtime_values<'a>(
     config: Config,
     values: impl Iterator<Item = (&'a str, &'a str)>,
 ) -> Result<Config, ExpansionError> {
+    let values = values.collect::<Vec<_>>();
+    let maildir = values
+        .iter()
+        .rev()
+        .find_map(|(name, value)| (*name == "MAILDIR").then(|| (*value).to_owned()));
     let variables = values
+        .into_iter()
         .map(|(name, value)| {
             (
                 name.to_owned(),
@@ -211,16 +217,16 @@ pub(super) fn expand_with_runtime_values<'a>(
             )
         })
         .collect();
-    expand_config(config, variables, Vec::new())
+    expand_config(config, variables, Vec::new(), maildir)
 }
 
 fn expand_config(
     mut config: Config,
     mut variables: BTreeMap<String, ExpandedValue>,
     initial_variables: Vec<(String, String)>,
+    mut maildir: Option<String>,
 ) -> Result<Config, ExpansionError> {
     config.initial_variables = initial_variables;
-    let mut maildir: Option<String> = None;
 
     for statement in &mut config.statements {
         match statement {

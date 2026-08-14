@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Seek, Write};
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
@@ -57,6 +58,195 @@ fn check_accepts_valid_config() {
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_executes_header_only_include_and_returns_to_caller() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    let fallback = mailbase.join("fallback");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    create_maildir(&fallback);
+    let child_rc = mailbase.join("child.rc");
+    fs::write(&child_rc, ":0\n* ^Subject: selected$\nmaildir:selected\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nINCLUDERC=child.rc\n:0\nmaildir:fallback\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+
+    for (subject, destination) in [
+        ("selected", selected.as_path()),
+        ("other", fallback.as_path()),
+    ] {
+        let input = format!("Subject: {subject}\n\nbody");
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child.stdin.take().unwrap().write_all(input.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_eq!(delivered_messages(destination), [input.into_bytes()]);
+    }
+    assert_eq!(delivered_messages(&selected).len(), 1);
+    assert_eq!(delivered_messages(&fallback).len(), 1);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn filter_stages_only_after_selected_include_requires_body() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    let fallback = mailbase.join("fallback");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    create_maildir(&fallback);
+    let child_rc = mailbase.join("body.rc");
+    fs::write(&child_rc, ":0 B\n* needle\nmaildir:selected\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nINCLUDERC=body.rc\n:0\nmaildir:fallback\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+
+    for (body, destination) in [
+        ("contains needle", selected.as_path()),
+        ("ordinary body", fallback.as_path()),
+    ] {
+        let input = format!("Subject: body include\n\n{body}");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_eq!(delivered_messages(destination), [input.into_bytes()]);
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn filter_resolves_include_inside_selected_block_from_match() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    let fallback = mailbase.join("fallback");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    create_maildir(&fallback);
+    let child_rc = mailbase.join("selected.rc");
+    fs::write(&child_rc, ":0\nmaildir:selected\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n* ^X-Rules: \\/(.*)$\n{{\nINCLUDERC=$MATCH\n}}\n:0\nmaildir:fallback\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+
+    for (header, destination) in [
+        ("X-Rules: selected.rc\n", selected.as_path()),
+        ("", fallback.as_path()),
+    ] {
+        let input = format!("{header}Subject: runtime include\n\nbody");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_eq!(delivered_messages(destination), [input.into_bytes()]);
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn included_ordered_rules_share_lastfolder_with_their_caller() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    create_maildir(&mailbase);
+    let first = base.join("first.mbox");
+    let second = base.join("first.mbox.second");
+    let child_rc = mailbase.join("ordered.rc");
+    fs::write(
+        &child_rc,
+        format!(
+            ":0 c\nmbox:{}\n:0 a\nmbox:${{LASTFOLDER}}.second\n",
+            first.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!("MAILDIR={}\nINCLUDERC=ordered.rc\n", mailbase.display()),
+    )
+    .unwrap();
+    let input = b"Subject: ordered include\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    for mailbox in [first, second] {
+        let stored = fs::read(mailbox).unwrap();
+        assert!(stored.ends_with(b"Subject: ordered include\n\nbody\n\n"));
+    }
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
