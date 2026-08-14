@@ -99,17 +99,23 @@ struct CompiledAssignment {
 enum CompiledStatement {
     Assignment(CompiledAssignment),
     Include(CompiledInclude),
-    Switch(RcFileExpression),
+    Switch(CompiledSwitch),
 }
 
 #[derive(Debug)]
 struct CompiledInclude {
     expression: RcFileExpression,
-    loaded: RefCell<LoadedInclude>,
+    loaded: RefCell<LoadedRuntimeRc>,
+}
+
+#[derive(Debug)]
+struct CompiledSwitch {
+    expression: RcFileExpression,
+    loaded: RefCell<LoadedRuntimeRc>,
 }
 
 #[derive(Debug, Default)]
-enum LoadedInclude {
+enum LoadedRuntimeRc {
     #[default]
     Unloaded,
     Empty,
@@ -202,12 +208,14 @@ enum ActionExecution {
 enum SequenceControl {
     Continue,
     Stop,
+    EndRcFile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeaderControl {
     Continue,
     Stop,
+    EndRcFile,
     Deferred,
 }
 
@@ -508,57 +516,83 @@ impl CompiledInclude {
         runtime: &RuntimeVariables,
         context: RcExecutionContext<'_>,
     ) -> Result<(), EvalError> {
-        context.record_transition()?;
-        if !matches!(*self.loaded.borrow(), LoadedInclude::Unloaded) {
-            return Ok(());
-        }
-        let child_context = context.descend()?;
-        let loaded = context
-            .loader
-            .borrow_mut()
-            .as_mut()
-            .ok_or(EvalError::RuntimeRcLoaderUnavailable {
-                line: self.expression.line,
-                statement: "INCLUDERC",
-            })?
-            .load_config(&self.expression, runtime, child_context.depth);
-        let loaded = match loaded {
-            Ok(loaded) => loaded,
-            Err(error) if error.is_resource_limit() => {
-                return Err(EvalError::RuntimeRc(format!(
-                    "line {}: INCLUDERC resource limit: {}",
-                    self.expression.line,
-                    error.safe_message()
-                )));
-            }
-            Err(error) => {
-                let mut diagnostic = format!(
-                    "line {}: INCLUDERC failed: {}",
-                    self.expression.line,
-                    error.safe_message()
-                );
-                truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
-                context.diagnostics.borrow_mut().push(diagnostic);
-                *self.loaded.borrow_mut() = LoadedInclude::Failed;
-                return Ok(());
-            }
-        };
-        let Some(loaded) = loaded else {
-            *self.loaded.borrow_mut() = LoadedInclude::Empty;
-            return Ok(());
-        };
-        let mut preceding = Vec::new();
-        let sequence = CompiledSequence::compile(&loaded.into_config().statements, &mut preceding);
-        let requirements = sequence.requirements();
-        if requirements.needs_body_contents {
-            context.dynamic_message_contents.set(true);
-        }
-        if sequence.requires_ordered_delivery() {
-            context.dynamic_ordered_delivery.set(true);
-        }
-        *self.loaded.borrow_mut() = LoadedInclude::Sequence(Box::new(sequence));
-        Ok(())
+        load_runtime_rc(
+            &self.expression,
+            &self.loaded,
+            "INCLUDERC",
+            runtime,
+            context,
+        )
     }
+}
+
+impl CompiledSwitch {
+    fn ensure_loaded(
+        &self,
+        runtime: &RuntimeVariables,
+        context: RcExecutionContext<'_>,
+    ) -> Result<(), EvalError> {
+        load_runtime_rc(&self.expression, &self.loaded, "SWITCHRC", runtime, context)
+    }
+}
+
+fn load_runtime_rc(
+    expression: &RcFileExpression,
+    loaded_state: &RefCell<LoadedRuntimeRc>,
+    statement: &'static str,
+    runtime: &RuntimeVariables,
+    context: RcExecutionContext<'_>,
+) -> Result<(), EvalError> {
+    context.record_transition()?;
+    if !matches!(*loaded_state.borrow(), LoadedRuntimeRc::Unloaded) {
+        return Ok(());
+    }
+    let child_context = context.descend()?;
+    let loaded = context
+        .loader
+        .borrow_mut()
+        .as_mut()
+        .ok_or(EvalError::RuntimeRcLoaderUnavailable {
+            line: expression.line,
+            statement,
+        })?
+        .load_config(expression, runtime, child_context.depth);
+    let loaded = match loaded {
+        Ok(loaded) => loaded,
+        Err(error) if error.is_resource_limit() => {
+            return Err(EvalError::RuntimeRc(format!(
+                "line {}: {statement} resource limit: {}",
+                expression.line,
+                error.safe_message()
+            )));
+        }
+        Err(error) => {
+            let mut diagnostic = format!(
+                "line {}: {statement} failed: {}",
+                expression.line,
+                error.safe_message()
+            );
+            truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
+            context.diagnostics.borrow_mut().push(diagnostic);
+            *loaded_state.borrow_mut() = LoadedRuntimeRc::Failed;
+            return Ok(());
+        }
+    };
+    let Some(loaded) = loaded else {
+        *loaded_state.borrow_mut() = LoadedRuntimeRc::Empty;
+        return Ok(());
+    };
+    let mut preceding = Vec::new();
+    let sequence = CompiledSequence::compile(&loaded.into_config().statements, &mut preceding);
+    let requirements = sequence.requirements();
+    if requirements.needs_body_contents {
+        context.dynamic_message_contents.set(true);
+    }
+    if sequence.requires_ordered_delivery() {
+        context.dynamic_ordered_delivery.set(true);
+    }
+    *loaded_state.borrow_mut() = LoadedRuntimeRc::Sequence(Box::new(sequence));
+    Ok(())
 }
 
 impl CompiledSequence {
@@ -579,11 +613,14 @@ impl CompiledSequence {
                 Statement::Include(expression) => {
                     preceding.push(CompiledStatement::Include(CompiledInclude {
                         expression: expression.clone(),
-                        loaded: RefCell::new(LoadedInclude::Unloaded),
+                        loaded: RefCell::new(LoadedRuntimeRc::Unloaded),
                     }));
                 }
                 Statement::Switch(expression) => {
-                    preceding.push(CompiledStatement::Switch(expression.clone()));
+                    preceding.push(CompiledStatement::Switch(CompiledSwitch {
+                        expression: expression.clone(),
+                        loaded: RefCell::new(LoadedRuntimeRc::Unloaded),
+                    }));
                 }
             }
         }
@@ -688,10 +725,10 @@ impl CompiledSequence {
         // An unhandled copy failure therefore escapes the block, while a
         // successful child error handler replaces that failure.
         for recipe in &self.recipes {
-            if execute_statements_ordered(&recipe.preceding_statements, context)?
-                == SequenceControl::Stop
-            {
-                return Ok((sequence_action, SequenceControl::Stop));
+            let statement_control =
+                execute_statements_ordered(&recipe.preceding_statements, context)?;
+            if statement_control != SequenceControl::Continue {
+                return Ok((sequence_action, statement_control));
             }
             let conditions_matched = recipe.execution_gate(state)
                 && recipe
@@ -717,14 +754,14 @@ impl CompiledSequence {
             } else if action == ActionExecution::Succeeded {
                 sequence_action = ActionExecution::Succeeded;
             }
-            if control == SequenceControl::Stop {
+            if control != SequenceControl::Continue {
                 return Ok((sequence_action, control));
             }
         }
 
-        if execute_statements_ordered(&self.trailing_statements, context)? == SequenceControl::Stop
-        {
-            return Ok((sequence_action, SequenceControl::Stop));
+        let statement_control = execute_statements_ordered(&self.trailing_statements, context)?;
+        if statement_control != SequenceControl::Continue {
+            return Ok((sequence_action, statement_control));
         }
         Ok((sequence_action, SequenceControl::Continue))
     }
@@ -770,16 +807,16 @@ impl CompiledSequence {
         context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         for (index, recipe) in self.recipes.iter().enumerate().skip(start) {
-            if plan_statements_complete(
+            let statement_control = plan_statements_complete(
                 &recipe.preceding_statements,
                 message,
                 runtime,
                 trace,
                 execution,
                 context,
-            )? == SequenceControl::Stop
-            {
-                return Ok(SequenceControl::Stop);
+            )?;
+            if statement_control != SequenceControl::Continue {
+                return Ok(statement_control);
             }
             let conditions_matched =
                 recipe.planning_gate(state) && recipe.matches_complete(message, runtime, trace)?;
@@ -816,21 +853,21 @@ impl CompiledSequence {
                 },
                 else_handled,
             );
-            if control == SequenceControl::Stop {
-                return Ok(SequenceControl::Stop);
+            if control != SequenceControl::Continue {
+                return Ok(control);
             }
         }
 
-        if plan_statements_complete(
+        let statement_control = plan_statements_complete(
             &self.trailing_statements,
             message,
             runtime,
             trace,
             execution,
             context,
-        )? == SequenceControl::Stop
-        {
-            return Ok(SequenceControl::Stop);
+        )?;
+        if statement_control != SequenceControl::Continue {
+            return Ok(statement_control);
         }
         Ok(SequenceControl::Continue)
     }
@@ -953,7 +990,7 @@ impl CompiledSequence {
                 ActionExecution::Succeeded,
                 else_handled,
             );
-            if control == HeaderControl::Stop {
+            if control != HeaderControl::Continue {
                 return Ok(control);
             }
         }
@@ -1091,7 +1128,7 @@ impl CompiledSequence {
             (conditions_matched, control)
         };
 
-        if control == SequenceControl::Stop {
+        if control != SequenceControl::Continue {
             return Ok(control);
         }
         state.record(
@@ -1121,6 +1158,7 @@ impl From<SequenceControl> for HeaderControl {
         match control {
             SequenceControl::Continue => Self::Continue,
             SequenceControl::Stop => Self::Stop,
+            SequenceControl::EndRcFile => Self::EndRcFile,
         }
     }
 }
@@ -1510,9 +1548,9 @@ fn execute_statements(
                     statement: "INCLUDERC",
                 });
             }
-            CompiledStatement::Switch(expression) => {
+            CompiledStatement::Switch(switch) => {
                 return Err(EvalError::RuntimeRcLoaderUnavailable {
-                    line: expression.line,
+                    line: switch.expression.line,
                     statement: "SWITCHRC",
                 });
             }
@@ -1560,7 +1598,7 @@ fn plan_statements_complete(
             }
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;
-                if let LoadedInclude::Sequence(sequence) = &*include.loaded.borrow()
+                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded.borrow()
                     && sequence.plan_complete_with_context(
                         message,
                         runtime,
@@ -1572,11 +1610,31 @@ fn plan_statements_complete(
                     return Ok(SequenceControl::Stop);
                 }
             }
-            CompiledStatement::Switch(expression) => {
-                return Err(EvalError::RuntimeRcLoaderUnavailable {
-                    line: expression.line,
-                    statement: "SWITCHRC",
-                });
+            CompiledStatement::Switch(switch) => {
+                // Run the replacement as a separate rc-file scope, then use
+                // EndRcFile to unwind every enclosing recipe block. An
+                // INCLUDERC boundary consumes that result and resumes its
+                // caller, while the root treats it as end of processing.
+                switch.ensure_loaded(runtime, context)?;
+                match &*switch.loaded.borrow() {
+                    LoadedRuntimeRc::Unloaded => unreachable!(),
+                    LoadedRuntimeRc::Failed => {}
+                    LoadedRuntimeRc::Empty => return Ok(SequenceControl::EndRcFile),
+                    LoadedRuntimeRc::Sequence(sequence) => {
+                        let control = sequence.plan_complete_with_context(
+                            message,
+                            runtime,
+                            trace,
+                            execution,
+                            context.descend()?,
+                        )?;
+                        return Ok(if control == SequenceControl::Stop {
+                            SequenceControl::Stop
+                        } else {
+                            SequenceControl::EndRcFile
+                        });
+                    }
+                }
             }
         }
     }
@@ -1606,7 +1664,7 @@ where
                 include
                     .ensure_loaded(context.runtime, context.rc)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                if let LoadedInclude::Sequence(sequence) = &*include.loaded.borrow() {
+                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded.borrow() {
                     let previous = context.rc;
                     context.rc = previous
                         .descend()
@@ -1619,13 +1677,32 @@ where
                     }
                 }
             }
-            CompiledStatement::Switch(expression) => {
-                return Err(OrderedExecutionError::Evaluation(
-                    EvalError::RuntimeRcLoaderUnavailable {
-                        line: expression.line,
-                        statement: "SWITCHRC",
-                    },
-                ));
+            CompiledStatement::Switch(switch) => {
+                // Preserve the same rc-file boundary while deliveries happen
+                // immediately. Restoring the caller context matters when the
+                // switch belongs to a file entered through INCLUDERC.
+                switch
+                    .ensure_loaded(context.runtime, context.rc)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                match &*switch.loaded.borrow() {
+                    LoadedRuntimeRc::Unloaded => unreachable!(),
+                    LoadedRuntimeRc::Failed => {}
+                    LoadedRuntimeRc::Empty => return Ok(SequenceControl::EndRcFile),
+                    LoadedRuntimeRc::Sequence(sequence) => {
+                        let previous = context.rc;
+                        context.rc = previous
+                            .descend()
+                            .map_err(OrderedExecutionError::Evaluation)?;
+                        let result = sequence.execute_ordered(context);
+                        context.rc = previous;
+                        let (_, control) = result?;
+                        return Ok(if control == SequenceControl::Stop {
+                            SequenceControl::Stop
+                        } else {
+                            SequenceControl::EndRcFile
+                        });
+                    }
+                }
             }
         }
     }
@@ -1648,7 +1725,7 @@ fn plan_statements_headers(
             }
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;
-                if let LoadedInclude::Sequence(sequence) = &*include.loaded.borrow() {
+                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded.borrow() {
                     if sequence.requires_ordered_delivery() {
                         planning.frames.clear();
                         planning.restart = true;
@@ -1688,11 +1765,51 @@ fn plan_statements_headers(
                     }
                 }
             }
-            CompiledStatement::Switch(expression) => {
-                return Err(EvalError::RuntimeRcLoaderUnavailable {
-                    line: expression.line,
-                    statement: "SWITCHRC",
-                });
+            CompiledStatement::Switch(switch) => {
+                // Requirements after this statement are unreachable after a
+                // successful switch. If the dynamic target needs the body,
+                // restart from the private root plan after staging it.
+                switch.ensure_loaded(runtime, context)?;
+                match &*switch.loaded.borrow() {
+                    LoadedRuntimeRc::Unloaded => unreachable!(),
+                    LoadedRuntimeRc::Failed => {}
+                    LoadedRuntimeRc::Empty => return Ok(HeaderControl::EndRcFile),
+                    LoadedRuntimeRc::Sequence(sequence) => {
+                        if sequence.requires_ordered_delivery() {
+                            planning.frames.clear();
+                            planning.restart = true;
+                            planning.requirements =
+                                sequence.requirements().union(InputRequirements {
+                                    needs_end_of_message: true,
+                                    ..InputRequirements::default()
+                                });
+                            return Ok(HeaderControl::Deferred);
+                        }
+                        let child = sequence.plan_headers(
+                            head,
+                            runtime,
+                            trace,
+                            planning,
+                            InputRequirements::default(),
+                            context.descend()?,
+                        )?;
+                        if child == HeaderControl::Deferred {
+                            // Replaying from the root reconstructs the dynamic
+                            // target without retaining pointers into its tree.
+                            // Nothing after SWITCHRC remains reachable.
+                            planning.frames.clear();
+                            planning.restart = true;
+                            planning.requirements =
+                                planning.requirements.union(sequence.requirements());
+                            return Ok(HeaderControl::Deferred);
+                        }
+                        return Ok(if child == HeaderControl::Stop {
+                            HeaderControl::Stop
+                        } else {
+                            HeaderControl::EndRcFile
+                        });
+                    }
+                }
             }
         }
     }
@@ -1849,7 +1966,7 @@ impl ExecutionPlan {
                 requirements: planning.requirements,
                 restart: planning.restart,
             }),
-            Ok(HeaderControl::Continue | HeaderControl::Stop) => {
+            Ok(HeaderControl::Continue | HeaderControl::Stop | HeaderControl::EndRcFile) => {
                 HeaderEvaluation::Decided(DeliveryPlan {
                     deliveries: planning.execution.deliveries,
                     original_delivered: planning.execution.original_delivered,

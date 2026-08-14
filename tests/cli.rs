@@ -193,6 +193,195 @@ fn filter_reports_malformed_include_and_continues() {
 }
 
 #[test]
+fn filter_switches_to_selected_rc_file_and_abandons_the_current_file() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    let unreachable = mailbase.join("unreachable");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    create_maildir(&unreachable);
+    let switched_rc = mailbase.join("switched.rc");
+    fs::write(&switched_rc, ":0\nmaildir:selected\n").unwrap();
+    fs::set_permissions(&switched_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n* ^X-Switch: yes$\n{{\nSWITCHRC=switched.rc\n}}\n:0\nmaildir:unreachable\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+    let input = b"X-Switch: yes\nSubject: switch root\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [input.to_vec()]);
+    assert!(delivered_messages(&unreachable).is_empty());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn switched_include_returns_to_its_caller_after_the_replacement_ends() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    let child_rc = mailbase.join("child.rc");
+    let switched_rc = mailbase.join("switched.rc");
+    fs::write(&child_rc, "SWITCHRC=switched.rc\nTARGET=unreachable\n").unwrap();
+    fs::write(&switched_rc, "TARGET=selected\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&switched_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nTARGET=unreachable\nINCLUDERC=child.rc\n:0\nmaildir:$TARGET\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: nested switch\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [input.to_vec()]);
+    assert!(!mailbase.join("unreachable").exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn empty_switch_ends_the_current_rc_file() {
+    let path = config_file("SWITCHRC=\n:0\nmaildir:unreachable\n");
+    let input = b"Subject: empty switch\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(79), "{:?}", output.stderr);
+    assert!(!path.parent().unwrap().join("unreachable").exists());
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn failed_switch_reports_the_error_and_continues_the_current_rc_file() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let fallback = mailbase.join("fallback");
+    create_maildir(&mailbase);
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nSWITCHRC=private-missing-switch.rc\n:0\nmaildir:fallback\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: failed switch\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("line 2: SWITCHRC failed:"), "{stderr}");
+    assert!(!stderr.contains("private-missing-switch.rc"), "{stderr}");
+    assert!(
+        !stderr.contains(&mailbase.display().to_string()),
+        "{stderr}"
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn filter_stages_after_switched_rc_file_selects_a_body_rule() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    let fallback = mailbase.join("fallback");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    create_maildir(&fallback);
+    let switched_rc = mailbase.join("body.rc");
+    fs::write(
+        &switched_rc,
+        ":0 B\n* needle\nmaildir:selected\n:0\nmaildir:fallback\n",
+    )
+    .unwrap();
+    fs::set_permissions(&switched_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!("MAILDIR={}\nSWITCHRC=body.rc\n", mailbase.display()),
+    )
+    .unwrap();
+
+    for (body, destination) in [
+        ("contains needle", selected.as_path()),
+        ("ordinary body", fallback.as_path()),
+    ] {
+        let input = format!("Subject: body switch\n\n{body}");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_eq!(delivered_messages(destination), [input.into_bytes()]);
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn filter_stages_only_after_selected_include_requires_body() {
     let path = config_file("");
     let base = path.parent().unwrap();
