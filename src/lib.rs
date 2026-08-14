@@ -11,6 +11,7 @@ pub mod delivery;
 pub mod eval;
 pub mod limits;
 pub mod message;
+pub mod rc_file;
 pub mod runtime;
 pub mod trace;
 

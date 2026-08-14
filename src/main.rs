@@ -7,8 +7,7 @@
 compile_error!("procmail-rs currently supports only 64-bit Linux targets");
 
 use std::env;
-use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -21,8 +20,9 @@ use procmail_rs::eval::{
     ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind, ExecutionPlan,
     HeaderEvaluation, MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery,
 };
-use procmail_rs::limits::{MAX_MESSAGE_SIZE, MAX_RC_SIZE, MessageLimits};
+use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
+use procmail_rs::rc_file::RcFileLoader;
 use procmail_rs::runtime::RuntimeVariables;
 use procmail_rs::trace::{
     DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, NoTrace, TraceConfig,
@@ -121,8 +121,9 @@ fn main() -> ExitCode {
 fn run() -> Result<(), OperationalError> {
     let command = parse_args().map_err(OperationalError::Configuration)?;
     let path = &command.config;
-    let source = read_config(path).map_err(OperationalError::Configuration)?;
-    let config = config::parse(&source)
+    let (_rc_loader, root_rc) = RcFileLoader::for_root(path)
+        .map_err(|error| OperationalError::Configuration(error.to_string()))?;
+    let config = config::parse(root_rc.source())
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
         .expand_with(&command.supplied)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
@@ -749,23 +750,6 @@ fn delivery_outcome_counts(
             published
         )))
     }
-}
-
-fn read_config(path: &Path) -> Result<String, String> {
-    let file =
-        File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let mut source = Vec::with_capacity(MAX_RC_SIZE.min(64 * 1024));
-    file.take((MAX_RC_SIZE + 1) as u64)
-        .read_to_end(&mut source)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    if source.len() > MAX_RC_SIZE {
-        return Err(format!(
-            "cannot read {}: rc file exceeds the hard limit of {MAX_RC_SIZE} bytes",
-            path.display()
-        ));
-    }
-    String::from_utf8(source)
-        .map_err(|_| format!("cannot read {}: rc file is not valid UTF-8", path.display()))
 }
 
 fn parse_args() -> Result<Command, String> {
