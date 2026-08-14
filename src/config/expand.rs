@@ -349,6 +349,7 @@ fn expand_recipe(
                 )?;
             }
         }
+        RecipeAction::Pipe(_) => {}
         RecipeAction::Block(statements) => {
             prepare_runtime_statements(statements, variables, &mut BTreeSet::new(), maildir)?;
         }
@@ -428,6 +429,7 @@ fn prepare_runtime_recipe(
             expression.runtime_base = true;
             expression.expansion = Some(parsed);
         }
+        RecipeAction::Pipe(_) => {}
         RecipeAction::Block(children) => {
             let mut child_dynamic = dynamic.clone();
             prepare_runtime_statements(children, known, &mut child_dynamic, maildir)?;

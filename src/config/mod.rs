@@ -22,6 +22,7 @@ pub const MAX_SHELL_SETTING_LEN: usize = 4096;
 pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
 pub const MAX_EXPANSION_DEPTH: usize = 32;
 pub const MAX_PATH_EXPRESSION_LEN: usize = 4096;
+pub const MAX_PIPE_COMMAND_LEN: usize = 64 * 1024;
 pub const MAX_RECIPE_NESTING_DEPTH: usize = 64;
 pub const MAX_REGEX_COMPILED_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_REGEX_PATTERN_LEN: usize = 64 * 1024;
@@ -92,6 +93,21 @@ impl Config {
     pub(crate) fn parse_counts(&self) -> RcParseCounts {
         self.parse_counts
     }
+
+    pub fn has_pipe_actions(&self) -> bool {
+        statements_have_pipe_actions(&self.statements)
+    }
+}
+
+fn statements_have_pipe_actions(statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::Recipe(recipe) => match &recipe.action {
+            RecipeAction::Pipe(_) => true,
+            RecipeAction::Block(children) => statements_have_pipe_actions(children),
+            RecipeAction::Deliver(_) => false,
+        },
+        Statement::Assignment(_) | Statement::Include(_) | Statement::Switch(_) => false,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,7 +221,13 @@ pub enum OutputEnding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecipeAction {
     Deliver(Destination),
+    Pipe(PipeAction),
     Block(Vec<Statement>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeAction {
+    pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

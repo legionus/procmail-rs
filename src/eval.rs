@@ -8,7 +8,8 @@ use regex::bytes::Regex;
 
 use crate::config::{
     Assignment, AssignmentTarget, ConditionInput, ConditionKind, Config, ContinuationMode,
-    ControlFlow, Destination, RcFileExpression, Recipe, RecipeAction, RegexCondition, Statement,
+    ControlFlow, Destination, PipeAction, RcFileExpression, Recipe, RecipeAction, RecipeOptions,
+    RegexCondition, Statement,
 };
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::rc_file::{MAX_RC_TRANSITIONS, RcFileLoader};
@@ -84,6 +85,10 @@ enum CompiledAction {
     Deliver {
         destination: Destination,
         continuation: ContinuationMode,
+    },
+    Pipe {
+        _action: PipeAction,
+        _options: RecipeOptions,
     },
     Block(CompiledSequence),
 }
@@ -306,6 +311,7 @@ pub enum ConditionKindExplanation {
 pub enum DestinationKind {
     Maildir,
     Mbox,
+    ExternalProgram,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -431,6 +437,9 @@ pub enum EvalError {
         statement: &'static str,
     },
     RuntimeRc(String),
+    ExternalActionUnsupported {
+        line: usize,
+    },
     Delivery {
         destination: String,
         message: String,
@@ -464,6 +473,12 @@ impl fmt::Display for EvalError {
                 "line {line}: {statement} requires the runtime rc loader"
             ),
             Self::RuntimeRc(message) => formatter.write_str(message),
+            Self::ExternalActionUnsupported { line } => {
+                write!(
+                    formatter,
+                    "line {line}: external action is not executable yet"
+                )
+            }
             Self::Delivery {
                 destination,
                 message,
@@ -941,6 +956,9 @@ impl CompiledSequence {
                     decision: RecipeDecision::Selected,
                 });
                 match &recipe.action {
+                    CompiledAction::Pipe { .. } => {
+                        return Err(EvalError::ExternalActionUnsupported { line: recipe.line });
+                    }
                     CompiledAction::Deliver { .. } => {
                         let control = recipe.plan_delivery(
                             runtime,
@@ -1044,6 +1062,16 @@ impl CompiledSequence {
             conditions.extend(recipe.conditions.iter().map(CompiledCondition::explain));
             let assignment_count = inherited_assignments + recipe.preceding_statements.len();
             match &recipe.action {
+                CompiledAction::Pipe { .. } => {
+                    explanations.push(RecipeExplanation {
+                        line: recipe.line,
+                        assignment_count,
+                        conditions,
+                        destination: DestinationKind::ExternalProgram,
+                        copy: false,
+                        defers_destination: true,
+                    });
+                }
                 CompiledAction::Deliver {
                     destination,
                     continuation,
@@ -1189,6 +1217,10 @@ impl CompiledNode {
     fn compile(recipe: &Recipe, preceding_statements: Vec<CompiledStatement>) -> Self {
         let conditions = compile_conditions(recipe);
         let action = match &recipe.action {
+            RecipeAction::Pipe(action) => CompiledAction::Pipe {
+                _action: action.clone(),
+                _options: recipe.options,
+            },
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
                 destination: destination.clone(),
                 continuation: recipe.options.continuation,
@@ -1208,6 +1240,11 @@ impl CompiledNode {
 
     fn requirements(&self) -> InputRequirements {
         let action = match &self.action {
+            CompiledAction::Pipe { .. } => InputRequirements {
+                needs_headers: true,
+                needs_body_contents: true,
+                needs_end_of_message: true,
+            },
             CompiledAction::Deliver { .. } => InputRequirements::default(),
             CompiledAction::Block(sequence) => sequence.requirements(),
         };
@@ -1220,6 +1257,7 @@ impl CompiledNode {
 
     fn requires_ordered_delivery(&self) -> bool {
         match &self.action {
+            CompiledAction::Pipe { .. } => true,
             CompiledAction::Deliver {
                 destination,
                 continuation: _,
@@ -1235,6 +1273,7 @@ impl CompiledNode {
             .iter()
             .any(|condition| matches!(condition.kind, CompiledConditionKind::MessageRegex(_)))
             || match &self.action {
+                CompiledAction::Pipe { .. } => true,
                 CompiledAction::Deliver { .. } => false,
                 CompiledAction::Block(sequence) => sequence.needs_message_contents(),
             }
@@ -1351,6 +1390,7 @@ impl CompiledNode {
 
     fn delivery_defers_header(&self) -> bool {
         match &self.action {
+            CompiledAction::Pipe { .. } => true,
             CompiledAction::Deliver { destination, .. } => {
                 destination.needs_runtime_variables()
                     || matches!(destination, Destination::Mbox(_))
@@ -1373,6 +1413,9 @@ impl CompiledNode {
         execution: &mut SequenceExecution,
     ) -> Result<(ActionExecution, SequenceControl), EvalError> {
         match &self.action {
+            CompiledAction::Pipe { .. } => {
+                Err(EvalError::ExternalActionUnsupported { line: self.line })
+            }
             CompiledAction::Deliver {
                 destination,
                 continuation,
@@ -1436,6 +1479,9 @@ impl CompiledNode {
         T: TraceSink,
     {
         match &self.action {
+            CompiledAction::Pipe { .. } => Err(OrderedExecutionError::Evaluation(
+                EvalError::ExternalActionUnsupported { line: self.line },
+            )),
             CompiledAction::Deliver {
                 destination,
                 continuation,
@@ -1489,6 +1535,9 @@ impl CompiledNode {
         context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         match &self.action {
+            CompiledAction::Pipe { .. } => {
+                Err(EvalError::ExternalActionUnsupported { line: self.line })
+            }
             CompiledAction::Deliver { .. } => {
                 self.plan_delivery(runtime, execution, has_error_handler)
             }

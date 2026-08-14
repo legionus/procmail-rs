@@ -61,6 +61,54 @@ fn check_accepts_valid_config() {
 }
 
 #[test]
+fn check_and_explain_accept_pipe_actions_without_executing_them() {
+    let path = config_file(":0 fw\n| private-command --secret=value\n");
+
+    let check = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(0), "{:?}", check.stderr);
+
+    let explain = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["explain", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(explain.status.code(), Some(0), "{:?}", explain.stderr);
+    let stdout = String::from_utf8(explain.stdout).unwrap();
+    assert!(stdout.contains("destination=external-program"), "{stdout}");
+    assert!(!stdout.contains("private-command"), "{stdout}");
+    assert!(!stdout.contains("secret"), "{stdout}");
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_rejects_unimplemented_pipe_action_without_reading_stdin() {
+    let path = config_file(":0 fw\n| command\n");
+    let input_path = path.parent().unwrap().join("input.eml");
+    fs::write(&input_path, b"Subject: private\n\nbody").unwrap();
+    let mut input = fs::File::open(&input_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::from(input.try_clone().unwrap()))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(78), "{:?}", output.stderr);
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("pipe actions are parsed but not executable yet")
+    );
+    assert_eq!(input.stream_position().unwrap(), 0);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn check_recursively_validates_statically_resolved_includes() {
     let path = config_file("");
     let base = path.parent().unwrap();
@@ -1040,7 +1088,7 @@ fn explain_reports_internal_stdout_failure() {
 
 #[test]
 fn check_reports_source_line() {
-    let path = config_file(":0\n| command\n");
+    let path = config_file(":0\n! user@example.test\n");
     let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["check", "--config"])
         .arg(&path)
@@ -1052,7 +1100,7 @@ fn check_reports_source_line() {
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("rules.rc:line 2: pipe actions are not supported")
+            .contains("rules.rc:line 2: forward actions are not supported")
     );
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

@@ -7,11 +7,11 @@ use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaseMode, ChildStatusMode, Condition,
     ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination,
     MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE,
-    MAX_PATH_EXPRESSION_LEN, MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE,
-    MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE,
-    MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression, RcFileExpression, Recipe,
-    RecipeAction, RecipeOptions, RegexCondition, Statement, VariableSource, WriteErrorMode,
-    variable_policy,
+    MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_CONDITIONS, MAX_RC_RECIPES,
+    MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_CAPTURES,
+    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression,
+    PipeAction, RcFileExpression, Recipe, RecipeAction, RecipeOptions, RegexCondition, Statement,
+    VariableSource, WriteErrorMode, variable_policy,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -282,9 +282,6 @@ fn parse_recipe(
         .checked_add(regex_count)
         .ok_or_else(|| ParseError::new(start + 1, "rc regex count overflows"))?;
 
-    if action.starts_with('|') {
-        return Err(ParseError::new(index + 1, "pipe actions are not supported"));
-    }
     if action.starts_with('!') {
         return Err(ParseError::new(
             index + 1,
@@ -304,7 +301,24 @@ fn parse_recipe(
         return Err(ParseError::new(index + 1, "recipe action is empty"));
     }
 
-    let (action, next) = if action == "{" {
+    let is_pipe = action.starts_with('|');
+    if !is_pipe
+        && (options.action_input != ActionInput::Message
+            || options.action_mode != ActionMode::Deliver
+            || options.child_status != ChildStatusMode::Ignore
+            || options.write_errors != WriteErrorMode::Fail
+            || options.output_ending != OutputEnding::Normalize)
+    {
+        return Err(ParseError::new(
+            start + 1,
+            "flags h, b, f, w, W, i, and r require a pipe action",
+        ));
+    }
+
+    let (action, next) = if is_pipe {
+        let (command, next) = parse_pipe_command(lines, index)?;
+        (RecipeAction::Pipe(PipeAction { command }), next)
+    } else if action == "{" {
         let next_depth = depth
             .checked_add(1)
             .ok_or_else(|| ParseError::new(index + 1, "recipe nesting depth overflows"))?;
@@ -390,6 +404,55 @@ fn parse_recipe(
     Ok((recipe, next))
 }
 
+fn parse_pipe_command(lines: &[&str], start: usize) -> Result<(String, usize), ParseError> {
+    let first = lines[start].trim_start();
+    let mut physical = first
+        .strip_prefix('|')
+        .expect("pipe command starts with '|'")
+        .trim_start();
+    let mut command = String::new();
+    let mut index = start;
+
+    // Keep backslash-newline pairs for the real shell. The parser only finds
+    // the physical extent of the action and enforces its own allocation
+    // limit; it does not attempt to interpret shell quoting or substitutions.
+    loop {
+        let added = physical
+            .len()
+            .checked_add(usize::from(physical.ends_with('\\')))
+            .ok_or_else(|| ParseError::new(start + 1, "pipe command size overflows"))?;
+        let new_len = command
+            .len()
+            .checked_add(added)
+            .ok_or_else(|| ParseError::new(start + 1, "pipe command size overflows"))?;
+        if new_len > MAX_PIPE_COMMAND_LEN {
+            return Err(ParseError::new(
+                start + 1,
+                format!("pipe command exceeds the hard limit of {MAX_PIPE_COMMAND_LEN} bytes"),
+            ));
+        }
+        command.push_str(physical);
+        if !physical.ends_with('\\') {
+            break;
+        }
+        command.push('\n');
+        index = index
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(start + 1, "rc line index overflows"))?;
+        physical = lines
+            .get(index)
+            .copied()
+            .ok_or_else(|| ParseError::new(start + 1, "pipe command continuation is incomplete"))?;
+    }
+    if command.is_empty() {
+        return Err(ParseError::new(start + 1, "pipe command is empty"));
+    }
+    if command.as_bytes().contains(&0) {
+        return Err(ParseError::new(start + 1, "pipe command contains NUL"));
+    }
+    Ok((command, index + 1))
+}
+
 fn check_condition_limits(
     recipe_count: usize,
     prior_conditions: usize,
@@ -430,10 +493,12 @@ fn parse_recipe_header(
     if !flag_text.bytes().all(|byte| byte.is_ascii_alphabetic()) {
         return Err(ParseError::new(line, "invalid recipe flags"));
     }
-    if let Some(flag) = flag_text
-        .chars()
-        .find(|flag| !matches!(flag, 'H' | 'B' | 'D' | 'c' | 'A' | 'a' | 'E' | 'e'))
-    {
+    if let Some(flag) = flag_text.chars().find(|flag| {
+        !matches!(
+            flag,
+            'H' | 'B' | 'D' | 'c' | 'A' | 'a' | 'E' | 'e' | 'h' | 'b' | 'f' | 'w' | 'W' | 'i' | 'r'
+        )
+    }) {
         return Err(ParseError::new(
             line,
             format!("recipe flag '{flag}' is not supported yet"),
@@ -450,6 +515,12 @@ fn parse_recipe_header(
                 "recipe control flags '{}' and '{}' cannot be combined",
                 control_flags[0], control_flags[1]
             ),
+        ));
+    }
+    if flag_text.contains('w') && flag_text.contains('W') {
+        return Err(ParseError::new(
+            line,
+            "recipe flags 'w' and 'W' cannot be combined",
         ));
     }
 
@@ -483,12 +554,34 @@ fn parse_recipe_header(
                 CaseMode::Insensitive
             },
             control,
-            action_input: ActionInput::Message,
-            action_mode: ActionMode::Deliver,
+            action_input: match (flag_text.contains('h'), flag_text.contains('b')) {
+                (true, false) => ActionInput::Headers,
+                (false, true) => ActionInput::Body,
+                _ => ActionInput::Message,
+            },
+            action_mode: if flag_text.contains('f') {
+                ActionMode::Filter
+            } else {
+                ActionMode::Deliver
+            },
             continuation,
-            child_status: ChildStatusMode::Ignore,
-            write_errors: WriteErrorMode::Fail,
-            output_ending: OutputEnding::Normalize,
+            child_status: if flag_text.contains('w') {
+                ChildStatusMode::Wait
+            } else if flag_text.contains('W') {
+                ChildStatusMode::WaitQuietly
+            } else {
+                ChildStatusMode::Ignore
+            },
+            write_errors: if flag_text.contains('i') {
+                WriteErrorMode::Ignore
+            } else {
+                WriteErrorMode::Fail
+            },
+            output_ending: if flag_text.contains('r') {
+                OutputEnding::Preserve
+            } else {
+                OutputEnding::Normalize
+            },
         },
         lock,
     ))
@@ -880,11 +973,72 @@ mod tests {
     }
 
     #[test]
-    fn rejects_pipe_action_explicitly() {
-        let error = parse(":0\n| command\n").unwrap_err();
+    fn parses_pipe_flags_and_preserves_continued_shell_text() {
+        let config = parse(
+            ":0 HBcfhwir\n| FOO=1 formail \\\n    -I X-Spam: \\\n    -I X-Virus:\n:0\nmaildir:final\n",
+        )
+        .unwrap();
+        let Statement::Recipe(recipe) = &config.statements[0] else {
+            panic!("expected pipe recipe");
+        };
+        let RecipeAction::Pipe(action) = &recipe.action else {
+            panic!("expected pipe action");
+        };
 
+        assert_eq!(recipe.options.condition_input, ConditionInput::Message);
+        assert_eq!(recipe.options.action_input, ActionInput::Headers);
+        assert_eq!(recipe.options.action_mode, ActionMode::Filter);
+        assert_eq!(recipe.options.continuation, ContinuationMode::Continue);
+        assert_eq!(recipe.options.child_status, ChildStatusMode::Wait);
+        assert_eq!(recipe.options.write_errors, WriteErrorMode::Ignore);
+        assert_eq!(recipe.options.output_ending, OutputEnding::Preserve);
+        assert_eq!(
+            action.command,
+            "FOO=1 formail \\\n    -I X-Spam: \\\n    -I X-Virus:"
+        );
+        assert!(config.has_pipe_actions());
+        assert_eq!(config.statements.len(), 2);
+    }
+
+    #[test]
+    fn rejects_invalid_pipe_flag_combinations_and_uses() {
+        let error = parse(":0 wW\n| command\n").unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(error.message, "recipe flags 'w' and 'W' cannot be combined");
+
+        let error = parse(":0 f\nmaildir:target\n").unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(
+            error.message,
+            "flags h, b, f, w, W, i, and r require a pipe action"
+        );
+    }
+
+    #[test]
+    fn bounds_and_validates_pipe_command_text() {
+        let accepted = format!(":0\n| {}\n", "x".repeat(MAX_PIPE_COMMAND_LEN));
+        assert!(parse(&accepted).is_ok());
+
+        let rejected = format!(":0\n| {}\n", "x".repeat(MAX_PIPE_COMMAND_LEN + 1));
+        let error = parse(&rejected).unwrap_err();
         assert_eq!(error.line, 2);
-        assert_eq!(error.message, "pipe actions are not supported");
+        assert_eq!(
+            error.message,
+            format!("pipe command exceeds the hard limit of {MAX_PIPE_COMMAND_LEN} bytes")
+        );
+
+        for (source, message) in [
+            (":0\n|\n", "pipe command is empty"),
+            (
+                ":0\n| command \\\n",
+                "pipe command continuation is incomplete",
+            ),
+            (":0\n| command\0arg\n", "pipe command contains NUL"),
+        ] {
+            let error = parse(source).unwrap_err();
+            assert_eq!(error.line, 2);
+            assert_eq!(error.message, message);
+        }
     }
 
     #[test]
@@ -897,10 +1051,10 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_flag() {
-        let error = parse(":0 f\ninbox/\n").unwrap_err();
+        let error = parse(":0 q\ninbox/\n").unwrap_err();
 
         assert_eq!(error.line, 1);
-        assert_eq!(error.message, "recipe flag 'f' is not supported yet");
+        assert_eq!(error.message, "recipe flag 'q' is not supported yet");
     }
 
     #[test]

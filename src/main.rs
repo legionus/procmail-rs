@@ -156,6 +156,12 @@ fn run() -> Result<(), OperationalError> {
         return Ok(());
     }
 
+    if command.action == Action::Filter && config.has_pipe_actions() {
+        return Err(OperationalError::Configuration(
+            "pipe actions are parsed but not executable yet".to_owned(),
+        ));
+    }
+
     let plan = ExecutionPlan::compile_with_loader(&config, rc_loader);
 
     // A deferred decision needs a replayable private copy of stdin. Requiring
@@ -260,6 +266,7 @@ fn write_plan_explanation(
         let destination = match recipe.destination() {
             DestinationKind::Maildir => "maildir",
             DestinationKind::Mbox => "mbox",
+            DestinationKind::ExternalProgram => "external-program",
         };
         writeln!(
             writer,
