@@ -73,6 +73,34 @@ Retrying after a multi-destination or copy delivery failed can publish a
 duplicate at destinations that succeeded before the failure. A production
 integration should account for that possibility when it uses copy recipes.
 
+## Runtime rc files
+
+`INCLUDERC` and `SWITCHRC` select files while a message is being evaluated.
+Unlike procmail 3.22, `procmail-rs` applies a trust policy before parsing such
+a file:
+
+- the final path component is opened with `O_NOFOLLOW` and must be a regular
+  file;
+- its numeric owner must match the owner of the root rc file;
+- group and other users must not have write permission;
+- the type, owner, and mode are checked on the opened descriptor rather than
+  through a separate pathname lookup.
+
+The root rc file is selected by the command line and establishes the trusted
+numeric owner. It is not subjected to the runtime ownership and mode checks.
+Administrators must protect that file and the command line that selects it.
+
+Only a symlink in the final path component is rejected. Intermediate directory
+symlinks and hard links to an otherwise accepted file are allowed. Directory
+changes may alter which file is opened, but the opened file must still pass
+the type, owner, and mode checks above.
+
+Original procmail performs none of these ownership or permission checks. A
+configuration that includes a group-writable file, a file owned by another
+user, or a final symlink will therefore be rejected by `procmail-rs`. A failed
+runtime include or switch is diagnosed and follows the documented procmail
+recovery behavior; resource-limit failures remain fatal.
+
 ## Mbox format
 
 Mbox delivery writes the **mboxrd** on-disk format, using the reversible

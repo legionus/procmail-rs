@@ -434,21 +434,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_symlink_and_group_writable_include() {
+    fn rejects_non_regular_and_broadly_writable_runtime_files() {
         let directory = TestDirectory::new();
         let root = directory.path("root.rc");
         let child = directory.path("child.rc");
         let link = directory.path("link.rc");
+        let subdirectory = directory.path("directory.rc");
         fs::write(&root, "ROOT=yes\n").unwrap();
         fs::write(&child, "CHILD=yes\n").unwrap();
         symlink(&child, &link).unwrap();
+        fs::create_dir(&subdirectory).unwrap();
 
         let (mut loader, _) = RcFileLoader::for_root(&root).unwrap();
         assert!(loader.load(&link, 1).is_err());
+        let error = loader.load(&subdirectory, 1).unwrap_err();
+        assert!(error.safe_message().contains("not a regular file"));
 
         fs::set_permissions(&child, fs::Permissions::from_mode(0o620)).unwrap();
         let error = loader.load(&child, 1).unwrap_err();
         assert!(error.to_string().contains("writable by group"));
+
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o602)).unwrap();
+        let error = loader.load(&child, 1).unwrap_err();
+        assert!(error.to_string().contains("other users"));
+    }
+
+    #[test]
+    fn rejects_a_runtime_file_owned_by_a_different_uid() {
+        let directory = TestDirectory::new();
+        let root = directory.path("root.rc");
+        let child = directory.path("child.rc");
+        fs::write(&root, "ROOT=yes\n").unwrap();
+        fs::write(&child, "CHILD=yes\n").unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+        let (mut loader, _) = RcFileLoader::for_root(&root).unwrap();
+        loader.trusted_uid ^= 1;
+
+        let error = loader.load(&child, 1).unwrap_err();
+
+        assert!(error.safe_message().contains("differs from trusted owner"));
     }
 
     #[test]
