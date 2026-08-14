@@ -162,8 +162,10 @@ fn check_statement_limit(count: usize, line: usize) -> Result<(), ParseError> {
 }
 
 fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>, ParseError> {
-    let Some((name, value)) = line.split_once('=') else {
-        return Ok(None);
+    let (name, value) = match line.split_once('=') {
+        Some(parts) => parts,
+        None if line == "HOST" => ("HOST", ""),
+        None => return Ok(None),
     };
     let name = name.trim();
     if name.len() > MAX_ASSIGNMENT_NAME_LEN {
@@ -194,6 +196,12 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
                 format!("variable {name} cannot be assigned in an rc file"),
             )
         })?;
+    if target == AssignmentTarget::Host && !value.is_empty() {
+        return Err(ParseError::new(
+            line_number,
+            "non-empty HOST assignments are not supported yet",
+        ));
+    }
     let limit = super::assignment_value_limit(target);
     if value.len() > limit {
         let kind = if matches!(
@@ -959,6 +967,29 @@ mod tests {
         };
 
         assert_eq!(assignment.target, crate::config::AssignmentTarget::User);
+    }
+
+    #[test]
+    fn parses_bare_host_as_an_empty_assignment() {
+        let config = parse("HOST\n").unwrap();
+        let Statement::Assignment(assignment) = &config.statements[0] else {
+            panic!("expected assignment");
+        };
+
+        assert_eq!(assignment.name, "HOST");
+        assert_eq!(assignment.value, "");
+        assert_eq!(assignment.target, crate::config::AssignmentTarget::Host);
+    }
+
+    #[test]
+    fn rejects_non_empty_host_until_hostname_matching_is_supported() {
+        let error = parse("HOST=elsewhere\n").unwrap_err();
+
+        assert_eq!(error.line, 1);
+        assert_eq!(
+            error.message,
+            "non-empty HOST assignments are not supported yet"
+        );
     }
 
     #[test]

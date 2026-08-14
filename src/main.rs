@@ -118,7 +118,7 @@ impl OperationalError {
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::from(ExitStatus::Success as u8),
+        Ok(status) => ExitCode::from(status),
         Err(error) => {
             eprintln!("procmail-rs: {error}");
             ExitCode::from(error.exit_status() as u8)
@@ -126,7 +126,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), OperationalError> {
+fn run() -> Result<u8, OperationalError> {
     let command = parse_args().map_err(OperationalError::Configuration)?;
     let path = &command.config;
     let (mut rc_loader, root_rc) = RcFileLoader::for_root(path)
@@ -166,7 +166,7 @@ fn run() -> Result<(), OperationalError> {
                 "procmail-rs: warning: configuration contains external shell actions; no command was executed"
             );
         }
-        return Ok(());
+        return Ok(ExitStatus::Success as u8);
     }
 
     let plan = ExecutionPlan::compile_with_loader(&config, rc_loader);
@@ -188,6 +188,7 @@ fn run() -> Result<(), OperationalError> {
     // attempt that later fails delivery. Run the action inside a closure so
     // every `?` returns here first and the bounded diagnostic queue is always
     // drained before this function returns to main.
+    let mut requested_status = None;
     let result = (|| match command.action {
         Action::Check => unreachable!(),
         Action::Explain => {
@@ -203,50 +204,82 @@ fn run() -> Result<(), OperationalError> {
             let head = Message::read_headers(&mut stdin, limits).map_err(|error| {
                 OperationalError::Input(format!("cannot read message headers from stdin: {error}"))
             })?;
-            match plan.evaluate_headers_with_trace(&head, &mut runtime, &mut trace) {
-                HeaderEvaluation::Decided(delivery) => deliver_decided(
-                    head,
-                    &mut stdin,
-                    &delivery,
-                    durability,
-                    &mut runtime,
-                    &mut trace,
-                ),
-                HeaderEvaluation::NeedsMessage(continuation) => {
-                    let runtime_staging = runtime.get("MAILDIR").map(PathBuf::from);
-                    let staging_directory = runtime_staging
-                        .as_deref()
-                        .or(staging_directory.as_deref())
-                        .ok_or_else(|| {
-                            OperationalError::Internal(
-                                "internal error: deferred evaluation has no staging directory"
-                                    .to_owned(),
-                            )
-                        })?;
-                    deliver_staged(
+            let delivery_result =
+                match plan.evaluate_headers_with_trace(&head, &mut runtime, &mut trace) {
+                    HeaderEvaluation::Decided(delivery) => deliver_decided(
                         head,
                         &mut stdin,
-                        &plan,
-                        continuation,
-                        StagingOptions {
-                            directory: staging_directory,
-                            durability,
-                        },
+                        &delivery,
+                        durability,
                         &mut runtime,
                         &mut trace,
-                        limits,
-                    )
-                }
-                HeaderEvaluation::Error(error) => Err(OperationalError::PermanentDestination(
-                    format!("cannot evaluate message: {error}"),
-                )),
+                    ),
+                    HeaderEvaluation::NeedsMessage(continuation) => {
+                        let runtime_staging = runtime.get("MAILDIR").map(PathBuf::from);
+                        let staging_directory = runtime_staging
+                            .as_deref()
+                            .or(staging_directory.as_deref())
+                            .ok_or_else(|| {
+                                OperationalError::Internal(
+                                    "internal error: deferred evaluation has no staging directory"
+                                        .to_owned(),
+                                )
+                            })?;
+                        deliver_staged(
+                            head,
+                            &mut stdin,
+                            &plan,
+                            continuation,
+                            StagingOptions {
+                                directory: staging_directory,
+                                durability,
+                            },
+                            &mut runtime,
+                            &mut trace,
+                            limits,
+                        )
+                    }
+                    HeaderEvaluation::Error(error) => Err(OperationalError::PermanentDestination(
+                        format!("cannot evaluate message: {error}"),
+                    )),
+                };
+
+            // EXITCODE is resolved after recipe processing because a failure
+            // handler may assign it using values produced while filtering.
+            // A valid value deliberately replaces a delivery error, matching
+            // procmail's final-status override behavior.
+            requested_status = parse_requested_exit_code(&runtime)?;
+            if requested_status.is_some() {
+                Ok(())
+            } else {
+                delivery_result
             }
         }
     })();
     for diagnostic in plan.take_rc_diagnostics() {
         eprintln!("procmail-rs: {diagnostic}");
     }
-    result
+    result?;
+    Ok(requested_status.unwrap_or(ExitStatus::Success as u8))
+}
+
+fn parse_requested_exit_code(runtime: &RuntimeVariables) -> Result<Option<u8>, OperationalError> {
+    let Some(value) = runtime.get("EXITCODE") else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(OperationalError::PermanentDestination(
+            "EXITCODE must be an unsigned decimal value from 0 through 255".to_owned(),
+        ));
+    }
+    value.parse::<u8>().map(Some).map_err(|_| {
+        OperationalError::PermanentDestination(
+            "EXITCODE must be an unsigned decimal value from 0 through 255".to_owned(),
+        )
+    })
 }
 
 fn write_plan_explanation(

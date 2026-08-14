@@ -373,6 +373,8 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::Shell
                         | AssignmentTarget::ShellFlags
                         | AssignmentTarget::Path
+                        | AssignmentTarget::ExitCode
+                        | AssignmentTarget::Host
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,

@@ -120,6 +120,7 @@ struct CompiledAssignment {
 #[derive(Debug)]
 enum CompiledStatement {
     Assignment(CompiledAssignment),
+    Host(CompiledAssignment),
     Include(CompiledInclude),
     Switch(CompiledSwitch),
 }
@@ -681,11 +682,16 @@ impl CompiledSequence {
         for statement in statements {
             match statement {
                 Statement::Assignment(assignment) => {
-                    preceding.push(CompiledStatement::Assignment(CompiledAssignment {
+                    let compiled = CompiledAssignment {
                         assignment: assignment.clone(),
                         line: Some(assignment.line),
                         source: TraceVariableSource::RcFile,
-                    }))
+                    };
+                    if assignment.target == AssignmentTarget::Host {
+                        preceding.push(CompiledStatement::Host(compiled));
+                    } else {
+                        preceding.push(CompiledStatement::Assignment(compiled));
+                    }
                 }
                 Statement::Recipe(recipe) => {
                     recipes.push(CompiledNode::compile(recipe, std::mem::take(preceding)));
@@ -752,7 +758,10 @@ impl CompiledSequence {
         let mut state = SequenceState::default();
 
         for recipe in &self.recipes {
-            execute_statements(&recipe.preceding_statements, runtime, trace)?;
+            let control = execute_statements(&recipe.preceding_statements, runtime, trace)?;
+            if control != SequenceControl::Continue {
+                return Ok(control);
+            }
 
             // Control-flow flags inspect only results produced at this block
             // level. Child sequences therefore cannot overwrite the state
@@ -776,13 +785,12 @@ impl CompiledSequence {
             };
 
             state.record(recipe.control, conditions_matched, action, else_handled);
-            if control == SequenceControl::Stop {
-                return Ok(SequenceControl::Stop);
+            if control != SequenceControl::Continue {
+                return Ok(control);
             }
         }
 
-        execute_statements(&self.trailing_statements, runtime, trace)?;
-        Ok(SequenceControl::Continue)
+        execute_statements(&self.trailing_statements, runtime, trace)
     }
 
     fn execute_ordered<E, D, T>(
@@ -1182,7 +1190,10 @@ impl CompiledSequence {
             .ok_or(EvalError::BodyWasNotBuffered)?;
         let mut state = frame.state;
         if !frame.assignments_applied {
-            execute_statements(&recipe.preceding_statements, runtime, trace)?;
+            let control = execute_statements(&recipe.preceding_statements, runtime, trace)?;
+            if control != SequenceControl::Continue {
+                return Ok(control);
+            }
         }
 
         let (conditions_matched, control) = if depth + 1 < frames.len() {
@@ -1703,11 +1714,15 @@ fn execute_statements(
     statements: &[CompiledStatement],
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
-) -> Result<(), EvalError> {
+) -> Result<SequenceControl, EvalError> {
     for statement in statements {
         match statement {
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, runtime, trace)?;
+            }
+            CompiledStatement::Host(assignment) => {
+                execute_assignment(assignment, runtime, trace)?;
+                return Ok(SequenceControl::EndRcFile);
             }
             CompiledStatement::Include(include) => {
                 return Err(EvalError::RuntimeRcLoaderUnavailable {
@@ -1723,7 +1738,7 @@ fn execute_statements(
             }
         }
     }
-    Ok(())
+    Ok(SequenceControl::Continue)
 }
 
 fn execute_assignment(
@@ -1762,6 +1777,11 @@ fn plan_statements_complete(
         match statement {
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, runtime, trace)?;
+            }
+            CompiledStatement::Host(assignment) => {
+                execute_assignment(assignment, runtime, trace)?;
+                execution.original_delivered = true;
+                return Ok(SequenceControl::EndRcFile);
             }
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;
@@ -1827,6 +1847,13 @@ where
                 execute_assignment(assignment, context.runtime, context.trace)
                     .map_err(OrderedExecutionError::Evaluation)?;
             }
+            CompiledStatement::Host(assignment) => {
+                execute_assignment(assignment, context.runtime, context.trace)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                context.original_delivered = true;
+                context.pending_error = None;
+                return Ok(SequenceControl::EndRcFile);
+            }
             CompiledStatement::Include(include) => {
                 include
                     .ensure_loaded(context.runtime, context.rc)
@@ -1889,6 +1916,11 @@ fn plan_statements_headers(
         match statement {
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, runtime, trace)?;
+            }
+            CompiledStatement::Host(assignment) => {
+                execute_assignment(assignment, runtime, trace)?;
+                planning.execution.original_delivered = true;
+                return Ok(HeaderControl::EndRcFile);
             }
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;

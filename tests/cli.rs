@@ -46,6 +46,73 @@ fn assert_message_contents_absent(stderr: &[u8], secrets: &[&str]) {
 }
 
 #[test]
+fn bare_host_stops_processing_as_a_successful_fake_delivery() {
+    let path = config_file("HOST\n:0\nmaildir:unreachable\n");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: test\n\nbody\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(!path.parent().unwrap().join("unreachable").exists());
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn failure_handler_can_override_exit_status_and_stop_with_host() {
+    let path = config_file(":0 w\n| exit 7\n:0 e\n{\nEXITCODE=75\nHOST\n}\n");
+    let rules = format!(
+        "MAILDIR={}\n:0 w\n| exit 7\n:0 e\n{{\nEXITCODE=75\nHOST\n}}\n",
+        path.parent().unwrap().display()
+    );
+    fs::write(&path, rules).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: test\n\nbody\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(75), "{:?}", output.stderr);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn invalid_exitcode_is_reported_without_echoing_message_data() {
+    let path = config_file("EXITCODE=999\nHOST\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(73));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("EXITCODE must be"));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn check_accepts_valid_config() {
     let path = config_file(":0\nmaildir:inbox\n");
     let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))

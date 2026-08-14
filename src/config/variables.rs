@@ -26,6 +26,8 @@ pub enum AssignmentTarget {
     Shell,
     ShellFlags,
     Path,
+    ExitCode,
+    Host,
     MessageLimit(MessageLimitVariable),
     User,
 }
@@ -139,6 +141,8 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "SHELL" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Shell),
         "SHELLFLAGS" => VariablePolicy::RcOrCommandLine(AssignmentTarget::ShellFlags),
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
+        "EXITCODE" => VariablePolicy::RcOnly(AssignmentTarget::ExitCode),
+        "HOST" => VariablePolicy::RcOnly(AssignmentTarget::Host),
         "LASTFOLDER" | "MATCH" => VariablePolicy::RuntimeOnly,
         name if name.strip_prefix("MATCH").is_some_and(|suffix| {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
@@ -174,6 +178,8 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
         AssignmentTarget::LogDetail
         | AssignmentTarget::Verbose
         | AssignmentTarget::Durability
+        | AssignmentTarget::ExitCode
+        | AssignmentTarget::Host
         | AssignmentTarget::MessageLimit(_)
         | AssignmentTarget::User => MAX_ASSIGNMENT_VALUE_LEN,
     }
