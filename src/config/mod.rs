@@ -36,6 +36,15 @@ pub const MAX_RC_STATEMENTS: usize = 4096;
 pub struct Config {
     pub statements: Vec<Statement>,
     pub(crate) initial_variables: Vec<(String, String)>,
+    pub(crate) parse_counts: RcParseCounts,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RcParseCounts {
+    pub(crate) statements: usize,
+    pub(crate) recipes: usize,
+    pub(crate) conditions: usize,
+    pub(crate) regexes: usize,
 }
 
 impl Config {
@@ -70,6 +79,10 @@ impl Config {
 
     pub(crate) fn initial_variables(&self) -> &[(String, String)] {
         &self.initial_variables
+    }
+
+    pub(crate) fn parse_counts(&self) -> RcParseCounts {
+        self.parse_counts
     }
 }
 

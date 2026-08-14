@@ -205,6 +205,71 @@ fn runtime_maildir_changes_the_base_for_include_and_switch() {
 }
 
 #[test]
+fn include_and_switch_cycles_stop_at_the_rc_depth_limit() {
+    for statement in ["INCLUDERC", "SWITCHRC"] {
+        let path = config_file("");
+        let base = path.parent().unwrap();
+        let selected_rc = base.join("private-cycle.rc");
+        fs::write(&path, format!("{statement}=private-cycle.rc\n")).unwrap();
+        fs::write(&selected_rc, format!("{statement}=private-cycle.rc\n")).unwrap();
+        fs::set_permissions(&selected_rc, fs::Permissions::from_mode(0o600)).unwrap();
+        let input = format!("Subject: {statement} cycle\n\nbody");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .current_dir(base)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(output.status.code(), Some(73), "{:?}", output.stderr);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("rc nesting exceeds the hard limit"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("private-cycle.rc"), "{stderr}");
+        fs::remove_dir_all(base).unwrap();
+    }
+}
+
+#[test]
+fn executed_empty_includes_stop_at_the_transition_limit() {
+    let limit = procmail_rs::rc_file::MAX_RC_TRANSITIONS;
+    let mut source = "INCLUDERC=\n".repeat(limit);
+    source.push_str("INCLUDERC=\n:0\nmaildir:unreachable\n");
+    let path = config_file(&source);
+    let input = b"Subject: transition limit\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(73), "{:?}", output.stderr);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!("rc transitions exceed the hard limit of {limit}")),
+        "{stderr}"
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn filter_reports_failed_include_without_exposing_its_path_and_continues() {
     let path = config_file("");
     let base = path.parent().unwrap();

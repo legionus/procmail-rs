@@ -12,7 +12,8 @@ use rustix::fd::OwnedFd;
 use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 
 use crate::config::{
-    self, AssignmentTarget, Config, MAX_RC_SIZE, RcFileExpression, RecipeAction, Statement,
+    self, AssignmentTarget, Config, MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE,
+    MAX_RC_STATEMENTS, RcFileExpression, RcParseCounts, RecipeAction, Statement,
 };
 use crate::runtime::RuntimeVariables;
 
@@ -26,6 +27,7 @@ pub struct RcFileLoader {
     trusted_uid: u32,
     files_read: usize,
     bytes_read: usize,
+    parse_counts: RcParseCounts,
 }
 
 #[derive(Debug)]
@@ -69,6 +71,7 @@ impl RcFileLoader {
                 trusted_uid: metadata.uid(),
                 files_read: 1,
                 bytes_read: source_len,
+                parse_counts: RcParseCounts::default(),
             },
             loaded,
         ))
@@ -155,6 +158,7 @@ impl RcFileLoader {
         let config = config::parse(loaded.source()).map_err(|error| {
             RcFileError::new(loaded.path(), format!("invalid rc syntax: {error}"))
         })?;
+        self.account_config(loaded.path(), &config)?;
         let config = config
             .expand_with_runtime_values(runtime.values())
             .map_err(|error| {
@@ -172,6 +176,53 @@ impl RcFileLoader {
         }))
     }
 
+    pub fn account_root_config(&mut self, config: &Config) -> Result<(), RcFileError> {
+        self.account_config(Path::new("<root rc>"), config)
+    }
+
+    fn account_config(&mut self, path: &Path, config: &Config) -> Result<(), RcFileError> {
+        let added = config.parse_counts();
+
+        // Calculate every total before updating the loader. A rejected file
+        // still consumes its file and byte budgets, but must not leave only a
+        // subset of the syntax counters changed.
+        let statements = add_parse_count(
+            path,
+            "statement",
+            self.parse_counts.statements,
+            added.statements,
+            MAX_RC_STATEMENTS,
+        )?;
+        let recipes = add_parse_count(
+            path,
+            "recipe",
+            self.parse_counts.recipes,
+            added.recipes,
+            MAX_RC_RECIPES,
+        )?;
+        let conditions = add_parse_count(
+            path,
+            "condition",
+            self.parse_counts.conditions,
+            added.conditions,
+            MAX_RC_CONDITIONS,
+        )?;
+        let regexes = add_parse_count(
+            path,
+            "regex",
+            self.parse_counts.regexes,
+            added.regexes,
+            MAX_RC_REGEXES,
+        )?;
+        self.parse_counts = RcParseCounts {
+            statements,
+            recipes,
+            conditions,
+            regexes,
+        };
+        Ok(())
+    }
+
     pub fn files_read(&self) -> usize {
         self.files_read
     }
@@ -179,6 +230,25 @@ impl RcFileLoader {
     pub fn bytes_read(&self) -> usize {
         self.bytes_read
     }
+}
+
+fn add_parse_count(
+    path: &Path,
+    name: &str,
+    current: usize,
+    added: usize,
+    limit: usize,
+) -> Result<usize, RcFileError> {
+    let total = current
+        .checked_add(added)
+        .ok_or_else(|| RcFileError::limit(path, format!("aggregate rc {name} count overflows")))?;
+    if total > limit {
+        return Err(RcFileError::limit(
+            path,
+            format!("aggregate rc {name} count exceeds the hard limit of {limit}"),
+        ));
+    }
+    Ok(total)
 }
 
 fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &str)> {
@@ -425,6 +495,107 @@ mod tests {
         assert!(error.to_string().contains("not valid UTF-8"));
         assert_eq!(loader.files_read(), 2);
         assert_eq!(loader.bytes_read(), 10);
+    }
+
+    #[test]
+    fn failed_open_attempts_reach_the_file_count_limit() {
+        let directory = TestDirectory::new();
+        let root = directory.path("root.rc");
+        fs::write(&root, "ROOT=yes\n").unwrap();
+        let (mut loader, _) = RcFileLoader::for_root(&root).unwrap();
+
+        for attempt in 1..MAX_RC_FILE_COUNT {
+            let error = loader
+                .load(&directory.path(&format!("missing-{attempt}.rc")), 1)
+                .unwrap_err();
+            assert!(!error.is_resource_limit());
+        }
+        let error = loader
+            .load(&directory.path("one-too-many.rc"), 1)
+            .unwrap_err();
+
+        assert!(error.is_resource_limit());
+        assert!(error.safe_message().contains("file count exceeds"));
+    }
+
+    #[test]
+    fn repeated_files_reach_the_aggregate_byte_limit() {
+        let directory = TestDirectory::new();
+        let root = directory.path("root.rc");
+        let child = directory.path("child.rc");
+        fs::write(&root, "#\n").unwrap();
+        fs::write(&child, vec![b'#'; MAX_RC_SIZE]).unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+        let (mut loader, _) = RcFileLoader::for_root(&root).unwrap();
+
+        for _ in 0..3 {
+            loader.load(&child, 1).unwrap();
+        }
+        let error = loader.load(&child, 1).unwrap_err();
+
+        assert!(error.is_resource_limit());
+        assert!(error.safe_message().contains("aggregate rc size exceeds"));
+    }
+
+    #[test]
+    fn parsed_runtime_files_share_root_syntax_budgets() {
+        let mut condition_source = String::new();
+        for _ in 0..(MAX_RC_CONDITIONS / config::MAX_CONDITIONS_PER_RECIPE) {
+            condition_source.push_str(":0 c\n");
+            condition_source.push_str(&"* < 1\n".repeat(config::MAX_CONDITIONS_PER_RECIPE));
+            condition_source.push_str("maildir:x\n");
+        }
+        let cases = [
+            (
+                "statement",
+                "A=\n".repeat(MAX_RC_STATEMENTS),
+                "B=\n".to_owned(),
+            ),
+            (
+                "recipe",
+                ":0 c\nmaildir:x\n".repeat(MAX_RC_RECIPES),
+                ":0\nmaildir:x\n".to_owned(),
+            ),
+            (
+                "condition",
+                condition_source,
+                ":0\n* < 1\nmaildir:x\n".to_owned(),
+            ),
+            (
+                "regex",
+                format!(":0\n{}maildir:x\n", "* pattern\n".repeat(MAX_RC_REGEXES)),
+                ":0\n* pattern\nmaildir:x\n".to_owned(),
+            ),
+        ];
+
+        for (name, root_source, child_source) in cases {
+            let directory = TestDirectory::new();
+            let root = directory.path("root.rc");
+            let child = directory.path("child.rc");
+            fs::write(&root, &root_source).unwrap();
+            fs::write(&child, child_source).unwrap();
+            fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+            let (mut loader, _) = RcFileLoader::for_root(&root).unwrap();
+            let root_config = config::parse(&root_source).unwrap();
+            loader.account_root_config(&root_config).unwrap();
+            let expression_config =
+                config::parse(&format!("INCLUDERC={}\n", child.display())).unwrap();
+            let Statement::Include(expression) = &expression_config.statements[0] else {
+                panic!("expected include");
+            };
+
+            let error = loader
+                .load_config(expression, &RuntimeVariables::default(), 1)
+                .unwrap_err();
+
+            assert!(error.is_resource_limit(), "{name}: {error}");
+            assert!(
+                error
+                    .safe_message()
+                    .contains(&format!("aggregate rc {name} count exceeds")),
+                "{name}: {error}"
+            );
+        }
     }
 
     #[test]

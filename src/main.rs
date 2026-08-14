@@ -121,12 +121,15 @@ fn main() -> ExitCode {
 fn run() -> Result<(), OperationalError> {
     let command = parse_args().map_err(OperationalError::Configuration)?;
     let path = &command.config;
-    let (rc_loader, root_rc) = RcFileLoader::for_root(path)
+    let (mut rc_loader, root_rc) = RcFileLoader::for_root(path)
         .map_err(|error| OperationalError::Configuration(error.to_string()))?;
     let config = config::parse(root_rc.source())
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
         .expand_with(&command.supplied)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
+    rc_loader
+        .account_root_config(&config)
+        .map_err(|error| OperationalError::Configuration(error.to_string()))?;
     let staging_directory = config.maildir().map(PathBuf::from);
     if let Some(maildir) = &staging_directory {
         validate_maildir_path(maildir).map_err(|error| {

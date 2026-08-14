@@ -28,6 +28,7 @@ pub fn parse(input: &str) -> Result<Config, ParseError> {
     Ok(Config {
         statements,
         initial_variables: Vec::new(),
+        parse_counts: counts.into(),
     })
 }
 
@@ -37,6 +38,17 @@ struct ParseCounts {
     recipes: usize,
     conditions: usize,
     regexes: usize,
+}
+
+impl From<ParseCounts> for super::RcParseCounts {
+    fn from(counts: ParseCounts) -> Self {
+        Self {
+            statements: counts.statements,
+            recipes: counts.recipes,
+            conditions: counts.conditions,
+            regexes: counts.regexes,
+        }
+    }
 }
 
 fn parse_statements(
