@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+:0
+* ^X-Select: yes$
+{
+  INCLUDERC=selected.procmail.rc
+}
+
+:0
+$OUT/99-final

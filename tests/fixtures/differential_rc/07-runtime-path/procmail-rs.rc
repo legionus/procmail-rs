@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+MAILDIR=$CASE
+:0
+* ^X-Rules: \/selected
+{
+  INCLUDERC=$MATCH.$DIALECT.rc
+}
+
+:0
+mbox:$OUT/99-final

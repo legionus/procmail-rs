@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+:0 c
+$OUT/01-maildir-relative

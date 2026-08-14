@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+MAILDIR=$CASE
+INCLUDERC=missing.rc
+
+:0
+mbox:$OUT/99-final
