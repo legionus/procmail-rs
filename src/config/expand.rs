@@ -9,7 +9,7 @@ use super::{
     Assignment, AssignmentTarget, Config, Destination, ExpansionExpression, ExpansionPart,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression,
     RcFileExpression, Recipe, RecipeAction, Statement, SuppliedVariable, VariablePolicy,
-    variable_policy,
+    assignment_value_limit, variable_policy,
 };
 
 #[derive(Debug, Clone)]
@@ -53,10 +53,7 @@ impl Assignment {
         let Some(expression) = self.expansion.as_ref() else {
             return Ok(self.value.clone());
         };
-        let limit = match self.target {
-            AssignmentTarget::Maildir | AssignmentTarget::LogFile => MAX_PATH_EXPRESSION_LEN,
-            _ => MAX_ASSIGNMENT_VALUE_LEN,
-        };
+        let limit = assignment_value_limit(self.target);
         let value = evaluate_expression(expression, self.line, limit, &mut lookup, 0)?.text;
         if self.target != AssignmentTarget::Maildir {
             return Ok(value);
@@ -266,16 +263,7 @@ fn expand_config(
     for statement in &mut config.statements {
         match statement {
             Statement::Assignment(assignment) => {
-                let limit = match assignment.target {
-                    AssignmentTarget::Maildir | AssignmentTarget::LogFile => {
-                        MAX_PATH_EXPRESSION_LEN
-                    }
-                    AssignmentTarget::Verbose
-                    | AssignmentTarget::Durability
-                    | AssignmentTarget::LogDetail
-                    | AssignmentTarget::MessageLimit(_)
-                    | AssignmentTarget::User => MAX_ASSIGNMENT_VALUE_LEN,
-                };
+                let limit = assignment_value_limit(assignment.target);
                 let expanded = expand_text(&assignment.value, assignment.line, limit, &variables)?;
                 assignment.value = expanded.text;
                 if assignment.target == AssignmentTarget::Maildir {
@@ -379,7 +367,11 @@ fn prepare_runtime_statements(
             Statement::Assignment(assignment) => {
                 if !matches!(
                     assignment.target,
-                    AssignmentTarget::User | AssignmentTarget::Maildir
+                    AssignmentTarget::User
+                        | AssignmentTarget::Maildir
+                        | AssignmentTarget::Shell
+                        | AssignmentTarget::ShellFlags
+                        | AssignmentTarget::Path
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,
@@ -932,7 +924,7 @@ fn push_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ConditionKind, parse};
+    use crate::config::{ConditionKind, MAX_SHELL_SETTING_LEN, parse};
 
     fn resolved_destination(config: &Config, statement_index: usize) -> Destination {
         let mut variables = config
@@ -1247,6 +1239,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bounds_expanded_shell_settings() {
+        let prefix = "x".repeat(MAX_SHELL_SETTING_LEN / 2 + 1);
+        let source = format!("PREFIX={prefix}\nSHELL=$PREFIX$PREFIX\n");
+        let error = parse(&source).unwrap().expand().unwrap_err();
+
+        assert_eq!(error.line, 2);
+        assert_eq!(
+            error.message,
+            format!("expanded value exceeds the hard limit of {MAX_SHELL_SETTING_LEN} bytes")
+        );
     }
 
     #[test]

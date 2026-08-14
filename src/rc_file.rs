@@ -411,7 +411,11 @@ fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &st
             Statement::Assignment(assignment)
                 if !matches!(
                     assignment.target,
-                    AssignmentTarget::User | AssignmentTarget::Maildir
+                    AssignmentTarget::User
+                        | AssignmentTarget::Maildir
+                        | AssignmentTarget::Shell
+                        | AssignmentTarget::ShellFlags
+                        | AssignmentTarget::Path
                 ) =>
             {
                 return Err((assignment.line, assignment.name.as_str()));

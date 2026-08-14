@@ -13,11 +13,12 @@ pub use expand::ExpansionError;
 pub use parser::parse;
 pub use variables::{
     AssignmentTarget, MAX_COMMAND_LINE_VARIABLES, MessageLimitVariable, SuppliedVariable,
-    SuppliedVariableError, VariablePolicy, VariableSource, variable_policy,
+    SuppliedVariableError, VariablePolicy, VariableSource, assignment_value_limit, variable_policy,
 };
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;
 pub const MAX_ASSIGNMENT_VALUE_LEN: usize = 64 * 1024;
+pub const MAX_SHELL_SETTING_LEN: usize = 4096;
 pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
 pub const MAX_EXPANSION_DEPTH: usize = 32;
 pub const MAX_PATH_EXPRESSION_LEN: usize = 4096;

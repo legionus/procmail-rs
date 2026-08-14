@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use super::{MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN};
+use super::{MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING_LEN};
 
 pub const MAX_COMMAND_LINE_VARIABLES: usize = 256;
 
@@ -23,6 +23,9 @@ pub enum AssignmentTarget {
     LogDetail,
     Verbose,
     Durability,
+    Shell,
+    ShellFlags,
+    Path,
     MessageLimit(MessageLimitVariable),
     User,
 }
@@ -72,9 +75,19 @@ impl SuppliedVariable {
                 "--set name must start with an ASCII letter or '_' and contain only ASCII letters, digits, or '_'",
             ));
         }
-        if !variable_policy(name).allows(VariableSource::CommandLine) {
+        let policy = variable_policy(name);
+        if !policy.allows(VariableSource::CommandLine) {
             return Err(SuppliedVariableError::new(format!(
                 "variable {name} cannot be supplied with --set"
+            )));
+        }
+        let target = policy
+            .assignment_target(VariableSource::CommandLine)
+            .expect("an allowed command-line variable has an assignment target");
+        let limit = assignment_value_limit(target);
+        if value.len() > limit {
+            return Err(SuppliedVariableError::new(format!(
+                "--set {name} value exceeds the hard limit of {limit} bytes"
             )));
         }
         Ok(Self {
@@ -123,6 +136,9 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LOGDETAIL" => VariablePolicy::RcOnly(AssignmentTarget::LogDetail),
         "VERBOSE" => VariablePolicy::RcOnly(AssignmentTarget::Verbose),
         "DURABILITY" => VariablePolicy::RcOnly(AssignmentTarget::Durability),
+        "SHELL" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Shell),
+        "SHELLFLAGS" => VariablePolicy::RcOrCommandLine(AssignmentTarget::ShellFlags),
+        "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
         "LASTFOLDER" | "MATCH" => VariablePolicy::RuntimeOnly,
         name if name.strip_prefix("MATCH").is_some_and(|suffix| {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
@@ -146,6 +162,20 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
             MessageLimitVariable::HeaderFieldSize,
         )),
         _ => VariablePolicy::RcOrCommandLine(AssignmentTarget::User),
+    }
+}
+
+pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
+    match target {
+        AssignmentTarget::Maildir | AssignmentTarget::LogFile => super::MAX_PATH_EXPRESSION_LEN,
+        AssignmentTarget::Shell | AssignmentTarget::ShellFlags | AssignmentTarget::Path => {
+            MAX_SHELL_SETTING_LEN
+        }
+        AssignmentTarget::LogDetail
+        | AssignmentTarget::Verbose
+        | AssignmentTarget::Durability
+        | AssignmentTarget::MessageLimit(_)
+        | AssignmentTarget::User => MAX_ASSIGNMENT_VALUE_LEN,
     }
 }
 
@@ -209,6 +239,18 @@ mod tests {
             variable_policy("USER_VALUE").assignment_target(VariableSource::CommandLine),
             Some(AssignmentTarget::User)
         );
+        assert_eq!(
+            variable_policy("SHELL").assignment_target(VariableSource::RcFile),
+            Some(AssignmentTarget::Shell)
+        );
+        assert_eq!(
+            variable_policy("SHELLFLAGS").assignment_target(VariableSource::CommandLine),
+            Some(AssignmentTarget::ShellFlags)
+        );
+        assert_eq!(
+            variable_policy("PATH").assignment_target(VariableSource::RcFile),
+            Some(AssignmentTarget::Path)
+        );
     }
 
     #[test]
@@ -248,5 +290,26 @@ mod tests {
             SuppliedVariable::parse(format!("A={}", "v".repeat(MAX_ASSIGNMENT_VALUE_LEN + 1)))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn applies_shell_setting_limit_to_command_line_values() {
+        for name in ["SHELL", "SHELLFLAGS", "PATH"] {
+            assert!(
+                SuppliedVariable::parse(format!("{name}={}", "x".repeat(MAX_SHELL_SETTING_LEN)))
+                    .is_ok()
+            );
+            let error = SuppliedVariable::parse(format!(
+                "{name}={}",
+                "x".repeat(MAX_SHELL_SETTING_LEN + 1)
+            ))
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "--set {name} value exceeds the hard limit of {MAX_SHELL_SETTING_LEN} bytes"
+                )
+            );
+        }
     }
 }

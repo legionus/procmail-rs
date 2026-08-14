@@ -4,13 +4,14 @@
 use regex::bytes::RegexBuilder;
 
 use super::{
-    ActionInput, ActionMode, Assignment, CaseMode, ChildStatusMode, Condition, ConditionInput,
-    ConditionKind, Config, ContinuationMode, ControlFlow, Destination, MAX_ASSIGNMENT_NAME_LEN,
-    MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
-    MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS,
-    MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN,
-    OutputEnding, ParseError, PathExpression, RcFileExpression, Recipe, RecipeAction,
-    RecipeOptions, RegexCondition, Statement, VariableSource, WriteErrorMode, variable_policy,
+    ActionInput, ActionMode, Assignment, AssignmentTarget, CaseMode, ChildStatusMode, Condition,
+    ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination,
+    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE,
+    MAX_PATH_EXPRESSION_LEN, MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE,
+    MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE,
+    MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression, RcFileExpression, Recipe,
+    RecipeAction, RecipeOptions, RegexCondition, Statement, VariableSource, WriteErrorMode,
+    variable_policy,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -185,9 +186,6 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
             format!("assignment value exceeds the hard limit of {MAX_ASSIGNMENT_VALUE_LEN} bytes"),
         ));
     }
-    if matches!(name, "MAILDIR" | "LOGFILE") {
-        check_path_length(value, line_number, &format!("{name} path"))?;
-    }
     let target = variable_policy(name)
         .assignment_target(VariableSource::RcFile)
         .ok_or_else(|| {
@@ -196,6 +194,21 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
                 format!("variable {name} cannot be assigned in an rc file"),
             )
         })?;
+    let limit = super::assignment_value_limit(target);
+    if value.len() > limit {
+        let kind = if matches!(
+            target,
+            AssignmentTarget::Maildir | AssignmentTarget::LogFile
+        ) {
+            "path"
+        } else {
+            "value"
+        };
+        return Err(ParseError::new(
+            line_number,
+            format!("{name} {kind} exceeds the hard limit of {limit} bytes"),
+        ));
+    }
 
     Ok(Some(Assignment {
         line: line_number,
@@ -771,6 +784,7 @@ fn strip_comment(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MAX_SHELL_SETTING_LEN;
 
     #[test]
     fn parses_assignment_and_recipe() {
@@ -1319,6 +1333,24 @@ mod tests {
                     )
                 );
             }
+        }
+    }
+
+    #[test]
+    fn enforces_shell_setting_length_at_the_boundary() {
+        for name in ["SHELL", "SHELLFLAGS", "PATH"] {
+            let accepted = format!("{name}={}\n", "x".repeat(MAX_SHELL_SETTING_LEN));
+            assert!(parse(&accepted).is_ok(), "{name}");
+
+            let rejected = format!("{name}={}\n", "x".repeat(MAX_SHELL_SETTING_LEN + 1));
+            let error = parse(&rejected).unwrap_err();
+            assert_eq!(
+                error.message,
+                format!(
+                    "{name} value exceeds the hard limit of {} bytes",
+                    MAX_SHELL_SETTING_LEN
+                )
+            );
         }
     }
 
