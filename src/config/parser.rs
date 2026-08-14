@@ -9,8 +9,8 @@ use super::{
     MAX_ASSIGNMENT_VALUE_LEN, MAX_CONDITIONS_PER_RECIPE, MAX_PATH_EXPRESSION_LEN,
     MAX_RC_CONDITIONS, MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_SIZE, MAX_RC_STATEMENTS,
     MAX_RECIPE_NESTING_DEPTH, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN,
-    OutputEnding, ParseError, PathExpression, Recipe, RecipeAction, RecipeOptions, RegexCondition,
-    Statement, VariableSource, WriteErrorMode, variable_policy,
+    OutputEnding, ParseError, PathExpression, RcFileExpression, Recipe, RecipeAction,
+    RecipeOptions, RegexCondition, Statement, VariableSource, WriteErrorMode, variable_policy,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -91,13 +91,20 @@ fn parse_statements(
         }
 
         if let Some(assignment) = parse_assignment(line, line_number)? {
-            if depth > 0 {
-                return Err(ParseError::new(
-                    line_number,
-                    "assignments inside recipe blocks are not supported yet",
-                ));
-            }
-            statements.push(Statement::Assignment(assignment));
+            let statement = match assignment.name.as_str() {
+                "INCLUDERC" => Statement::Include(RcFileExpression {
+                    line: assignment.line,
+                    value: assignment.value,
+                    expansion: None,
+                }),
+                "SWITCHRC" => Statement::Switch(RcFileExpression {
+                    line: assignment.line,
+                    value: assignment.value,
+                    expansion: None,
+                }),
+                _ => Statement::Assignment(assignment),
+            };
+            statements.push(statement);
             counts.statements = counts
                 .statements
                 .checked_add(1)
@@ -183,6 +190,7 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
         name: name.to_owned(),
         value: value.to_owned(),
         target,
+        expansion: None,
     }))
 }
 
@@ -309,6 +317,7 @@ fn parse_recipe(
                 base: None,
                 line: index + 1,
                 runtime_dependent: false,
+                runtime_base: false,
                 expansion: None,
             })),
             index + 1,
@@ -320,6 +329,7 @@ fn parse_recipe(
                 base: None,
                 line: index + 1,
                 runtime_dependent: false,
+                runtime_base: false,
                 expansion: None,
             })),
             index + 1,
@@ -331,6 +341,7 @@ fn parse_recipe(
                 base: None,
                 line: index + 1,
                 runtime_dependent: false,
+                runtime_base: false,
                 expansion: None,
             })),
             index + 1,
@@ -762,6 +773,7 @@ mod tests {
                 name: "MAILDIR".into(),
                 value: "/srv/mail".into(),
                 target: crate::config::AssignmentTarget::Maildir,
+                expansion: None,
             })
         );
         assert_eq!(
@@ -931,14 +943,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_assignment_inside_recipe_block() {
-        let error = parse(":0\n{\nBOX=inbox\n}\n").unwrap_err();
+    fn parses_assignment_inside_recipe_block() {
+        let config = parse(":0\n{\nBOX=inbox\n}\n").unwrap();
+        let Statement::Recipe(recipe) = &config.statements[0] else {
+            panic!("expected recipe");
+        };
+        let RecipeAction::Block(statements) = &recipe.action else {
+            panic!("expected block");
+        };
+        let Statement::Assignment(assignment) = &statements[0] else {
+            panic!("expected assignment");
+        };
 
-        assert_eq!(error.line, 3);
-        assert_eq!(
-            error.message,
-            "assignments inside recipe blocks are not supported yet"
-        );
+        assert_eq!(assignment.name, "BOX");
+        assert_eq!(assignment.value, "inbox");
+    }
+
+    #[test]
+    fn parses_include_and_switch_as_ordered_statements() {
+        let config = parse("INCLUDERC=common.rc\n:0\n{\nSWITCHRC=$MATCH\n}\n").unwrap();
+        let Statement::Include(include) = &config.statements[0] else {
+            panic!("expected include");
+        };
+        let Statement::Recipe(recipe) = &config.statements[1] else {
+            panic!("expected recipe");
+        };
+        let RecipeAction::Block(statements) = &recipe.action else {
+            panic!("expected block");
+        };
+        let Statement::Switch(switch) = &statements[0] else {
+            panic!("expected switch");
+        };
+
+        assert_eq!(include.value, "common.rc");
+        assert_eq!(switch.value, "$MATCH");
     }
 
     #[test]

@@ -6,8 +6,8 @@ use std::fmt;
 use regex::bytes::Regex;
 
 use crate::config::{
-    ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination, Recipe,
-    RecipeAction, RegexCondition, Statement,
+    Assignment, AssignmentTarget, ConditionInput, ConditionKind, Config, ContinuationMode,
+    ControlFlow, Destination, RcFileExpression, Recipe, RecipeAction, RegexCondition, Statement,
 };
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::runtime::RuntimeVariables;
@@ -81,8 +81,7 @@ enum CompiledAction {
 
 #[derive(Debug, Clone)]
 struct CompiledAssignment {
-    name: String,
-    value: String,
+    assignment: Assignment,
     line: Option<usize>,
     source: TraceVariableSource,
 }
@@ -90,6 +89,8 @@ struct CompiledAssignment {
 #[derive(Debug, Clone)]
 enum CompiledStatement {
     Assignment(CompiledAssignment),
+    Include(RcFileExpression),
+    Switch(RcFileExpression),
 }
 
 #[derive(Debug, Clone)]
@@ -380,6 +381,10 @@ pub enum EvalError {
         size: usize,
     },
     Expansion(crate::config::ExpansionError),
+    RuntimeRcLoaderUnavailable {
+        line: usize,
+        statement: &'static str,
+    },
     Delivery {
         destination: String,
         message: String,
@@ -405,7 +410,13 @@ impl fmt::Display for EvalError {
                 "regular expression captures require {size} bytes, exceeding the hard limit of {} bytes",
                 crate::config::MAX_MATCH_BYTES
             ),
-            Self::Expansion(error) => write!(formatter, "cannot resolve destination: {error}"),
+            Self::Expansion(error) => {
+                write!(formatter, "cannot expand configuration value: {error}")
+            }
+            Self::RuntimeRcLoaderUnavailable { line, statement } => write!(
+                formatter,
+                "line {line}: {statement} requires the runtime rc loader"
+            ),
             Self::Delivery {
                 destination,
                 message,
@@ -423,14 +434,19 @@ impl CompiledSequence {
             match statement {
                 Statement::Assignment(assignment) => {
                     preceding.push(CompiledStatement::Assignment(CompiledAssignment {
-                        name: assignment.name.clone(),
-                        value: assignment.value.clone(),
+                        assignment: assignment.clone(),
                         line: Some(assignment.line),
                         source: TraceVariableSource::RcFile,
                     }))
                 }
                 Statement::Recipe(recipe) => {
                     recipes.push(CompiledNode::compile(recipe, std::mem::take(preceding)));
+                }
+                Statement::Include(expression) => {
+                    preceding.push(CompiledStatement::Include(expression.clone()));
+                }
+                Statement::Switch(expression) => {
+                    preceding.push(CompiledStatement::Switch(expression.clone()));
                 }
             }
         }
@@ -482,7 +498,7 @@ impl CompiledSequence {
         let mut state = SequenceState::default();
 
         for recipe in &self.recipes {
-            execute_statements(&recipe.preceding_statements, runtime, trace);
+            execute_statements(&recipe.preceding_statements, runtime, trace)?;
 
             // Control-flow flags inspect only results produced at this block
             // level. Child sequences therefore cannot overwrite the state
@@ -511,7 +527,7 @@ impl CompiledSequence {
             }
         }
 
-        execute_statements(&self.trailing_statements, runtime, trace);
+        execute_statements(&self.trailing_statements, runtime, trace)?;
         Ok(SequenceControl::Continue)
     }
 
@@ -535,7 +551,8 @@ impl CompiledSequence {
         // An unhandled copy failure therefore escapes the block, while a
         // successful child error handler replaces that failure.
         for recipe in &self.recipes {
-            execute_statements(&recipe.preceding_statements, context.runtime, context.trace);
+            execute_statements(&recipe.preceding_statements, context.runtime, context.trace)
+                .map_err(OrderedExecutionError::Evaluation)?;
             let conditions_matched = recipe.execution_gate(state)
                 && recipe
                     .matches_complete(context.message, context.runtime, context.trace)
@@ -565,7 +582,8 @@ impl CompiledSequence {
             }
         }
 
-        execute_statements(&self.trailing_statements, context.runtime, context.trace);
+        execute_statements(&self.trailing_statements, context.runtime, context.trace)
+            .map_err(OrderedExecutionError::Evaluation)?;
         Ok((sequence_action, SequenceControl::Continue))
     }
 
@@ -596,7 +614,7 @@ impl CompiledSequence {
         execution: &mut FanoutPlanState,
     ) -> Result<SequenceControl, EvalError> {
         for (index, recipe) in self.recipes.iter().enumerate().skip(start) {
-            execute_statements(&recipe.preceding_statements, runtime, trace);
+            execute_statements(&recipe.preceding_statements, runtime, trace)?;
             let conditions_matched =
                 recipe.planning_gate(state) && recipe.matches_complete(message, runtime, trace)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
@@ -630,7 +648,7 @@ impl CompiledSequence {
             }
         }
 
-        execute_statements(&self.trailing_statements, runtime, trace);
+        execute_statements(&self.trailing_statements, runtime, trace)?;
         Ok(SequenceControl::Continue)
     }
 
@@ -645,7 +663,7 @@ impl CompiledSequence {
         let mut state = SequenceState::default();
 
         for (index, recipe) in self.recipes.iter().enumerate() {
-            execute_statements(&recipe.preceding_statements, runtime, trace);
+            execute_statements(&recipe.preceding_statements, runtime, trace)?;
             let gate = recipe.planning_gate(state);
             let (matched, condition_results) = if gate {
                 recipe.matches_headers(head, runtime, trace)?
@@ -743,7 +761,7 @@ impl CompiledSequence {
             }
         }
 
-        execute_statements(&self.trailing_statements, runtime, trace);
+        execute_statements(&self.trailing_statements, runtime, trace)?;
         Ok(HeaderControl::Continue)
     }
 
@@ -821,7 +839,7 @@ impl CompiledSequence {
             .ok_or(EvalError::BodyWasNotBuffered)?;
         let mut state = frame.state;
         if !frame.assignments_applied {
-            execute_statements(&recipe.preceding_statements, runtime, trace);
+            execute_statements(&recipe.preceding_statements, runtime, trace)?;
         }
 
         let (conditions_matched, control) = if depth + 1 < frames.len() {
@@ -1267,12 +1285,16 @@ fn execute_statements(
     statements: &[CompiledStatement],
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
-) {
+) -> Result<(), EvalError> {
     for statement in statements {
         match statement {
             CompiledStatement::Assignment(assignment) => {
-                runtime.set(assignment.name.clone(), assignment.value.clone());
-                if let Ok(name) = TraceName::new(&assignment.name) {
+                let value = assignment
+                    .assignment
+                    .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                    .map_err(EvalError::Expansion)?;
+                runtime.set(assignment.assignment.name.clone(), value.clone());
+                if let Ok(name) = TraceName::new(&assignment.assignment.name) {
                     trace.record(TraceEvent::VariableAssigned {
                         line: assignment.line,
                         name,
@@ -1280,12 +1302,25 @@ fn execute_statements(
                         value: trace
                             .detail()
                             .includes_variable_values()
-                            .then(|| TraceValue::new(assignment.value.as_bytes())),
+                            .then(|| TraceValue::new(value.as_bytes())),
                     });
                 }
             }
+            CompiledStatement::Include(expression) => {
+                return Err(EvalError::RuntimeRcLoaderUnavailable {
+                    line: expression.line,
+                    statement: "INCLUDERC",
+                });
+            }
+            CompiledStatement::Switch(expression) => {
+                return Err(EvalError::RuntimeRcLoaderUnavailable {
+                    line: expression.line,
+                    statement: "SWITCHRC",
+                });
+            }
         }
     }
+    Ok(())
 }
 
 impl ExecutionPlan {
@@ -1295,8 +1330,13 @@ impl ExecutionPlan {
             .iter()
             .map(|(name, value)| {
                 CompiledStatement::Assignment(CompiledAssignment {
-                    name: name.clone(),
-                    value: value.clone(),
+                    assignment: Assignment {
+                        line: 0,
+                        name: name.clone(),
+                        value: value.clone(),
+                        target: AssignmentTarget::User,
+                        expansion: None,
+                    },
                     line: None,
                     source: TraceVariableSource::CommandLine,
                 })
@@ -2223,6 +2263,84 @@ mod tests {
 
         assert!(matches!(result, HeaderEvaluation::Decided(_)));
         assert_eq!(runtime.get("AFTER"), Some("tail"));
+    }
+
+    #[test]
+    fn nested_assignment_uses_runtime_capture_before_delivery() {
+        let config = config::parse(
+            ":0\n* ^Subject: \\/(.*)$\n{\nBOX=${MATCH1:-fallback}\n:0\nmaildir:$BOX\n}\n",
+        )
+        .unwrap()
+        .expand()
+        .unwrap();
+        let plan = ExecutionPlan::compile(&config);
+        let mut runtime = RuntimeVariables::default();
+
+        let raw = b"Subject: selected\n\nbody";
+        let HeaderEvaluation::NeedsMessage(continuation) =
+            plan.evaluate_headers_with_runtime(&head(raw), &mut runtime)
+        else {
+            panic!("expected deferred runtime destination");
+        };
+        let delivery = plan
+            .resume_mapped_with_runtime(
+                continuation,
+                raw,
+                b"Subject: selected\n\n".len(),
+                &mut runtime,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.get("BOX"), Some("selected"));
+        let destination = delivery.deliveries()[0]
+            .destination()
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .unwrap();
+        assert_eq!(destination.path(), "selected");
+    }
+
+    #[test]
+    fn skipped_block_does_not_apply_its_assignment() {
+        let config = config::parse(":0\n* ^X-Select: yes$\n{\nBOX=selected\n}\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        let plan = ExecutionPlan::compile(&config);
+        let mut runtime = RuntimeVariables::default();
+
+        let result =
+            plan.evaluate_headers_with_runtime(&head(b"Subject: skipped\n\nbody"), &mut runtime);
+
+        assert!(matches!(result, HeaderEvaluation::Decided(_)));
+        assert_eq!(runtime.get("BOX"), None);
+    }
+
+    #[test]
+    fn nested_maildir_changes_the_base_for_following_destination() {
+        let config =
+            config::parse("MAILDIR=/srv/mail\n:0\n{\nMAILDIR=selected\n:0\nmaildir:inbox\n}\n")
+                .unwrap()
+                .expand()
+                .unwrap();
+        let plan = ExecutionPlan::compile(&config);
+        let raw = b"Subject: test\n\nbody";
+        let mut runtime = RuntimeVariables::default();
+        let HeaderEvaluation::NeedsMessage(continuation) =
+            plan.evaluate_headers_with_runtime(&head(raw), &mut runtime)
+        else {
+            panic!("expected deferred runtime destination");
+        };
+
+        let delivery = plan
+            .resume_mapped_with_runtime(continuation, raw, b"Subject: test\n\n".len(), &mut runtime)
+            .unwrap();
+
+        assert_eq!(runtime.get("MAILDIR"), Some("/srv/mail/selected"));
+        let destination = delivery.deliveries()[0]
+            .destination()
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .unwrap();
+        assert_eq!(destination.path(), "/srv/mail/selected/inbox");
     }
 
     #[test]

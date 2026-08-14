@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
 use super::{
-    AssignmentTarget, Config, Destination, ExpansionExpression, ExpansionPart,
+    Assignment, AssignmentTarget, Config, Destination, ExpansionExpression, ExpansionPart,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression, Recipe,
     RecipeAction, Statement, SuppliedVariable, VariablePolicy, variable_policy,
 };
@@ -44,6 +44,29 @@ impl fmt::Display for ExpansionError {
 
 impl std::error::Error for ExpansionError {}
 
+impl Assignment {
+    pub(crate) fn resolve_with(
+        &self,
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<String, ExpansionError> {
+        let Some(expression) = self.expansion.as_ref() else {
+            return Ok(self.value.clone());
+        };
+        let limit = match self.target {
+            AssignmentTarget::Maildir | AssignmentTarget::LogFile => MAX_PATH_EXPRESSION_LEN,
+            _ => MAX_ASSIGNMENT_VALUE_LEN,
+        };
+        let value = evaluate_expression(expression, self.line, limit, &mut lookup, 0)?.text;
+        if self.target != AssignmentTarget::Maildir {
+            return Ok(value);
+        }
+        let base = lookup("MAILDIR");
+        let value = resolve_relative_path(&value, base.as_deref(), self.line)?;
+        validate_filesystem_path(&value, self.line, "MAILDIR", true)?;
+        Ok(value)
+    }
+}
+
 impl Destination {
     pub fn bind_with(
         &self,
@@ -65,6 +88,7 @@ impl Destination {
             base: expression.base.clone(),
             line: expression.line,
             runtime_dependent: expression_has_runtime(&expansion),
+            runtime_base: expression.runtime_base,
             expansion: Some(expansion),
         };
         Ok(match self {
@@ -96,13 +120,16 @@ impl Destination {
             0,
         )?
         .text;
-        let path = resolve_relative_path(&source, expression.base.as_deref(), expression.line)?;
+        let runtime_base = expression.runtime_base.then(|| lookup("MAILDIR")).flatten();
+        let base = runtime_base.as_deref().or(expression.base.as_deref());
+        let path = resolve_relative_path(&source, base, expression.line)?;
         validate_filesystem_path(&path, expression.line, description, allows_trailing_slash)?;
         let resolved = PathExpression {
             source: path,
             base: None,
             line: expression.line,
             runtime_dependent: false,
+            runtime_base: false,
             expansion: None,
         };
         Ok(match self {
@@ -182,6 +209,16 @@ pub(super) fn expand(
             Statement::Recipe(recipe) => {
                 expand_recipe(recipe, &variables, maildir.as_deref())?;
             }
+            Statement::Include(expression) | Statement::Switch(expression) => {
+                let parsed = parse_expression(&expression.value, expression.line)?;
+                validate_runtime_references(
+                    &parsed,
+                    expression.line,
+                    &variables,
+                    &BTreeSet::new(),
+                )?;
+                expression.expansion = Some(parsed);
+            }
         }
     }
 
@@ -227,19 +264,111 @@ fn expand_recipe(
             }
         }
         RecipeAction::Block(statements) => {
-            // Nested assignments are rejected by the parser, so every child
-            // sees the same bounded value table and MAILDIR base as its parent.
-            for statement in statements {
-                match statement {
-                    Statement::Recipe(child) => expand_recipe(child, variables, maildir)?,
-                    Statement::Assignment(assignment) => {
-                        return Err(ExpansionError::new(
-                            assignment.line,
-                            "assignments inside recipe blocks are not supported yet",
-                        ));
-                    }
+            prepare_runtime_statements(statements, variables, &mut BTreeSet::new(), maildir)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_runtime_statements(
+    statements: &mut [Statement],
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &mut BTreeSet<String>,
+    maildir: Option<&str>,
+) -> Result<(), ExpansionError> {
+    for statement in statements {
+        match statement {
+            Statement::Assignment(assignment) => {
+                if !matches!(
+                    assignment.target,
+                    AssignmentTarget::User | AssignmentTarget::Maildir
+                ) {
+                    return Err(ExpansionError::new(
+                        assignment.line,
+                        format!(
+                            "variable {} cannot be assigned conditionally yet",
+                            assignment.name
+                        ),
+                    ));
                 }
+                let expression = parse_expression(&assignment.value, assignment.line)?;
+                validate_runtime_references(&expression, assignment.line, known, dynamic)?;
+                assignment.expansion = Some(expression);
+
+                // A conditional assignment exists only if execution selects
+                // this block. Keep its expression for that moment and mark
+                // the name as runtime-produced for following statements in
+                // the same selected sequence.
+                dynamic.insert(assignment.name.clone());
             }
+            Statement::Recipe(recipe) => {
+                prepare_runtime_recipe(recipe, known, dynamic, maildir)?;
+            }
+            Statement::Include(expression) | Statement::Switch(expression) => {
+                let parsed = parse_expression(&expression.value, expression.line)?;
+                validate_runtime_references(&parsed, expression.line, known, dynamic)?;
+                expression.expansion = Some(parsed);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_runtime_recipe(
+    recipe: &mut Recipe,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+    maildir: Option<&str>,
+) -> Result<(), ExpansionError> {
+    if let Some(lock) = &recipe.lock {
+        let expression = parse_expression(lock, recipe.line)?;
+        validate_runtime_references(&expression, recipe.line, known, dynamic)?;
+    }
+
+    match &mut recipe.action {
+        RecipeAction::Deliver(destination) => {
+            let expression = match destination {
+                Destination::Maildir(expression) | Destination::Mbox(expression) => expression,
+            };
+            let parsed = parse_expression(&expression.source, recipe.action_line)?;
+            validate_runtime_references(&parsed, recipe.action_line, known, dynamic)?;
+            expression.base = maildir.map(str::to_owned);
+            expression.line = recipe.action_line;
+            expression.runtime_dependent = true;
+            expression.runtime_base = true;
+            expression.expansion = Some(parsed);
+        }
+        RecipeAction::Block(children) => {
+            let mut child_dynamic = dynamic.clone();
+            prepare_runtime_statements(children, known, &mut child_dynamic, maildir)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_references(
+    expression: &ExpansionExpression,
+    line: usize,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+) -> Result<(), ExpansionError> {
+    for part in &expression.parts {
+        let ExpansionPart::Variable { name, default } = part else {
+            continue;
+        };
+        if known.contains_key(name)
+            || dynamic.contains(name)
+            || variable_policy(name) == VariablePolicy::RuntimeOnly
+        {
+            continue;
+        }
+        if let Some(default) = default {
+            validate_runtime_references(default, line, known, dynamic)?;
+        } else {
+            return Err(ExpansionError::new(
+                line,
+                format!("variable {name} is not defined"),
+            ));
         }
     }
     Ok(())
@@ -727,6 +856,7 @@ mod tests {
                         .unwrap();
                 }
                 Statement::Recipe(_) => {}
+                Statement::Include(_) | Statement::Switch(_) => {}
             }
         }
         panic!("statement is not a recipe");

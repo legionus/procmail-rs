@@ -48,12 +48,17 @@ impl Config {
     }
 
     pub fn maildir(&self) -> Option<&str> {
-        self.statements.iter().rev().find_map(|statement| {
-            let Statement::Assignment(assignment) = statement else {
-                return None;
-            };
-            (assignment.target == AssignmentTarget::Maildir).then_some(assignment.value.as_str())
-        })
+        self.statements
+            .iter()
+            .rev()
+            .find_map(|statement| match statement {
+                Statement::Assignment(assignment)
+                    if assignment.target == AssignmentTarget::Maildir =>
+                {
+                    Some(assignment.value.as_str())
+                }
+                _ => None,
+            })
     }
 
     pub(crate) fn initial_variables(&self) -> &[(String, String)] {
@@ -64,7 +69,16 @@ impl Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     Assignment(Assignment),
+    Include(RcFileExpression),
+    Switch(RcFileExpression),
     Recipe(Recipe),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RcFileExpression {
+    pub line: usize,
+    pub value: String,
+    pub(crate) expansion: Option<ExpansionExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +87,7 @@ pub struct Assignment {
     pub name: String,
     pub value: String,
     pub target: AssignmentTarget,
+    pub(crate) expansion: Option<ExpansionExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +248,7 @@ pub struct PathExpression {
     pub(crate) base: Option<String>,
     pub(crate) line: usize,
     pub(crate) runtime_dependent: bool,
+    pub(crate) runtime_base: bool,
     pub(crate) expansion: Option<ExpansionExpression>,
 }
 
@@ -265,6 +281,7 @@ impl From<&str> for PathExpression {
             base: None,
             line: 0,
             runtime_dependent: false,
+            runtime_base: false,
             expansion: None,
         }
     }
@@ -277,6 +294,7 @@ impl From<String> for PathExpression {
             base: None,
             line: 0,
             runtime_dependent: false,
+            runtime_base: false,
             expansion: None,
         }
     }
