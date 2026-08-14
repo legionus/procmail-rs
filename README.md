@@ -18,6 +18,15 @@ procmail-rs filter  --config PATH [--set NAME=VALUE]...
 additionally prints a value-free description of the execution plan. `filter`
 reads one message from standard input and attempts the selected deliveries.
 
+`check` recursively opens and validates every `INCLUDERC` and `SWITCHRC` path
+that can be computed from command-line values and unconditional rc
+assignments. A path that depends on message processing, such as `$MATCH` or
+`$LASTFOLDER`, produces a warning because no message is read. Warning output is
+bounded and does not contain the unresolved expression or computed path.
+Successful checking therefore confirms only the root file and runtime files
+whose paths were available at check time; message-selected files are validated
+when `filter` reaches them.
+
 ## Exit statuses
 
 Exit statuses are part of the CLI interface. Values from `sysexits` are used
@@ -33,9 +42,9 @@ when their established meaning fits. Status 79 is specific to `procmail-rs`.
 | 78 | `EX_CONFIG` | The rc file or command-line configuration is invalid. Configuration is rejected before stdin is read. | Fix the configuration. An MTA should defer queued mail rather than discard it while the configuration is broken. |
 | 79 | `PROCMAIL_RS_UNDELIVERED` | No final recipe delivered the original message. Copy recipes may already have published copies. | Apply an explicit fallback, quarantine, or rejection policy. Never interpret this status as successful delivery. |
 
-All diagnostics go to standard error. Successful `check` and `filter`
-operations are quiet. `explain` writes its requested plan description to
-standard output.
+All diagnostics go to standard error. Successful `check` operations without
+dynamic-path warnings and successful `filter` operations are quiet. `explain`
+writes its requested plan description to standard output.
 
 ### MTA integration
 

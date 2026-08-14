@@ -21,6 +21,7 @@ pub const MAX_RC_FILE_COUNT: usize = 32;
 pub const MAX_RC_AGGREGATE_SIZE: usize = 4 * 1024 * 1024;
 pub const MAX_RC_INCLUDE_DEPTH: usize = 16;
 pub const MAX_RC_TRANSITIONS: usize = 256;
+pub const MAX_RC_CHECK_WARNINGS: usize = 128;
 
 #[derive(Debug)]
 pub struct RcFileLoader {
@@ -176,8 +177,125 @@ impl RcFileLoader {
         }))
     }
 
+    fn load_check_config(
+        &mut self,
+        expression: &RcFileExpression,
+        runtime: &RuntimeVariables,
+        depth: usize,
+    ) -> Result<Option<LoadedRcConfig>, RcFileError> {
+        let path = expression
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .map_err(|error| RcFileError::new(Path::new("<runtime rc path>"), error.to_string()))?;
+        if path.is_empty() {
+            return Ok(None);
+        }
+        let loaded = self.load(Path::new(&path), depth)?;
+        let config = config::parse(loaded.source()).map_err(|error| {
+            RcFileError::new(loaded.path(), format!("invalid rc syntax: {error}"))
+        })?;
+        self.account_config(loaded.path(), &config)?;
+        let config = config
+            .prepare_for_check(runtime.values())
+            .map_err(|error| {
+                RcFileError::new(loaded.path(), format!("cannot validate rc file: {error}"))
+            })?;
+        validate_runtime_settings(&config.statements).map_err(|(line, name)| {
+            RcFileError::new(
+                loaded.path(),
+                format!("line {line}: {name} must be set before message processing begins"),
+            )
+        })?;
+        Ok(Some(LoadedRcConfig {
+            path: loaded.path,
+            config,
+        }))
+    }
+
     pub fn account_root_config(&mut self, config: &Config) -> Result<(), RcFileError> {
         self.account_config(Path::new("<root rc>"), config)
+    }
+
+    pub fn check_resolvable_files(&mut self, config: &Config) -> Result<Vec<String>, RcFileError> {
+        let mut runtime = RuntimeVariables::default();
+        for (name, value) in config.initial_variables() {
+            runtime.set(name.clone(), value.clone());
+        }
+        let mut warnings = RcCheckWarnings::default();
+        self.check_statements(&config.statements, &mut runtime, 0, &mut warnings)?;
+        Ok(warnings.finish())
+    }
+
+    fn check_statements(
+        &mut self,
+        statements: &[Statement],
+        runtime: &mut RuntimeVariables,
+        depth: usize,
+        warnings: &mut RcCheckWarnings,
+    ) -> Result<(), RcFileError> {
+        for statement in statements {
+            match statement {
+                Statement::Assignment(assignment) => {
+                    match assignment.resolve_with(|name| runtime.get(name).map(str::to_owned)) {
+                        Ok(value) => runtime.set(assignment.name.clone(), value),
+                        Err(_) => runtime.remove(&assignment.name),
+                    }
+                }
+                Statement::Include(expression) | Statement::Switch(expression) => {
+                    let statement_name = if matches!(statement, Statement::Include(_)) {
+                        "INCLUDERC"
+                    } else {
+                        "SWITCHRC"
+                    };
+                    if expression
+                        .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                        .is_err()
+                    {
+                        warnings.dynamic_path(depth, expression.line, statement_name)?;
+                        continue;
+                    }
+                    let child_depth = depth.checked_add(1).ok_or_else(|| {
+                        RcFileError::limit(Path::new("<check>"), "rc check nesting depth overflows")
+                    })?;
+                    let Some(loaded) = self.load_check_config(expression, runtime, child_depth)?
+                    else {
+                        continue;
+                    };
+
+                    // INCLUDERC assignments affect statements that follow in
+                    // the same selected path. SWITCHRC never reaches those
+                    // statements, so validate its replacement with a private
+                    // value table and do not leak its assignments forward.
+                    if matches!(statement, Statement::Include(_)) {
+                        self.check_statements(
+                            &loaded.config().statements,
+                            runtime,
+                            child_depth,
+                            warnings,
+                        )?;
+                    } else {
+                        let mut switched_runtime = runtime.clone();
+                        self.check_statements(
+                            &loaded.config().statements,
+                            &mut switched_runtime,
+                            child_depth,
+                            warnings,
+                        )?;
+                        break;
+                    }
+                }
+                Statement::Recipe(recipe) => {
+                    if let RecipeAction::Block(children) = &recipe.action {
+                        // A block may not be selected for a particular
+                        // message. Validate its statically known files with a
+                        // cloned table, but keep conditional assignments from
+                        // changing the sibling path examined afterwards.
+                        let mut child_runtime = runtime.clone();
+                        self.check_statements(children, &mut child_runtime, depth, warnings)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn account_config(&mut self, path: &Path, config: &Config) -> Result<(), RcFileError> {
@@ -229,6 +347,42 @@ impl RcFileLoader {
 
     pub fn bytes_read(&self) -> usize {
         self.bytes_read
+    }
+}
+
+#[derive(Default)]
+struct RcCheckWarnings {
+    messages: Vec<String>,
+    omitted: usize,
+}
+
+impl RcCheckWarnings {
+    fn dynamic_path(
+        &mut self,
+        depth: usize,
+        line: usize,
+        statement: &str,
+    ) -> Result<(), RcFileError> {
+        if self.messages.len() < MAX_RC_CHECK_WARNINGS {
+            self.messages.push(format!(
+                "rc depth {depth}, line {line}: dynamic {statement} path was not validated"
+            ));
+        } else {
+            self.omitted = self.omitted.checked_add(1).ok_or_else(|| {
+                RcFileError::limit(Path::new("<check>"), "rc check warning count overflows")
+            })?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        if self.omitted != 0 {
+            self.messages.push(format!(
+                "{} additional dynamic rc path warnings were omitted",
+                self.omitted
+            ));
+        }
+        self.messages
     }
 }
 

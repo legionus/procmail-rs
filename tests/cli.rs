@@ -61,6 +61,148 @@ fn check_accepts_valid_config() {
 }
 
 #[test]
+fn check_recursively_validates_statically_resolved_includes() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let first = base.join("first.rc");
+    let malformed = base.join("malformed.rc");
+    fs::write(&first, "SWITCHRC=malformed.rc\n").unwrap();
+    fs::write(&malformed, ":0\n* unterminated[\nmaildir:selected\n").unwrap();
+    fs::set_permissions(&first, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&malformed, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&path, "RULES=first.rc\nINCLUDERC=$RULES\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .current_dir(base)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(78), "{:?}", output.stderr);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid rc syntax"), "{stderr}");
+    assert!(stderr.contains("invalid regular expression"), "{stderr}");
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn check_stops_following_the_replaced_rc_file_after_switch() {
+    let path = config_file("SWITCHRC=selected.rc\nINCLUDERC=unreachable.rc\n");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected.rc");
+    fs::write(&selected, "SELECTED=yes\n").unwrap();
+    fs::set_permissions(&selected, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .current_dir(base)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn check_warns_for_message_derived_include_without_reading_stdin() {
+    let path = config_file(":0\n* ^X-Rules: \\/(.*)$\n{\nINCLUDERC=$MATCH\n}\n");
+    let input_path = path.parent().unwrap().join("input.eml");
+    fs::write(&input_path, b"X-Rules: private-name.rc\n\nbody").unwrap();
+    let mut input = fs::File::open(&input_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .stdin(Stdio::from(input.try_clone().unwrap()))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("warning: rc depth 0, line 4: dynamic INCLUDERC path was not validated"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("private-name.rc"), "{stderr}");
+    assert_eq!(input.stream_position().unwrap(), 0);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn check_preserves_message_derived_assignments_in_a_static_include() {
+    let path = config_file("INCLUDERC=child.rc\n");
+    let base = path.parent().unwrap();
+    let child_rc = base.join("child.rc");
+    fs::write(&child_rc, "SELECTED=$MATCH\nINCLUDERC=$SELECTED\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .current_dir(base)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("warning: rc depth 1, line 2: dynamic INCLUDERC path was not validated"),
+        "{stderr}"
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn check_rejects_undefined_ordinary_variables_in_a_static_include() {
+    let path = config_file("INCLUDERC=child.rc\n");
+    let base = path.parent().unwrap();
+    let child_rc = base.join("child.rc");
+    fs::write(&child_rc, "SELECTED=$UNKNOWN\n").unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .current_dir(base)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(78), "{:?}", output.stderr);
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("variable UNKNOWN is not defined")
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn check_limits_dynamic_rc_path_warnings() {
+    let limit = procmail_rs::rc_file::MAX_RC_CHECK_WARNINGS;
+    let source = "INCLUDERC=$MATCH\n".repeat(limit + 1);
+    let path = config_file(&source);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.matches("path was not validated").count(), limit);
+    assert!(
+        stderr.contains("1 additional dynamic rc path warnings were omitted"),
+        "{stderr}"
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn filter_executes_header_only_include_and_returns_to_caller() {
     let path = config_file("");
     let base = path.parent().unwrap();

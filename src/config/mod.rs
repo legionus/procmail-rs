@@ -63,6 +63,13 @@ impl Config {
         expand::expand_with_runtime_values(self, values)
     }
 
+    pub(crate) fn prepare_for_check<'a>(
+        self,
+        values: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, ExpansionError> {
+        expand::prepare_for_check(self, values)
+    }
+
     pub fn maildir(&self) -> Option<&str> {
         self.statements
             .iter()

@@ -140,9 +140,23 @@ fn run() -> Result<(), OperationalError> {
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let durability = Durability::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let plan = ExecutionPlan::compile_with_loader(&config, rc_loader);
     let _trace_config = TraceConfig::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
+
+    // Check resolvable runtime files before building the lazy execution tree.
+    // Message-derived paths remain unavailable without stdin, so report them
+    // as bounded warnings instead of pretending they were validated.
+    if command.action == Action::Check {
+        let warnings = rc_loader
+            .check_resolvable_files(&config)
+            .map_err(|error| OperationalError::Configuration(error.to_string()))?;
+        for warning in warnings {
+            eprintln!("procmail-rs: warning: {warning}");
+        }
+        return Ok(());
+    }
+
+    let plan = ExecutionPlan::compile_with_loader(&config, rc_loader);
 
     // A deferred decision needs a replayable private copy of stdin. Requiring
     // MAILDIR before reading headers prevents a configuration failure from
@@ -162,7 +176,7 @@ fn run() -> Result<(), OperationalError> {
     // every `?` returns here first and the bounded diagnostic queue is always
     // drained before this function returns to main.
     let result = (|| match command.action {
-        Action::Check => Ok(()),
+        Action::Check => unreachable!(),
         Action::Explain => {
             let mut stdout = io::stdout().lock();
             write_plan_explanation(&plan.explain(), &mut stdout).map_err(|error| {

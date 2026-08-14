@@ -224,6 +224,37 @@ pub(super) fn expand_with_runtime_values<'a>(
     expand_config(config, variables, Vec::new(), maildir)
 }
 
+pub(super) fn prepare_for_check<'a>(
+    mut config: Config,
+    values: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Result<Config, ExpansionError> {
+    let values = values.collect::<Vec<_>>();
+    let maildir = values
+        .iter()
+        .rev()
+        .find_map(|(name, value)| (*name == "MAILDIR").then_some(*value));
+    let known = values
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name.to_owned(),
+                ExpandedValue {
+                    text: value.to_owned(),
+                    depth: 0,
+                },
+            )
+        })
+        .collect();
+    let mut dynamic = BTreeSet::new();
+
+    // A check has no message values, but it still needs to reject undefined
+    // ordinary variables and malformed path expressions throughout a loaded
+    // file. Prepare every statement for later symbolic evaluation instead of
+    // demanding MATCH or LASTFOLDER before stdin exists.
+    prepare_runtime_statements(&mut config.statements, &known, &mut dynamic, maildir)?;
+    Ok(config)
+}
+
 fn expand_config(
     mut config: Config,
     mut variables: BTreeMap<String, ExpandedValue>,

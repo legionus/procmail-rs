@@ -25,6 +25,10 @@ impl RuntimeVariables {
         self.values.get(name).map(String::as_str)
     }
 
+    pub(crate) fn remove(&mut self, name: &str) {
+        self.values.remove(name);
+    }
+
     pub(crate) fn values(&self) -> impl Iterator<Item = (&str, &str)> {
         self.values
             .iter()
