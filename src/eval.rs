@@ -2103,7 +2103,7 @@ impl ExecutionPlan {
         let mut initial_statements = config
             .initial_variables()
             .iter()
-            .map(|(name, value)| {
+            .map(|(name, value, source)| {
                 CompiledStatement::Assignment(CompiledAssignment {
                     assignment: Assignment {
                         line: 0,
@@ -2113,7 +2113,16 @@ impl ExecutionPlan {
                         expansion: None,
                     },
                     line: None,
-                    source: TraceVariableSource::CommandLine,
+                    source: match source {
+                        crate::config::VariableSource::RcFile => TraceVariableSource::RcFile,
+                        crate::config::VariableSource::CommandLine => {
+                            TraceVariableSource::CommandLine
+                        }
+                        crate::config::VariableSource::Environment => {
+                            TraceVariableSource::Environment
+                        }
+                        crate::config::VariableSource::Runtime => TraceVariableSource::Runtime,
+                    },
                 })
             })
             .collect::<Vec<_>>();

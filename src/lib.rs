@@ -20,3 +20,6 @@ pub mod trace;
 
 #[allow(unsafe_code)]
 mod mapped_file;
+
+#[allow(unsafe_code)]
+pub mod user_identity;

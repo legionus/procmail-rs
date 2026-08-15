@@ -48,6 +48,7 @@ pub enum AssignmentTarget {
 pub enum VariableSource {
     RcFile,
     CommandLine,
+    Environment,
     Runtime,
 }
 
@@ -62,6 +63,7 @@ pub enum VariablePolicy {
 pub struct SuppliedVariable {
     name: String,
     value: String,
+    source: VariableSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +109,28 @@ impl SuppliedVariable {
         Ok(Self {
             name: name.to_owned(),
             value: value.to_owned(),
+            source: VariableSource::CommandLine,
+        })
+    }
+
+    pub fn from_environment(
+        name: &'static str,
+        value: String,
+    ) -> Result<Self, SuppliedVariableError> {
+        if !matches!(name, "HOME" | "LOGNAME") {
+            return Err(SuppliedVariableError::new(format!(
+                "environment variable {name} is not admitted"
+            )));
+        }
+        if value.len() > MAX_ASSIGNMENT_VALUE_LEN {
+            return Err(SuppliedVariableError::new(format!(
+                "environment variable {name} exceeds the hard limit of {MAX_ASSIGNMENT_VALUE_LEN} bytes"
+            )));
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            value,
+            source: VariableSource::Environment,
         })
     }
 
@@ -116,6 +140,10 @@ impl SuppliedVariable {
 
     pub(crate) fn value(&self) -> &str {
         &self.value
+    }
+
+    pub(crate) fn source(&self) -> VariableSource {
+        self.source
     }
 }
 
@@ -302,6 +330,16 @@ mod tests {
         for input in ["BOX", "=value", "9BOX=value", "BOX-NAME=value"] {
             assert!(SuppliedVariable::parse(input.into()).is_err(), "{input:?}");
         }
+    }
+
+    #[test]
+    fn admits_only_passwd_backed_initial_names() {
+        for name in ["HOME", "LOGNAME"] {
+            let variable = SuppliedVariable::from_environment(name, "value".into()).unwrap();
+            assert_eq!(variable.name(), name);
+            assert_eq!(variable.source(), VariableSource::Environment);
+        }
+        assert!(SuppliedVariable::from_environment("PATH", "value".into()).is_err());
     }
 
     #[test]

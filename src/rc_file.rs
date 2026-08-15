@@ -266,7 +266,7 @@ impl RcFileLoader {
 
     pub fn check_resolvable_files(&mut self, config: &Config) -> Result<Vec<String>, RcFileError> {
         let mut runtime = RuntimeVariables::default();
-        for (name, value) in config.initial_variables() {
+        for (name, value, _) in config.initial_variables() {
             runtime.set(name.clone(), value.clone());
         }
         let mut warnings = RcCheckWarnings::default();

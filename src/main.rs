@@ -36,6 +36,7 @@ use procmail_rs::trace::{
     DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, NoTrace, TraceConfig,
     TraceEvent, TraceSink,
 };
+use procmail_rs::user_identity::UserIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
@@ -128,12 +129,22 @@ fn main() -> ExitCode {
 
 fn run() -> Result<u8, OperationalError> {
     let command = parse_args().map_err(OperationalError::Configuration)?;
+    let identity = UserIdentity::current().map_err(|error| {
+        OperationalError::Configuration(format!("cannot determine current user identity: {error}"))
+    })?;
+    let mut supplied = vec![
+        SuppliedVariable::from_environment("HOME", identity.home().to_owned())
+            .map_err(|error| OperationalError::Configuration(error.to_string()))?,
+        SuppliedVariable::from_environment("LOGNAME", identity.logname().to_owned())
+            .map_err(|error| OperationalError::Configuration(error.to_string()))?,
+    ];
+    supplied.extend(command.supplied.iter().cloned());
     let path = &command.config;
     let (mut rc_loader, root_rc) = RcFileLoader::for_root(path)
         .map_err(|error| OperationalError::Configuration(error.to_string()))?;
     let config = config::parse(root_rc.source())
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
-        .expand_with(&command.supplied)
+        .expand_with(&supplied)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     rc_loader
         .account_root_config(&config)

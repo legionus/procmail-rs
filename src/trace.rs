@@ -412,6 +412,7 @@ fn variable_source_name(source: VariableSource) -> &'static str {
     match source {
         VariableSource::RcFile => "rc-file",
         VariableSource::CommandLine => "command-line",
+        VariableSource::Environment => "environment",
         VariableSource::Runtime => "runtime",
     }
 }
@@ -591,6 +592,7 @@ impl std::error::Error for TraceNameError {}
 pub enum VariableSource {
     RcFile,
     CommandLine,
+    Environment,
     Runtime,
 }
 

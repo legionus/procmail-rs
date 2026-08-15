@@ -9,7 +9,7 @@ use super::{
     Assignment, AssignmentTarget, Config, Destination, ExpansionExpression, ExpansionPart,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression,
     RcFileExpression, Recipe, RecipeAction, Statement, SuppliedVariable, VariablePolicy,
-    assignment_value_limit, variable_policy,
+    VariableSource, assignment_value_limit, variable_policy,
 };
 
 #[derive(Debug, Clone)]
@@ -190,8 +190,19 @@ pub(super) fn expand(
     let mut variables = BTreeMap::<String, ExpandedValue>::new();
     let mut initial_variables = Vec::with_capacity(supplied.len());
     for variable in supplied {
-        let value = expand_text(variable.value(), 0, MAX_ASSIGNMENT_VALUE_LEN, &variables)?;
-        initial_variables.push((variable.name().to_owned(), value.text.clone()));
+        let value = if variable.source() == VariableSource::Environment {
+            ExpandedValue {
+                text: variable.value().to_owned(),
+                depth: 0,
+            }
+        } else {
+            expand_text(variable.value(), 0, MAX_ASSIGNMENT_VALUE_LEN, &variables)?
+        };
+        initial_variables.push((
+            variable.name().to_owned(),
+            value.text.clone(),
+            variable.source(),
+        ));
         variables.insert(variable.name().to_owned(), value);
     }
     expand_config(config, variables, initial_variables, None)
@@ -255,7 +266,7 @@ pub(super) fn prepare_for_check<'a>(
 fn expand_config(
     mut config: Config,
     mut variables: BTreeMap<String, ExpandedValue>,
-    initial_variables: Vec<(String, String)>,
+    initial_variables: Vec<(String, String, VariableSource)>,
     mut maildir: Option<String>,
 ) -> Result<Config, ExpansionError> {
     config.initial_variables = initial_variables;
@@ -934,7 +945,7 @@ mod tests {
         let mut variables = config
             .initial_variables()
             .iter()
-            .cloned()
+            .map(|(name, value, _)| (name.clone(), value.clone()))
             .collect::<BTreeMap<_, _>>();
         for (index, statement) in config.statements[..=statement_index].iter().enumerate() {
             match statement {
@@ -999,6 +1010,23 @@ mod tests {
             resolved_destination(&config, 3),
             Destination::Maildir("cli-rc".into())
         );
+    }
+
+    #[test]
+    fn inserts_passwd_values_without_rescanning_their_text() {
+        let supplied = [
+            SuppliedVariable::from_environment("HOME", "/home/$literal".into()).unwrap(),
+            SuppliedVariable::from_environment("LOGNAME", "user".into()).unwrap(),
+        ];
+        let config = parse("VALUE=$HOME\n")
+            .unwrap()
+            .expand_with(&supplied)
+            .unwrap();
+        let Statement::Assignment(assignment) = &config.statements[0] else {
+            panic!("expected assignment");
+        };
+
+        assert_eq!(assignment.value, "/home/$literal");
     }
 
     #[test]

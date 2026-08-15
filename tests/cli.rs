@@ -2096,6 +2096,42 @@ fn filter_does_not_import_ambient_environment_variables() {
 }
 
 #[test]
+fn filter_gets_home_and_logname_from_the_passwd_database() {
+    let identity = procmail_rs::user_identity::UserIdentity::current().unwrap();
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let selected = base.join("selected");
+    create_maildir(&selected);
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\n:0 Wi\n* ? test \"$HOME\" = \"$EXPECTED_HOME\" && test \"$LOGNAME\" = \"$EXPECTED_LOGNAME\"\n{{\n:0\nselected/\n}}\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let message = b"Subject: passwd identity\n\nbody\n";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .args(["--set", &format!("EXPECTED_HOME={}", identity.home())])
+        .args(["--set", &format!("EXPECTED_LOGNAME={}", identity.logname())])
+        .env("HOME", "/ambient/home/must-not-win")
+        .env("LOGNAME", "ambient-logname-must-not-win")
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(message)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [message]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn check_rejects_too_many_command_line_variables() {
     let config = config_file(":0\nmaildir:unused\n");
     let mut command = Command::new(env!("CARGO_BIN_EXE_procmail-rs"));

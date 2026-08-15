@@ -50,7 +50,7 @@ pub const HARD_MAX_RC_STATEMENTS: usize = 65_536;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub statements: Vec<Statement>,
-    pub(crate) initial_variables: Vec<(String, String)>,
+    pub(crate) initial_variables: Vec<(String, String, VariableSource)>,
     pub(crate) parse_counts: RcParseCounts,
 }
 
@@ -155,7 +155,7 @@ impl Config {
             })
     }
 
-    pub(crate) fn initial_variables(&self) -> &[(String, String)] {
+    pub(crate) fn initial_variables(&self) -> &[(String, String, VariableSource)] {
         &self.initial_variables
     }
 
