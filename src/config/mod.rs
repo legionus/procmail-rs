@@ -166,6 +166,10 @@ impl Config {
     pub fn has_pipe_actions(&self) -> bool {
         statements_have_pipe_actions(&self.statements)
     }
+
+    pub fn has_external_commands(&self) -> bool {
+        statements_have_external_commands(&self.statements)
+    }
 }
 
 fn statements_have_pipe_actions(statements: &[Statement]) -> bool {
@@ -175,6 +179,23 @@ fn statements_have_pipe_actions(statements: &[Statement]) -> bool {
             RecipeAction::Block(children) => statements_have_pipe_actions(children),
             RecipeAction::Deliver(_) => false,
         },
+        Statement::Assignment(_) | Statement::Include(_) | Statement::Switch(_) => false,
+    })
+}
+
+fn statements_have_external_commands(statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::Recipe(recipe) => {
+            recipe
+                .conditions
+                .iter()
+                .any(|condition| matches!(condition.kind, ConditionKind::Program(_)))
+                || match &recipe.action {
+                    RecipeAction::Pipe(_) => true,
+                    RecipeAction::Block(children) => statements_have_external_commands(children),
+                    RecipeAction::Deliver(_) => false,
+                }
+        }
         Statement::Assignment(_) | Statement::Include(_) | Statement::Switch(_) => false,
     })
 }
@@ -317,6 +338,7 @@ pub enum ConditionKind {
         name: String,
         regex: RegexCondition,
     },
+    Program(String),
     SmallerThan(usize),
     LargerThan(usize),
 }

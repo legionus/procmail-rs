@@ -26,7 +26,7 @@ use procmail_rs::eval::{
     HeaderEvaluation, MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation,
     PlannedDelivery,
 };
-use procmail_rs::external_filter::{FilterOutput, decide_filter, decide_program};
+use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
 use procmail_rs::external_process::{run_filter, run_program};
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
@@ -161,7 +161,7 @@ fn run() -> Result<u8, OperationalError> {
         for warning in warnings {
             eprintln!("procmail-rs: warning: {warning}");
         }
-        if config.has_pipe_actions() {
+        if config.has_external_commands() {
             eprintln!(
                 "procmail-rs: warning: configuration contains external shell actions; no command was executed"
             );
@@ -324,6 +324,7 @@ fn write_plan_explanation(
                 ConditionKindExplanation::BodyRegex => "body-regex",
                 ConditionKindExplanation::MessageRegex => "message-regex",
                 ConditionKindExplanation::VariableRegex => "variable-regex",
+                ConditionKindExplanation::Program => "program",
                 ConditionKindExplanation::SmallerThan => "smaller-than",
                 ConditionKindExplanation::LargerThan => "larger-than",
             };
@@ -414,7 +415,7 @@ fn deliver_staged(
 
     if execution.requires_ordered_delivery() {
         let outcome = execution
-            .execute_mapped_ordered_with_external_trace(
+            .execute_mapped_ordered_with_processes_trace(
                 MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                 runtime,
                 trace,
@@ -437,6 +438,9 @@ fn deliver_staged(
                             DeliveryAttemptError::Fatal(error.error)
                         }
                     })
+                },
+                &mut |command, input, runtime, _| {
+                    execute_external_condition(command, input, runtime)
                 },
                 &mut |action, options, input, runtime, _| {
                     execute_external_action(
@@ -482,6 +486,40 @@ fn deliver_staged(
     commit_delivery(validated, plan.deliveries(), runtime, trace)?;
 
     delivery_outcome(&plan)
+}
+
+fn execute_external_condition(
+    command: &str,
+    input: &[u8],
+    runtime: &mut RuntimeVariables,
+) -> Result<bool, DeliveryAttemptError<OperationalError>> {
+    let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
+        recoverable_external_error(format!(
+            "cannot build external condition environment: {error}"
+        ))
+    })?;
+    let configured_shell = environment
+        .get("SHELL")
+        .expect("bounded process environment always contains SHELL");
+    let shell_policy = ShellPolicy::approve(configured_shell)
+        .map_err(|error| recoverable_external_error(error.to_string()))?;
+    let stderr = external_stderr(runtime).map_err(|error| {
+        recoverable_external_error(format!("cannot open external command log: {error}"))
+    })?;
+
+    // Program conditions always wait for the child and decide solely from its
+    // exit status. A child that closes stdin early must still be usable for
+    // commands such as test(1), which do not consume the message at all.
+    let run = run_program(
+        &shell_policy,
+        &environment,
+        command,
+        input,
+        procmail_rs::config::OutputEnding::Preserve,
+        stderr,
+    )
+    .map_err(|error| recoverable_external_error(error.to_string()))?;
+    Ok(run.child_exit() == ChildExit::Success)
 }
 
 fn execute_external_action(

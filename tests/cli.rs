@@ -128,6 +128,34 @@ fn check_accepts_valid_config() {
 }
 
 #[test]
+fn program_condition_can_select_a_block_and_update_a_quoted_variable() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("unknown");
+    create_maildir(&selected);
+    let rules = format!(
+        "MAILDIR={}\nUNKNOWN_FOLDER=unknown\nLISTDIR=missing\n:0 Wi\n* ? test ! -e $LISTDIR\n{{\n    LISTDIR=\"$UNKNOWN_FOLDER\"\n}}\n:0\n$LISTDIR/\n",
+        base.display()
+    );
+    fs::write(&path, rules).unwrap();
+    let message = b"Subject: program condition\n\nbody\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(message).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [message]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn check_and_explain_accept_pipe_actions_without_executing_them() {
     let path = config_file(":0 fw\n| private-command --secret=value\n");
 

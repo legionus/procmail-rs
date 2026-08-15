@@ -247,7 +247,7 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
     {
         return Ok(None);
     }
-    let value = strip_comment(value.trim()).trim();
+    let value = parse_assignment_value(value.trim(), line_number)?;
     if value.len() > MAX_ASSIGNMENT_VALUE_LEN {
         return Err(ParseError::new(
             line_number,
@@ -287,7 +287,7 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
     Ok(Some(Assignment {
         line: line_number,
         name: name.to_owned(),
-        value: value.to_owned(),
+        value,
         target,
         expansion: None,
     }))
@@ -377,16 +377,20 @@ fn parse_recipe(
     }
 
     let is_pipe = action.starts_with('|');
+    let has_program_condition = conditions
+        .iter()
+        .any(|condition| matches!(condition.kind, ConditionKind::Program(_)));
     if !is_pipe
         && (options.action_input != ActionInput::Message
             || options.action_mode != ActionMode::Deliver
-            || options.child_status != ChildStatusMode::Ignore
-            || options.write_errors != WriteErrorMode::Fail
+            || (!has_program_condition
+                && (options.child_status != ChildStatusMode::Ignore
+                    || options.write_errors != WriteErrorMode::Fail))
             || options.output_ending != OutputEnding::Normalize)
     {
         return Err(ParseError::new(
             start + 1,
-            "flags h, b, f, w, W, i, and r require a pipe action",
+            "flags h, b, f, and r require a pipe action; flags w, W, and i require a pipe action or program condition",
         ));
     }
 
@@ -694,6 +698,10 @@ fn parse_condition(
         (ConditionKind::SmallerThan(parse_size(value, line)?), false)
     } else if let Some(value) = input.strip_prefix('>') {
         (ConditionKind::LargerThan(parse_size(value, line)?), false)
+    } else if let Some(command) = input.strip_prefix('?') {
+        let command = command.trim_start();
+        validate_program_condition(command, line)?;
+        (ConditionKind::Program(command.to_owned()), false)
     } else {
         let total_regexes = prior_regexes
             .checked_add(recipe_regexes)
@@ -957,6 +965,53 @@ fn check_path_length(path: &str, line: usize, description: &str) -> Result<(), P
 
 fn strip_comment(value: &str) -> &str {
     value.split_once('#').map_or(value, |(value, _)| value)
+}
+
+fn parse_assignment_value(value: &str, line: usize) -> Result<String, ParseError> {
+    if !value.starts_with('"') {
+        return Ok(strip_comment(value).trim().to_owned());
+    }
+
+    // An outer double-quoted value is a single rc value, so a '#' within it
+    // is data rather than a comment. Quote escapes and trailing shell syntax
+    // stay rejected until their exact procmail behavior is implemented.
+    let quoted = &value[1..];
+    let Some(closing) = quoted.find('"') else {
+        return Err(ParseError::new(
+            line,
+            "unterminated double-quoted assignment value",
+        ));
+    };
+    let inner = &quoted[..closing];
+    let trailing = quoted[closing + 1..].trim();
+    if !trailing.is_empty() && !trailing.starts_with('#') {
+        return Err(ParseError::new(
+            line,
+            "syntax after a double-quoted assignment value is not supported",
+        ));
+    }
+    Ok(inner.to_owned())
+}
+
+fn validate_program_condition(command: &str, line: usize) -> Result<(), ParseError> {
+    if command.is_empty() {
+        return Err(ParseError::new(line, "program condition command is empty"));
+    }
+    if command.len() > MAX_PIPE_COMMAND_LEN {
+        return Err(ParseError::limit(
+            line,
+            format!(
+                "program condition command exceeds the hard limit of {MAX_PIPE_COMMAND_LEN} bytes"
+            ),
+        ));
+    }
+    if command.as_bytes().contains(&0) {
+        return Err(ParseError::new(
+            line,
+            "program condition command contains NUL",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1245,7 +1300,7 @@ mod tests {
         assert_eq!(error.line, 1);
         assert_eq!(
             error.message,
-            "flags h, b, f, w, W, i, and r require a pipe action"
+            "flags h, b, f, and r require a pipe action; flags w, W, and i require a pipe action or program condition"
         );
     }
 
@@ -1372,6 +1427,60 @@ mod tests {
 
         assert_eq!(assignment.name, "BOX");
         assert_eq!(assignment.value, "inbox");
+    }
+
+    #[test]
+    fn parses_program_condition_and_quoted_block_assignment() {
+        let config =
+            parse(":0 Wi\n* ? test ! -e $LISTDIR\n{\n    LISTDIR=\"$UNKNOWN_FOLDER\"\n}\n")
+                .unwrap();
+        let Statement::Recipe(recipe) = &config.statements[0] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Program(command) = &recipe.conditions[0].kind else {
+            panic!("expected program condition");
+        };
+        assert_eq!(command, "test ! -e $LISTDIR");
+        let RecipeAction::Block(statements) = &recipe.action else {
+            panic!("expected block");
+        };
+        let Statement::Assignment(assignment) = &statements[0] else {
+            panic!("expected assignment");
+        };
+        assert_eq!(assignment.value, "$UNKNOWN_FOLDER");
+    }
+
+    #[test]
+    fn rejects_unterminated_quoted_assignment() {
+        let error = parse("NAME=\"value\n").unwrap_err();
+
+        assert_eq!(error.line, 1);
+        assert_eq!(error.message, "unterminated double-quoted assignment value");
+    }
+
+    #[test]
+    fn bounds_and_validates_program_condition_text() {
+        for length in [MAX_PIPE_COMMAND_LEN - 1, MAX_PIPE_COMMAND_LEN] {
+            let source = format!(":0\n* ? {}\nmaildir:selected\n", "x".repeat(length));
+            assert!(parse(&source).is_ok(), "length {length} must be accepted");
+        }
+
+        let source = format!(
+            ":0\n* ? {}\nmaildir:selected\n",
+            "x".repeat(MAX_PIPE_COMMAND_LEN + 1)
+        );
+        let error = parse(&source).unwrap_err();
+        assert_eq!(error.line, 2);
+        assert_eq!(
+            error.message,
+            format!(
+                "program condition command exceeds the hard limit of {MAX_PIPE_COMMAND_LEN} bytes"
+            )
+        );
+
+        let error = parse(":0\n* ?\nmaildir:selected\n").unwrap_err();
+        assert_eq!(error.line, 2);
+        assert_eq!(error.message, "program condition command is empty");
     }
 
     #[test]

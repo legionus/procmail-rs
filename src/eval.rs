@@ -170,7 +170,14 @@ enum CompiledConditionKind {
     HeaderRegex(Regex),
     BodyRegex(Regex),
     MessageRegex(Regex),
-    VariableRegex { name: String, regex: Regex },
+    VariableRegex {
+        name: String,
+        regex: Regex,
+    },
+    Program {
+        command: String,
+        input: ConditionInput,
+    },
     SmallerThan(usize),
     LargerThan(usize),
 }
@@ -192,6 +199,7 @@ struct OrderedTreeExecution<'a, E, D, T> {
     original_delivered: bool,
     pending_error: Option<E>,
     external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
+    external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
     rc: RcExecutionContext<'a>,
 }
 
@@ -202,6 +210,9 @@ type ExternalActionExecutor<'a, E, T> = dyn FnMut(
         &mut RuntimeVariables,
         &mut T,
     ) -> Result<Option<Message>, DeliveryAttemptError<E>>
+    + 'a;
+
+type ExternalConditionExecutor<'a, E, T> = dyn FnMut(&str, &[u8], &mut RuntimeVariables, &mut T) -> Result<bool, DeliveryAttemptError<E>>
     + 'a;
 
 #[derive(Debug)]
@@ -361,6 +372,7 @@ pub enum ConditionKindExplanation {
     BodyRegex,
     MessageRegex,
     VariableRegex,
+    Program,
     SmallerThan,
     LargerThan,
 }
@@ -498,6 +510,9 @@ pub enum EvalError {
     ExternalActionUnsupported {
         line: usize,
     },
+    ExternalConditionUnsupported {
+        line: usize,
+    },
     InvalidExternalActionResult {
         line: usize,
         reason: &'static str,
@@ -539,6 +554,12 @@ impl fmt::Display for EvalError {
                 write!(
                     formatter,
                     "line {line}: external action is not executable yet"
+                )
+            }
+            Self::ExternalConditionUnsupported { line } => {
+                write!(
+                    formatter,
+                    "line {line}: program condition is not executable in this evaluation mode"
                 )
             }
             Self::InvalidExternalActionResult { line, reason } => write!(
@@ -818,14 +839,8 @@ impl CompiledSequence {
             if statement_control != SequenceControl::Continue {
                 return Ok((sequence_action, statement_control));
             }
-            let conditions_matched = recipe.execution_gate(state)
-                && recipe
-                    .matches_complete(
-                        current_ordered_message(context.message, context.replacement.as_ref()),
-                        context.runtime,
-                        context.trace,
-                    )
-                    .map_err(OrderedExecutionError::Evaluation)?;
+            let conditions_matched =
+                recipe.execution_gate(state) && recipe.matches_ordered(context)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let (action, control) = if conditions_matched {
                 context.trace.record(TraceEvent::RecipeEvaluated {
@@ -1336,16 +1351,20 @@ impl CompiledNode {
     }
 
     fn requires_ordered_delivery(&self) -> bool {
-        match &self.action {
-            CompiledAction::Pipe { .. } => true,
-            CompiledAction::Deliver {
-                destination,
-                continuation: _,
-            } => {
-                destination.needs_runtime_variables() || matches!(destination, Destination::Mbox(_))
+        self.conditions
+            .iter()
+            .any(|condition| matches!(condition.kind, CompiledConditionKind::Program { .. }))
+            || match &self.action {
+                CompiledAction::Pipe { .. } => true,
+                CompiledAction::Deliver {
+                    destination,
+                    continuation: _,
+                } => {
+                    destination.needs_runtime_variables()
+                        || matches!(destination, Destination::Mbox(_))
+                }
+                CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
             }
-            CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
-        }
     }
 
     fn needs_message_contents(&self) -> bool {
@@ -1368,6 +1387,62 @@ impl CompiledNode {
         for (index, condition) in self.conditions.iter().enumerate() {
             let matched = condition.matches_complete(message, runtime)?;
             condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
+            if !matched {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn matches_ordered<E, D, T>(
+        &self,
+        context: &mut OrderedTreeExecution<'_, E, D, T>,
+    ) -> Result<bool, OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let message = current_ordered_message(context.message, context.replacement.as_ref());
+            let matched = match &condition.kind {
+                CompiledConditionKind::Program { command, input } => {
+                    let input = match input {
+                        ConditionInput::Headers => Some(message.raw_header()),
+                        ConditionInput::Body => message.body(),
+                        ConditionInput::Message => message.raw(),
+                    }
+                    .ok_or(EvalError::BodyWasNotBuffered)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                    let Some(executor) = context.external_condition.as_deref_mut() else {
+                        return Err(OrderedExecutionError::Evaluation(
+                            EvalError::ExternalConditionUnsupported {
+                                line: condition.line,
+                            },
+                        ));
+                    };
+                    match executor(command, input, context.runtime, context.trace) {
+                        Ok(matched) => matched ^ condition.negated,
+                        Err(DeliveryAttemptError::Recoverable(error))
+                        | Err(DeliveryAttemptError::Fatal(error)) => {
+                            return Err(OrderedExecutionError::Delivery(error));
+                        }
+                    }
+                }
+                _ => condition
+                    .matches_complete(message, context.runtime)
+                    .map_err(OrderedExecutionError::Evaluation)?,
+            };
+            condition.trace_result(
+                self.line,
+                index,
+                PartialMatch::from_bool(matched),
+                context.trace,
+            );
             if !matched {
                 return Ok(false);
             }
@@ -2351,6 +2426,7 @@ impl ExecutionPlan {
             trace,
             deliver,
             None,
+            None,
         )
     }
 
@@ -2378,7 +2454,48 @@ impl ExecutionPlan {
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
         T: TraceSink,
     {
-        self.execute_mapped_ordered_inner(message, runtime, trace, deliver, Some(external))
+        self.execute_mapped_ordered_inner(message, runtime, trace, deliver, Some(external), None)
+    }
+
+    pub fn execute_mapped_ordered_with_processes_trace<E, D, C, X, T>(
+        &self,
+        message: MappedMessageInput<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut T,
+        deliver: &mut D,
+        external_condition: &mut C,
+        external: &mut X,
+    ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        C: FnMut(
+            &str,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<bool, DeliveryAttemptError<E>>,
+        X: FnMut(
+            &PipeAction,
+            RecipeOptions,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        self.execute_mapped_ordered_inner(
+            message,
+            runtime,
+            trace,
+            deliver,
+            Some(external),
+            Some(external_condition),
+        )
     }
 
     fn execute_mapped_ordered_inner<'a, E, D, T>(
@@ -2388,6 +2505,7 @@ impl ExecutionPlan {
         trace: &'a mut T,
         deliver: &'a mut D,
         external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
+        external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
         D: FnMut(
@@ -2437,6 +2555,7 @@ impl ExecutionPlan {
             original_delivered: false,
             pending_error: None,
             external,
+            external_condition,
             rc: self.rc_context(),
         };
         self.root.execute_ordered(&mut context)?;
@@ -2504,7 +2623,9 @@ fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
             ConditionKind::Regex(regex)
             | ConditionKind::AreaRegex { regex, .. }
             | ConditionKind::VariableRegex { regex, .. } => Some(regex),
-            ConditionKind::SmallerThan(_) | ConditionKind::LargerThan(_) => None,
+            ConditionKind::Program(_)
+            | ConditionKind::SmallerThan(_)
+            | ConditionKind::LargerThan(_) => None,
         };
         let kind = match &condition.kind {
             ConditionKind::SmallerThan(size) => CompiledConditionKind::SmallerThan(*size),
@@ -2532,6 +2653,10 @@ fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
             ConditionKind::VariableRegex { name, regex } => CompiledConditionKind::VariableRegex {
                 name: name.clone(),
                 regex: regex.compiled().clone(),
+            },
+            ConditionKind::Program(command) => CompiledConditionKind::Program {
+                command: command.clone(),
+                input: recipe.options.condition_input,
             },
         };
         conditions.push(CompiledCondition {
@@ -2566,6 +2691,7 @@ impl CompiledCondition {
             CompiledConditionKind::BodyRegex(_) => TraceConditionKind::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => TraceConditionKind::MessageRegex,
             CompiledConditionKind::VariableRegex { .. } => TraceConditionKind::VariableRegex,
+            CompiledConditionKind::Program { .. } => TraceConditionKind::Program,
             CompiledConditionKind::SmallerThan(_) => TraceConditionKind::SmallerThan,
             CompiledConditionKind::LargerThan(_) => TraceConditionKind::LargerThan,
         };
@@ -2585,6 +2711,7 @@ impl CompiledCondition {
             CompiledConditionKind::BodyRegex(_) => ConditionKindExplanation::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => ConditionKindExplanation::MessageRegex,
             CompiledConditionKind::VariableRegex { .. } => ConditionKindExplanation::VariableRegex,
+            CompiledConditionKind::Program { .. } => ConditionKindExplanation::Program,
             CompiledConditionKind::SmallerThan(_) => ConditionKindExplanation::SmallerThan,
             CompiledConditionKind::LargerThan(_) => ConditionKindExplanation::LargerThan,
         };
@@ -2608,6 +2735,18 @@ impl CompiledCondition {
                 }
             }
             CompiledConditionKind::VariableRegex { .. } => InputRequirements::default(),
+            CompiledConditionKind::Program { input, .. } => match input {
+                ConditionInput::Headers => InputRequirements {
+                    needs_headers: true,
+                    needs_end_of_message: true,
+                    ..InputRequirements::default()
+                },
+                ConditionInput::Body | ConditionInput::Message => InputRequirements {
+                    needs_headers: true,
+                    needs_body_contents: true,
+                    needs_end_of_message: true,
+                },
+            },
             CompiledConditionKind::SmallerThan(_) | CompiledConditionKind::LargerThan(_) => {
                 InputRequirements {
                     needs_end_of_message: true,
@@ -2629,6 +2768,7 @@ impl CompiledCondition {
             CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
                 return Ok(PartialMatch::Deferred);
             }
+            CompiledConditionKind::Program { .. } => return Ok(PartialMatch::Deferred),
             CompiledConditionKind::VariableRegex { name, regex } => {
                 let value = runtime.get(name).unwrap_or_default().to_owned();
                 if value.len() > crate::config::MAX_ASSIGNMENT_VALUE_LEN {
@@ -2685,6 +2825,9 @@ impl CompiledCondition {
                     });
                 }
                 self.regex_matches(regex, value.as_bytes(), runtime)?
+            }
+            CompiledConditionKind::Program { .. } => {
+                return Err(EvalError::ExternalConditionUnsupported { line: self.line });
             }
             CompiledConditionKind::SmallerThan(size) => message.len() < *size,
             CompiledConditionKind::LargerThan(size) => message.len() > *size,
@@ -3954,6 +4097,47 @@ mod tests {
 
         assert_eq!(external_calls, 1);
         assert_eq!(delivered, [("selected".to_owned(), replacement.to_vec())]);
+        assert_eq!(outcome.published(), 1);
+        assert!(outcome.original_delivered());
+    }
+
+    #[test]
+    fn program_condition_uses_child_status_before_entering_block() {
+        let plan = compile(":0 Wi\n* ? test ! -e $LISTDIR\n{\n:0\nmaildir:selected\n}\n");
+        let raw = b"Subject: program\n condition\n\nbody";
+        let matching_header = b"Subject: program condition\n\n";
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = NoTrace;
+        let mut delivered = Vec::new();
+        let mut condition_calls = 0usize;
+
+        let outcome = plan
+            .execute_mapped_ordered_with_processes_trace(
+                MappedMessageInput::new(
+                    raw,
+                    b"Subject: program\n condition\n\n".len(),
+                    Some(MatchingMessage::new(matching_header, None)),
+                ),
+                &mut runtime,
+                &mut trace,
+                &mut |destination, _, _, _| {
+                    delivered.push(destination.path().to_owned());
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+                &mut |command, input, _, _| {
+                    condition_calls += 1;
+                    assert_eq!(command, "test ! -e $LISTDIR");
+                    assert_eq!(input, b"Subject: program\n condition\n\n");
+                    Ok::<_, DeliveryAttemptError<&str>>(true)
+                },
+                &mut |_, _, _, _, _| {
+                    panic!("recipe contains no pipe action");
+                },
+            )
+            .unwrap();
+
+        assert_eq!(condition_calls, 1);
+        assert_eq!(delivered, ["selected"]);
         assert_eq!(outcome.published(), 1);
         assert!(outcome.original_delivered());
     }
