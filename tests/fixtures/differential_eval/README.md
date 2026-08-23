@@ -11,13 +11,16 @@ Each case keeps the complete comparison record:
   expected result;
 - `message.eml` is the input given to both implementations;
 - `expected.destinations` is the reviewed reference result;
+- `expected.outcome` records whether the original was delivered and the exact
+  number of successful actions;
 - `procmail-rs.rc` expresses the same scenario using explicit destination
   syntax accepted by this project.
 
-Ordinary tests evaluate only `procmail-rs.rc` and compare its selected
-destination basenames with `expected.destinations`. They never execute
-`procmail.rc`; that file remains beside the result so reviewers can verify
-that both configurations describe the same filtering behavior.
+Ordinary tests evaluate only `procmail-rs.rc` and require both stored result
+files. They compare selected destination basenames and the exact final
+evaluation outcome. They never execute `procmail.rc`; that file remains beside
+the result so reviewers can verify that both configurations describe the same
+filtering behavior.
 
 Do not regenerate expected results during a test run. If support is expanded,
 obtain and review the new reference behavior separately, then commit the

@@ -44,6 +44,7 @@ fn supported_milestone_7_behavior_matches_reference_procmail() {
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        let expected_outcome = fs::read_to_string(directory.join("expected.outcome")).unwrap();
         let config = config::parse(&source).unwrap().expand().unwrap();
         let failures = fs::read_to_string(directory.join("fail.destinations"))
             .unwrap_or_default()
@@ -60,10 +61,14 @@ fn supported_milestone_7_behavior_matches_reference_procmail() {
         let outcome = evaluate(&config, &message, &mut recorder).unwrap();
 
         assert_eq!(recorder.selected, expected, "fixture: {case}");
-        assert!(
-            matches!(outcome, Outcome::Delivered { .. }),
-            "fixture did not deliver the original: {case}"
-        );
+        assert_eq!(render_outcome(outcome), expected_outcome, "fixture: {case}");
+    }
+}
+
+fn render_outcome(outcome: Outcome) -> String {
+    match outcome {
+        Outcome::Delivered { deliveries } => format!("delivered {deliveries}\n"),
+        Outcome::Undelivered { copies } => format!("undelivered {copies}\n"),
     }
 }
 
