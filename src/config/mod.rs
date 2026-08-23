@@ -513,13 +513,4 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn later_maildir_assignment_selects_staging_base() {
-        let config = parse("MAILDIR=old\nMAILDIR=/srv/mail\n").unwrap();
-
-        assert_eq!(config.maildir(), Some("/srv/mail"));
-    }
-}
+mod tests;

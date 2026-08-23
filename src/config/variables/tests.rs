@@ -1,0 +1,161 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+use super::*;
+
+#[test]
+fn assigns_explicit_sources_to_variable_classes() {
+    assert_eq!(
+        variable_policy("MAILDIR").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::Maildir)
+    );
+    assert!(!variable_policy("MAILDIR").allows(VariableSource::CommandLine));
+    assert!(variable_policy("LASTFOLDER").allows(VariableSource::Runtime));
+    assert!(!variable_policy("LASTFOLDER").allows(VariableSource::RcFile));
+    assert!(variable_policy("MATCH").allows(VariableSource::Runtime));
+    assert!(variable_policy("MATCH1").allows(VariableSource::Runtime));
+    assert!(!variable_policy("MATCH1").allows(VariableSource::RcFile));
+    assert_eq!(
+        variable_policy("VERBOSE").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::Verbose)
+    );
+    assert_eq!(
+        variable_policy("LOGFILE").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::LogFile)
+    );
+    assert_eq!(
+        variable_policy("LOGDETAIL").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::LogDetail)
+    );
+    assert!(!variable_policy("VERBOSE").allows(VariableSource::CommandLine));
+    assert!(!variable_policy("LOGFILE").allows(VariableSource::CommandLine));
+    assert!(!variable_policy("LOGDETAIL").allows(VariableSource::CommandLine));
+    assert_eq!(
+        variable_policy("USER_VALUE").assignment_target(VariableSource::CommandLine),
+        Some(AssignmentTarget::User)
+    );
+    assert_eq!(
+        variable_policy("SHELL").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::Shell)
+    );
+    assert_eq!(
+        variable_policy("SHELLFLAGS").assignment_target(VariableSource::CommandLine),
+        Some(AssignmentTarget::ShellFlags)
+    );
+    assert_eq!(
+        variable_policy("PATH").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::Path)
+    );
+    assert_eq!(variable_policy("DEFAULT"), VariablePolicy::Unsupported);
+    assert_eq!(
+        variable_policy("USER_VALUE"),
+        VariablePolicy::RcOrCommandLine(AssignmentTarget::User)
+    );
+}
+
+#[test]
+fn rejects_unsupported_procmail_variables_from_command_line() {
+    let error = SuppliedVariable::parse("DEFAULT=mailbox".to_owned()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "procmail variable DEFAULT is not supported"
+    );
+}
+
+#[test]
+fn registry_classifies_every_unsupported_procmail_variable() {
+    for name in UNSUPPORTED_PROCMAIL_VARIABLES {
+        assert_eq!(variable_policy(name), VariablePolicy::Unsupported, "{name}");
+    }
+}
+
+#[test]
+fn parses_bounded_command_line_variables() {
+    let variable = SuppliedVariable::parse("BOX=one=two".into()).unwrap();
+    assert_eq!(variable.name(), "BOX");
+    assert_eq!(variable.value(), "one=two");
+
+    for input in ["BOX", "=value", "9BOX=value", "BOX-NAME=value"] {
+        assert!(SuppliedVariable::parse(input.into()).is_err(), "{input:?}");
+    }
+}
+
+#[test]
+fn admits_only_passwd_backed_initial_names() {
+    for name in ["HOME", "LOGNAME"] {
+        let variable = SuppliedVariable::from_environment(name, "value".into()).unwrap();
+        assert_eq!(variable.name(), name);
+        assert_eq!(variable.source(), VariableSource::Environment);
+    }
+    assert!(SuppliedVariable::from_environment("PATH", "value".into()).is_err());
+}
+
+#[test]
+fn rejects_command_line_sources_not_allowed_by_policy() {
+    for name in ["MAILDIR", "LASTFOLDER", "LIMIT_MSG_BODY"] {
+        let error = SuppliedVariable::parse(format!("{name}=value")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("variable {name} cannot be supplied with --set")
+        );
+    }
+}
+
+#[test]
+fn bounds_command_line_name_and_value() {
+    let name_at_limit = "A".repeat(MAX_ASSIGNMENT_NAME_LEN);
+    assert!(SuppliedVariable::parse(format!("{name_at_limit}=value")).is_ok());
+    assert!(
+        SuppliedVariable::parse(format!("{}=value", "A".repeat(MAX_ASSIGNMENT_NAME_LEN + 1)))
+            .is_err()
+    );
+
+    let value_at_limit = "v".repeat(MAX_ASSIGNMENT_VALUE_LEN);
+    assert!(SuppliedVariable::parse(format!("A={value_at_limit}")).is_ok());
+    assert!(
+        SuppliedVariable::parse(format!("A={}", "v".repeat(MAX_ASSIGNMENT_VALUE_LEN + 1))).is_err()
+    );
+}
+
+#[test]
+fn applies_shell_setting_limit_to_command_line_values() {
+    for name in ["SHELL", "SHELLFLAGS", "PATH"] {
+        assert!(
+            SuppliedVariable::parse(format!("{name}={}", "x".repeat(MAX_SHELL_SETTING_LEN)))
+                .is_ok()
+        );
+        let error =
+            SuppliedVariable::parse(format!("{name}={}", "x".repeat(MAX_SHELL_SETTING_LEN + 1)))
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("--set {name} value exceeds the hard limit of {MAX_SHELL_SETTING_LEN} bytes")
+        );
+    }
+}
+
+#[test]
+fn parses_umask_at_accepted_boundaries() {
+    for (value, expected) in [
+        ("0", 0),
+        ("0000", 0),
+        ("077", 0o077),
+        ("0776", 0o776),
+        ("0777", 0o777),
+    ] {
+        assert_eq!(parse_umask(value).unwrap(), expected);
+    }
+    for value in [
+        "",
+        "00000",
+        "8",
+        "078",
+        "1000",
+        "777777777777777777777777",
+        "-1",
+        "0o77",
+        " 077",
+    ] {
+        assert!(parse_umask(value).is_err(), "{value:?}");
+    }
+}
