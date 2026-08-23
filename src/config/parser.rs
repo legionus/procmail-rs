@@ -800,10 +800,17 @@ fn parse_condition(
                 ),
             ));
         }
-        let (compiled_pattern, marker_name) = prepare_capture_pattern(pattern, line)?;
-        let compiled = build_regex(&compiled_pattern, case_sensitive).map_err(|error| {
-            ParseError::new(line, format!("invalid regular expression: {error}"))
-        })?;
+
+        // LINEBUF has already bounded the rc source line. Macro text belongs
+        // to this implementation rather than to the user, so constrain its
+        // generated size only with the regex expansion and compilation limits.
+        let (expanded_pattern, force_case_insensitive) =
+            expand_reserved_procmail_regex_forms(pattern, line)?;
+        let (compiled_pattern, marker_name) = prepare_capture_pattern(&expanded_pattern, line)?;
+        let compiled = build_regex(&compiled_pattern, case_sensitive && !force_case_insensitive)
+            .map_err(|error| {
+                ParseError::new(line, format!("invalid regular expression: {error}"))
+            })?;
         let match_capture = marker_name.as_deref().and_then(|wanted| {
             compiled
                 .capture_names()
@@ -856,6 +863,68 @@ fn parse_condition(
         },
         is_regex,
     ))
+}
+
+fn expand_reserved_procmail_regex_forms(
+    pattern: &str,
+    line: usize,
+) -> Result<(String, bool), ParseError> {
+    const TO_ADDRESS: &str = "(?:^(?:(?:Original-)?(?:Resent-)?(?:To|Cc|Bcc)|(?:X-Envelope|Apparently(?:-Resent)?)-To):(?:.*[^-a-zA-Z0-9_.])?)";
+    const TO_WORD: &str = "(?:^(?:(?:Original-)?(?:Resent-)?(?:To|Cc|Bcc)|(?:X-Envelope|Apparently(?:-Resent)?)-To):(?:.*[^a-zA-Z])?)";
+    const FROM_DAEMON: &str = r"(?:^(?:Mailing-List:|Precedence:.*(?:junk|bulk|list)|To: Multiple recipients of |(?:(?:(?:Resent-)?(?:From|Sender)|X-Envelope-From):|>?From )(?:[^>]*[^(.%@a-z0-9])?(?:Post(?:ma?(?:st(?:e?r)?|n)|office)|(?:send)?Mail(?:er)?|daemon|m(?:mdf|ajordomo)|n?uucp|LIST(?:SERV|proc)|NETSERV|o(?:wner|ps)|r(?:e(?:quest|sponse)|oot)|b(?:ounce|bs\.smtp)|echo|mirror|s(?:erv(?:ices?|er)|mtp(?:error)?|ystem)|A(?:dmin(?:istrator)?|MMGR|utoanswer))(?:(?:[^).!:a-z0-9][-_a-z0-9]*)?[%@>	 ][^<)]*(?:\(.*\).*)?)?$(?:[^>]|$)))";
+    const FROM_MAILER: &str = r"(?:^(?:(?:(?:Resent-)?(?:From|Sender)|X-Envelope-From):|>?From )(?:[^>]*[^(.%@a-z0-9])?(?:Post(?:ma(?:st(?:er)?|n)|office)|(?:send)?Mail(?:er)?|daemon|mmdf|n?uucp|ops|r(?:esponse|oot)|(?:bbs\.)?smtp(?:error)?|s(?:erv(?:ices?|er)|ystem)|A(?:dmin(?:istrator)?|MMGR))(?:(?:[^).!:a-z0-9][-_a-z0-9]*)?[%@>	 ][^<)]*(?:\(.*\).*)?)?$(?:[^>]|$))";
+    const FORMS: [(&str, &str, bool); 4] = [
+        ("^FROM_DAEMON", FROM_DAEMON, true),
+        ("^TO_", TO_ADDRESS, false),
+        ("^TO", TO_WORD, false),
+        ("^FROM_MAILER", FROM_MAILER, false),
+    ];
+    let bytes = pattern.as_bytes();
+    let mut expanded = Vec::with_capacity(pattern.len());
+    let mut force_case_insensitive = false;
+    let mut index = 0usize;
+
+    // Expand the reference implementation's fixed byte patterns before the
+    // regular procmail-to-Rust translation. Bound every append because many
+    // short keywords can otherwise amplify an accepted source pattern beyond
+    // the compiled-regex resource policy.
+    while index < bytes.len() {
+        let replacement = (index == 0 || bytes[index - 1] != b'\\')
+            .then(|| {
+                FORMS
+                    .iter()
+                    .find(|(name, _, _)| pattern[index..].starts_with(name))
+            })
+            .flatten();
+        if let Some((name, value, insensitive)) = replacement {
+            push_regex_bytes(&mut expanded, value.as_bytes(), line)?;
+            force_case_insensitive |= *insensitive;
+            index += name.len();
+        } else {
+            push_regex_bytes(&mut expanded, &bytes[index..index + 1], line)?;
+            index += 1;
+        }
+    }
+    let expanded = String::from_utf8(expanded)
+        .map_err(|_| ParseError::new(line, "expanded regular expression is not valid UTF-8"))?;
+    Ok((expanded, force_case_insensitive))
+}
+
+fn push_regex_bytes(output: &mut Vec<u8>, value: &[u8], line: usize) -> Result<(), ParseError> {
+    let length = output
+        .len()
+        .checked_add(value.len())
+        .ok_or_else(|| ParseError::new(line, "expanded regular expression length overflows"))?;
+    if length > MAX_REGEX_PATTERN_LEN {
+        return Err(ParseError::new(
+            line,
+            format!(
+                "expanded regular expression exceeds the hard limit of {MAX_REGEX_PATTERN_LEN} bytes"
+            ),
+        ));
+    }
+    output.extend_from_slice(value);
+    Ok(())
 }
 
 fn prepare_capture_pattern(
@@ -1857,6 +1926,90 @@ mod tests {
             middle.message,
             "'^^' is supported only at the start or end of a regular expression"
         );
+    }
+
+    #[test]
+    fn expands_reserved_procmail_regex_forms() {
+        for (pattern, matching_header, user_captures) in [
+            ("^TOscuba", "To: scuba@example.test\n", 0),
+            ("^TO_scuba@example\\.test", "Cc: scuba@example.test\n", 0),
+            ("^FROM_DAEMON", "From: MAILER-DAEMON@example.test\n", 0),
+            (
+                "(^Subject: wanted|^FROM_MAILER)",
+                "From: postmaster@example.test\n",
+                1,
+            ),
+        ] {
+            let config = parse(&format!(":0\n* {pattern}\nmaildir:matched\n")).unwrap();
+            let Statement::Recipe(recipe) = &config.statements[0] else {
+                panic!("expected recipe");
+            };
+            let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+                panic!("expected regex");
+            };
+            assert!(
+                regex.compiled().is_match(matching_header.as_bytes()),
+                "{pattern}"
+            );
+            assert_eq!(
+                regex.compiled().captures_len(),
+                user_captures + 1,
+                "{pattern}"
+            );
+        }
+
+        let forced_case = parse(":0 D\n* ^FROM_DAEMON\nmaildir:matched\n").unwrap();
+        let Statement::Recipe(recipe) = &forced_case.statements[0] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+            panic!("expected regex");
+        };
+        assert!(
+            regex
+                .compiled()
+                .is_match(b"from: mailer-daemon@example.test\n")
+        );
+
+        let escaped = parse(":0\n* \\^TOliteral\nmaildir:matched\n").unwrap();
+        let Statement::Recipe(recipe) = &escaped.statements[0] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+            panic!("expected regex");
+        };
+        assert!(regex.compiled().is_match(b"^TOliteral"));
+    }
+
+    #[test]
+    fn bounds_expanded_reserved_procmail_regex_forms() {
+        let pattern = "^FROM_DAEMON".repeat(MAX_REGEX_PATTERN_LEN / "^FROM_DAEMON".len());
+        let error = parse(&format!(
+            "LINEBUF={MAX_LINEBUF}\n:0\n* {pattern}\nmaildir:matched\n"
+        ))
+        .unwrap_err();
+        assert_eq!(error.line, 3);
+        assert_eq!(
+            error.message,
+            format!(
+                "expanded regular expression exceeds the hard limit of {MAX_REGEX_PATTERN_LEN} bytes"
+            )
+        );
+    }
+
+    #[test]
+    fn linebuf_does_not_limit_reserved_regex_expansion() {
+        let source = format!("LINEBUF={MIN_LINEBUF}\n:0\n* ^FROM_DAEMON\nmaildir:matched\n");
+        assert!(source.lines().all(|line| line.len() < MIN_LINEBUF));
+
+        let config = parse(&source).unwrap();
+        let Statement::Recipe(recipe) = &config.statements[1] else {
+            panic!("expected recipe");
+        };
+        let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+            panic!("expected regex");
+        };
+        assert!(regex.compiled().as_str().len() > MIN_LINEBUF);
     }
 
     #[test]
