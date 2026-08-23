@@ -24,6 +24,30 @@ pub struct ProgramRun {
     child_exit: ChildExit,
 }
 
+// These settings jointly describe how one filter invocation consumes and
+// validates bytes. Keeping them together makes it harder to reuse a message
+// limit with the wrong selected area or output-ending policy at a call site.
+#[derive(Debug, Clone, Copy)]
+pub struct FilterOptions {
+    output_ending: OutputEnding,
+    action_input: ActionInput,
+    limits: MessageLimits,
+}
+
+impl FilterOptions {
+    pub fn new(
+        output_ending: OutputEnding,
+        action_input: ActionInput,
+        limits: MessageLimits,
+    ) -> Self {
+        Self {
+            output_ending,
+            action_input,
+            limits,
+        }
+    }
+}
+
 impl ProgramRun {
     pub fn input_write(self) -> InputWrite {
         self.input_write
@@ -77,9 +101,7 @@ pub fn run_filter(
     environment: &ProcessEnvironment,
     command: &str,
     input: &[u8],
-    output_ending: OutputEnding,
-    action_input: ActionInput,
-    limits: MessageLimits,
+    options: FilterOptions,
     stderr: Stdio,
 ) -> Result<FilterRun, ExternalProcessError> {
     let invocation = policy
@@ -110,15 +132,15 @@ pub fn run_filter(
     // wait forever for procmail-rs.
     let (input_write, output, status) = std::thread::scope(|scope| {
         let writer =
-            scope.spawn(move || write_action_input(&mut child_stdin, input, output_ending));
+            scope.spawn(move || write_action_input(&mut child_stdin, input, options.output_ending));
         // Body-only output has no header separator. Prefix a private separator
         // while parsing stdout so arbitrary body bytes are governed by body
         // limits instead of being mistaken for an unterminated header field.
-        let output = if action_input == ActionInput::Body {
+        let output = if options.action_input == ActionInput::Body {
             let reader = std::io::Cursor::new(&b"\n"[..]).chain(child_stdout);
-            Message::read_from(&mut BufReader::new(reader), limits)
+            Message::read_from(&mut BufReader::new(reader), options.limits)
         } else {
-            Message::read_from(&mut BufReader::new(child_stdout), limits)
+            Message::read_from(&mut BufReader::new(child_stdout), options.limits)
         };
         let status = child.wait();
         let input_write = writer.join();
@@ -252,9 +274,11 @@ mod tests {
             &environment,
             "cat >/dev/null; printf 'X-Token: %s\\n\\nbody' \"$TOKEN\"",
             b"ignored\n\n",
-            OutputEnding::Preserve,
-            ActionInput::Message,
-            MessageLimits::default(),
+            FilterOptions::new(
+                OutputEnding::Preserve,
+                ActionInput::Message,
+                MessageLimits::default(),
+            ),
             Stdio::null(),
         )
         .unwrap();
@@ -278,9 +302,11 @@ mod tests {
             &environment,
             "cat",
             &input,
-            OutputEnding::Preserve,
-            ActionInput::Message,
-            MessageLimits::default(),
+            FilterOptions::new(
+                OutputEnding::Preserve,
+                ActionInput::Message,
+                MessageLimits::default(),
+            ),
             Stdio::null(),
         )
         .unwrap();
@@ -300,9 +326,11 @@ mod tests {
             &environment,
             "printf 'Subject: ok\\n\\n'; printf 'filter diagnostic' >&2",
             b"",
-            OutputEnding::Preserve,
-            ActionInput::Message,
-            MessageLimits::default(),
+            FilterOptions::new(
+                OutputEnding::Preserve,
+                ActionInput::Message,
+                MessageLimits::default(),
+            ),
             Stdio::from(file),
         )
         .unwrap();
@@ -320,9 +348,11 @@ mod tests {
             &environment,
             "printf 'Subject: failed\\n\\noutput'; exit 23",
             b"",
-            OutputEnding::Preserve,
-            ActionInput::Message,
-            MessageLimits::default(),
+            FilterOptions::new(
+                OutputEnding::Preserve,
+                ActionInput::Message,
+                MessageLimits::default(),
+            ),
             Stdio::null(),
         )
         .unwrap();
@@ -346,9 +376,7 @@ mod tests {
             &environment,
             "printf '\\n1234'",
             b"",
-            OutputEnding::Preserve,
-            ActionInput::Message,
-            limits,
+            FilterOptions::new(OutputEnding::Preserve, ActionInput::Message, limits),
             Stdio::null(),
         )
         .unwrap();
@@ -392,9 +420,7 @@ mod tests {
                 &environment,
                 "cat",
                 input,
-                ending,
-                ActionInput::Message,
-                MessageLimits::default(),
+                FilterOptions::new(ending, ActionInput::Message, MessageLimits::default()),
                 Stdio::null(),
             )
             .unwrap();
@@ -410,9 +436,11 @@ mod tests {
             &environment,
             "exit 0",
             b"",
-            OutputEnding::Preserve,
-            ActionInput::Message,
-            MessageLimits::default(),
+            FilterOptions::new(
+                OutputEnding::Preserve,
+                ActionInput::Message,
+                MessageLimits::default(),
+            ),
             Stdio::null(),
         )
         .unwrap_err();

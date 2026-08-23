@@ -27,7 +27,7 @@ use procmail_rs::eval::{
     OrderedExecutionError, PlanExplanation, PlannedDelivery,
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
-use procmail_rs::external_process::{run_filter, run_program};
+use procmail_rs::external_process::{FilterOptions, run_filter, run_program};
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::RcFileLoader;
@@ -55,6 +55,7 @@ struct Command {
 struct StagingOptions<'a> {
     directory: &'a Path,
     durability: Durability,
+    limits: MessageLimits,
 }
 
 #[derive(Debug)]
@@ -244,10 +245,10 @@ fn run() -> Result<u8, OperationalError> {
                             StagingOptions {
                                 directory: staging_directory,
                                 durability,
+                                limits,
                             },
                             &mut runtime,
                             &mut trace,
-                            limits,
                         )
                     }
                     HeaderEvaluation::Error(error) => Err(OperationalError::PermanentDestination(
@@ -378,10 +379,9 @@ fn deliver_staged(
     reader: &mut impl io::BufRead,
     execution: &ExecutionPlan,
     continuation: procmail_rs::eval::Continuation,
-    options: StagingOptions<'_>,
+    staging_options: StagingOptions<'_>,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
-    limits: MessageLimits,
 ) -> Result<(), OperationalError> {
     let early_count = continuation.pending_deliveries().len();
     let early_sinks = if execution.requires_ordered_delivery() {
@@ -389,14 +389,14 @@ fn deliver_staged(
     } else {
         open_sinks(
             continuation.pending_deliveries(),
-            options.durability,
+            staging_options.durability,
             runtime,
             trace,
         )?
     };
     let pending = PendingFanout::new(early_sinks)
         .map_err(|error| OperationalError::Internal(error.to_string()))?;
-    let mut staging = StagingFile::create(options.directory).map_err(|error| {
+    let mut staging = StagingFile::create(staging_options.directory).map_err(|error| {
         OperationalError::TemporaryDelivery(format!("cannot create private staging file: {error}"))
     })?;
     let header_len = head.len();
@@ -414,7 +414,7 @@ fn deliver_staged(
     let matching_staged = if execution.needs_message_contents() {
         matching_header
             .as_deref()
-            .map(|header| stage_matching_message(options.directory, header, &staged))
+            .map(|header| stage_matching_message(staging_options.directory, header, &staged))
             .transpose()?
     } else {
         None
@@ -436,7 +436,7 @@ fn deliver_staged(
                             destination,
                             message,
                             output_ending,
-                            options.durability,
+                            staging_options.durability,
                             runtime,
                             trace,
                         )
@@ -444,7 +444,7 @@ fn deliver_staged(
                         deliver_one_maildir(
                             destination,
                             message,
-                            options.durability,
+                            staging_options.durability,
                             runtime,
                             trace,
                         )
@@ -460,11 +460,11 @@ fn deliver_staged(
                 &mut |command, input, runtime, _| {
                     execute_external_condition(command, input, runtime)
                 },
-                &mut |action, options, input, runtime, _| {
+                &mut |action, recipe_options, input, runtime, _| {
                     execute_external_action(
-                        limits,
+                        staging_options.limits,
                         action.command.as_str(),
-                        options,
+                        recipe_options,
                         input,
                         runtime,
                     )
@@ -495,7 +495,7 @@ fn deliver_staged(
             "internal error: deferred delivery discarded an early copy destination".to_owned(),
         )
     })?;
-    let late_sinks = open_sinks(late_deliveries, options.durability, runtime, trace)?;
+    let late_sinks = open_sinks(late_deliveries, staging_options.durability, runtime, trace)?;
     let late = PendingFanout::new(late_sinks)
         .map_err(|error| OperationalError::Internal(error.to_string()))?;
     let validated = validated
@@ -597,9 +597,7 @@ fn execute_external_action(
         &environment,
         command,
         input.selected(),
-        options.output_ending,
-        options.action_input,
-        limits,
+        FilterOptions::new(options.output_ending, options.action_input, limits),
         stderr,
     )
     .map_err(|error| recoverable_external_error(error.to_string()))?;

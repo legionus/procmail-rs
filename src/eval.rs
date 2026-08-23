@@ -286,6 +286,24 @@ struct SequenceState {
     chain_base_matched: Option<bool>,
 }
 
+// A resumed sequence must move its position and prior-recipe state together.
+// Keeping them in one value prevents a caller from advancing to another node
+// while accidentally retaining state that belongs to the old position.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SequenceCursor {
+    index: usize,
+    state: SequenceState,
+}
+
+// The frame slice owns the complete bounded path and depth selects one entry
+// on it. Passing them together keeps recursive descent tied to that same path
+// instead of allowing independently supplied frame and depth values.
+#[derive(Debug, Clone, Copy)]
+struct ResumeCursor<'a> {
+    frames: &'a [ContinuationFrame],
+    depth: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecipeExecution {
     conditions_matched: bool,
@@ -921,8 +939,7 @@ impl CompiledSequence {
         context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         self.plan_complete_from(
-            0,
-            SequenceState::default(),
+            SequenceCursor::default(),
             message,
             runtime,
             trace,
@@ -933,15 +950,15 @@ impl CompiledSequence {
 
     fn plan_complete_from(
         &self,
-        start: usize,
-        mut state: SequenceState,
+        cursor: SequenceCursor,
         message: CompleteMessage<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
         execution: &mut FanoutPlanState,
         context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
-        for (index, recipe) in self.recipes.iter().enumerate().skip(start) {
+        let mut state = cursor.state;
+        for (index, recipe) in self.recipes.iter().enumerate().skip(cursor.index) {
             let statement_control = plan_statements_complete(
                 &recipe.preceding_statements,
                 message,
@@ -1219,15 +1236,17 @@ impl CompiledSequence {
 
     fn resume_from_frames(
         &self,
-        frames: &[ContinuationFrame],
-        depth: usize,
+        cursor: ResumeCursor<'_>,
         message: CompleteMessage<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
         execution: &mut FanoutPlanState,
         context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
-        let frame = frames.get(depth).ok_or(EvalError::BodyWasNotBuffered)?;
+        let frame = cursor
+            .frames
+            .get(cursor.depth)
+            .ok_or(EvalError::BodyWasNotBuffered)?;
         let recipe = self
             .recipes
             .get(frame.recipe_index)
@@ -1240,13 +1259,15 @@ impl CompiledSequence {
             }
         }
 
-        let (conditions_matched, control) = if depth + 1 < frames.len() {
+        let (conditions_matched, control) = if cursor.depth + 1 < cursor.frames.len() {
             let CompiledAction::Block(children) = &recipe.action else {
                 return Err(EvalError::BodyWasNotBuffered);
             };
             let control = children.resume_from_frames(
-                frames,
-                depth + 1,
+                ResumeCursor {
+                    frames: cursor.frames,
+                    depth: cursor.depth + 1,
+                },
                 message,
                 runtime,
                 trace,
@@ -1294,8 +1315,10 @@ impl CompiledSequence {
             recipe.else_handled(state, conditions_matched),
         );
         self.plan_complete_from(
-            frame.recipe_index + 1,
-            state,
+            SequenceCursor {
+                index: frame.recipe_index + 1,
+                state,
+            },
             message,
             runtime,
             trace,
@@ -2669,8 +2692,10 @@ impl ExecutionPlan {
         // parent sequences. Earlier siblings are neither evaluated nor
         // logged again, and their selected destinations remain unchanged.
         self.root.resume_from_frames(
-            &continuation.frames,
-            0,
+            ResumeCursor {
+                frames: &continuation.frames,
+                depth: 0,
+            },
             message,
             runtime,
             trace,
