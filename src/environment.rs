@@ -236,7 +236,8 @@ mod tests {
         assert_eq!(environment.get("PATH"), Some("/approved/bin"));
         assert_eq!(environment.get("SHELL"), Some(DEFAULT_SHELL));
         assert_eq!(environment.get("SHELLFLAGS"), Some(DEFAULT_SHELL_FLAGS));
-        assert_eq!(environment.values().count(), 4);
+        assert_eq!(environment.get("LINEBUF"), Some("2048"));
+        assert_eq!(environment.values().count(), 5);
     }
 
     #[test]

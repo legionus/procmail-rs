@@ -32,6 +32,9 @@ pub const MAX_REGEX_CAPTURES: usize = 64;
 pub const MAX_MATCH_BYTES: usize = MAX_ASSIGNMENT_VALUE_LEN;
 pub const MAX_RC_REGEXES: usize = 256;
 pub const MAX_RC_SIZE: usize = 1024 * 1024;
+pub const DEFAULT_LINEBUF: usize = 2048;
+pub const MIN_LINEBUF: usize = 128;
+pub const MAX_LINEBUF: usize = MAX_RC_SIZE;
 pub const MAX_RC_CONDITIONS: usize = 4096;
 pub const MAX_RC_RECIPES: usize = 1024;
 pub const MAX_RC_STATEMENTS: usize = 4096;
@@ -52,6 +55,7 @@ pub struct Config {
     pub statements: Vec<Statement>,
     pub(crate) initial_variables: Vec<(String, String, VariableSource)>,
     pub(crate) parse_counts: RcParseCounts,
+    pub(crate) initial_linebuf: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -72,6 +76,7 @@ pub(crate) struct RcLimits {
     pub(crate) regexes: usize,
     pub(crate) conditions_per_recipe: usize,
     pub(crate) nesting_depth: usize,
+    pub(crate) linebuf: usize,
 }
 
 impl Default for RcLimits {
@@ -84,6 +89,7 @@ impl Default for RcLimits {
             regexes: MAX_RC_REGEXES,
             conditions_per_recipe: MAX_CONDITIONS_PER_RECIPE,
             nesting_depth: MAX_RECIPE_NESTING_DEPTH,
+            linebuf: DEFAULT_LINEBUF,
         }
     }
 }

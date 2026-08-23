@@ -7,9 +7,20 @@ use std::path::Path;
 use crate::delivery::{CommitError, CommitReport, PublishedDelivery};
 use crate::trace::{NoTrace, TraceEvent, TraceSink};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeVariables {
     values: BTreeMap<String, String>,
+}
+
+impl Default for RuntimeVariables {
+    fn default() -> Self {
+        let mut values = BTreeMap::new();
+        values.insert(
+            "LINEBUF".to_owned(),
+            crate::config::DEFAULT_LINEBUF.to_string(),
+        );
+        Self { values }
+    }
 }
 
 impl RuntimeVariables {

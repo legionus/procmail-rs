@@ -15,10 +15,10 @@ use super::{
 
 #[cfg(test)]
 use super::{
-    HARD_MAX_CONDITIONS_PER_RECIPE, HARD_MAX_RC_ASSIGNMENTS, HARD_MAX_RC_CONDITIONS,
-    HARD_MAX_RC_RECIPES, HARD_MAX_RC_REGEXES, HARD_MAX_RC_STATEMENTS,
-    HARD_MAX_RECIPE_NESTING_DEPTH, MAX_CONDITIONS_PER_RECIPE, MAX_RC_CONDITIONS, MAX_RC_RECIPES,
-    MAX_RC_REGEXES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH,
+    DEFAULT_LINEBUF, HARD_MAX_CONDITIONS_PER_RECIPE, HARD_MAX_RC_ASSIGNMENTS,
+    HARD_MAX_RC_CONDITIONS, HARD_MAX_RC_RECIPES, HARD_MAX_RC_REGEXES, HARD_MAX_RC_STATEMENTS,
+    HARD_MAX_RECIPE_NESTING_DEPTH, MAX_CONDITIONS_PER_RECIPE, MAX_LINEBUF, MAX_RC_CONDITIONS,
+    MAX_RC_RECIPES, MAX_RC_REGEXES, MAX_RC_STATEMENTS, MAX_RECIPE_NESTING_DEPTH, MIN_LINEBUF,
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
@@ -39,12 +39,14 @@ pub(crate) fn parse_with_state(
 
     let lines: Vec<&str> = input.lines().collect();
     let initial = state.counts;
+    let initial_linebuf = state.limits.linebuf;
     let (statements, _) = parse_statements(&lines, 0, 0, state)?;
 
     Ok(Config {
         statements,
         initial_variables: Vec::new(),
         parse_counts: state.counts.subtract(initial)?,
+        initial_linebuf,
     })
 }
 
@@ -84,6 +86,7 @@ fn parse_statements(
     let mut statements = Vec::new();
     while index < lines.len() {
         let line_number = index + 1;
+        check_linebuf(lines[index], line_number, state.limits.linebuf)?;
         let line = lines[index].trim();
 
         if line.is_empty() || line.starts_with('#') {
@@ -138,7 +141,12 @@ fn parse_statements(
                 line_number,
                 "assignment",
             )?;
-            if depth != 0 && matches!(assignment.target, AssignmentTarget::RcLimit(_)) {
+            if depth != 0
+                && matches!(
+                    assignment.target,
+                    AssignmentTarget::RcLimit(_) | AssignmentTarget::LineBuf
+                )
+            {
                 return Err(ParseError::new(
                     line_number,
                     format!(
@@ -172,6 +180,7 @@ fn parse_statements(
                 .ok_or_else(|| ParseError::new(line_number, "rc statement count overflows"))?;
             if let Statement::Assignment(assignment) = &statement {
                 apply_rc_limit(assignment, &mut state.limits)?;
+                apply_linebuf(assignment, &mut state.limits)?;
             }
             statements.push(statement);
             index += 1;
@@ -191,6 +200,40 @@ fn parse_statements(
         ));
     }
     Ok((statements, index))
+}
+
+fn check_linebuf(line: &str, line_number: usize, limit: usize) -> Result<(), ParseError> {
+    if line.len() > limit {
+        return Err(ParseError::limit(
+            line_number,
+            format!("rc line exceeds the active LINEBUF limit of {limit} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_linebuf(assignment: &Assignment, limits: &mut RcLimits) -> Result<(), ParseError> {
+    if assignment.target != AssignmentTarget::LineBuf {
+        return Ok(());
+    }
+    let value = assignment.value.parse::<usize>().map_err(|_| {
+        ParseError::new(
+            assignment.line,
+            "LINEBUF must be an unsigned decimal integer",
+        )
+    })?;
+    if !(super::MIN_LINEBUF..=super::MAX_LINEBUF).contains(&value) {
+        return Err(ParseError::limit(
+            assignment.line,
+            format!(
+                "LINEBUF must be from {} through {} bytes",
+                super::MIN_LINEBUF,
+                super::MAX_LINEBUF
+            ),
+        ));
+    }
+    limits.linebuf = value;
+    Ok(())
 }
 
 fn check_count_limit(
@@ -309,6 +352,7 @@ fn parse_recipe(
     let mut index = start + 1;
 
     while index < lines.len() {
+        check_linebuf(lines[index], index + 1, state.limits.linebuf)?;
         let line = lines[index].trim();
         if line.is_empty() || line.starts_with('#') {
             index += 1;
@@ -340,7 +384,11 @@ fn parse_recipe(
 
     let action = lines
         .get(index)
-        .map(|line| line.trim())
+        .map(|line| {
+            check_linebuf(line, index + 1, state.limits.linebuf)?;
+            Ok(line.trim())
+        })
+        .transpose()?
         .ok_or_else(|| ParseError::new(start + 1, "recipe has no action"))?;
 
     // Charge the parent recipe before descending into a block so nested
@@ -408,7 +456,7 @@ fn parse_recipe(
     }
 
     let (action, next) = if is_pipe {
-        let (command, next) = parse_pipe_command(lines, index)?;
+        let (command, next) = parse_pipe_command(lines, index, state.limits.linebuf)?;
         (RecipeAction::Pipe(PipeAction { command }), next)
     } else if action == "{" {
         let next_depth = depth
@@ -497,7 +545,11 @@ fn parse_recipe(
     Ok((recipe, next))
 }
 
-fn parse_pipe_command(lines: &[&str], start: usize) -> Result<(String, usize), ParseError> {
+fn parse_pipe_command(
+    lines: &[&str],
+    start: usize,
+    linebuf: usize,
+) -> Result<(String, usize), ParseError> {
     let first = lines[start].trim_start();
     let mut physical = first
         .strip_prefix('|')
@@ -510,6 +562,7 @@ fn parse_pipe_command(lines: &[&str], start: usize) -> Result<(String, usize), P
     // the physical extent of the action and enforces its own allocation
     // limit; it does not attempt to interpret shell quoting or substitutions.
     loop {
+        check_linebuf(lines[index], index + 1, linebuf)?;
         let added = physical
             .len()
             .checked_add(usize::from(physical.ends_with('\\')))
@@ -518,6 +571,12 @@ fn parse_pipe_command(lines: &[&str], start: usize) -> Result<(String, usize), P
             .len()
             .checked_add(added)
             .ok_or_else(|| ParseError::new(start + 1, "pipe command size overflows"))?;
+        if new_len > linebuf {
+            return Err(ParseError::limit(
+                start + 1,
+                format!("expanded rc line exceeds the active LINEBUF limit of {linebuf} bytes"),
+            ));
+        }
         if new_len > MAX_PIPE_COMMAND_LEN {
             return Err(ParseError::limit(
                 start + 1,
@@ -1030,6 +1089,12 @@ fn validate_program_condition(command: &str, line: usize) -> Result<(), ParseErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_wide(input: &str) -> Result<Config, ParseError> {
+        let mut state = RcParseState::default();
+        state.limits.linebuf = super::super::MAX_LINEBUF;
+        parse_with_state(input, &mut state)
+    }
     use crate::config::MAX_SHELL_SETTING_LEN;
 
     #[test]
@@ -1150,6 +1215,53 @@ mod tests {
         assert_eq!(
             error.message,
             "rc assignment count exceeds the active limit of 0"
+        );
+    }
+
+    #[test]
+    fn linebuf_applies_to_following_rc_lines_at_the_boundary() {
+        for length in [DEFAULT_LINEBUF - 1, DEFAULT_LINEBUF, DEFAULT_LINEBUF + 1] {
+            let source = format!("#{}\n", "x".repeat(length - 1));
+            let result = parse(&source);
+            if length <= DEFAULT_LINEBUF {
+                assert!(result.is_ok(), "rejected {length} bytes");
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 1);
+                assert_eq!(
+                    error.message,
+                    format!("rc line exceeds the active LINEBUF limit of {DEFAULT_LINEBUF} bytes")
+                );
+            }
+        }
+
+        for length in [MIN_LINEBUF - 1, MIN_LINEBUF, MIN_LINEBUF + 1] {
+            let source = format!("LINEBUF={MIN_LINEBUF}\n#{}\n", "x".repeat(length - 1));
+            let result = parse(&source);
+            if length <= MIN_LINEBUF {
+                assert!(result.is_ok(), "rejected {length} bytes");
+            } else {
+                assert_eq!(result.unwrap_err().line, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn linebuf_rejects_invalid_values_and_block_assignments() {
+        for value in ["", "127", "1048577", "1k", "18446744073709551616"] {
+            assert!(
+                parse(&format!("LINEBUF={value}\n")).is_err(),
+                "accepted {value:?}"
+            );
+        }
+        assert!(parse(&format!("LINEBUF={MIN_LINEBUF}\n")).is_ok());
+        assert!(parse(&format!("LINEBUF={MAX_LINEBUF}\n")).is_ok());
+
+        let error = parse(":0\n{\nLINEBUF=128\n}\n").unwrap_err();
+        assert_eq!(error.line, 3);
+        assert_eq!(
+            error.message,
+            "variable LINEBUF cannot be assigned inside a recipe block"
         );
     }
 
@@ -1355,10 +1467,10 @@ mod tests {
     #[test]
     fn bounds_and_validates_pipe_command_text() {
         let accepted = format!(":0\n| {}\n", "x".repeat(MAX_PIPE_COMMAND_LEN));
-        assert!(parse(&accepted).is_ok());
+        assert!(parse_wide(&accepted).is_ok());
 
         let rejected = format!(":0\n| {}\n", "x".repeat(MAX_PIPE_COMMAND_LEN + 1));
-        let error = parse(&rejected).unwrap_err();
+        let error = parse_wide(&rejected).unwrap_err();
         assert_eq!(error.line, 2);
         assert_eq!(
             error.message,
@@ -1509,14 +1621,17 @@ mod tests {
     fn bounds_and_validates_program_condition_text() {
         for length in [MAX_PIPE_COMMAND_LEN - 1, MAX_PIPE_COMMAND_LEN] {
             let source = format!(":0\n* ? {}\nmaildir:selected\n", "x".repeat(length));
-            assert!(parse(&source).is_ok(), "length {length} must be accepted");
+            assert!(
+                parse_wide(&source).is_ok(),
+                "length {length} must be accepted"
+            );
         }
 
         let source = format!(
             ":0\n* ? {}\nmaildir:selected\n",
             "x".repeat(MAX_PIPE_COMMAND_LEN + 1)
         );
-        let error = parse(&source).unwrap_err();
+        let error = parse_wide(&source).unwrap_err();
         assert_eq!(error.line, 2);
         assert_eq!(
             error.message,
@@ -1717,7 +1832,7 @@ mod tests {
             MAX_REGEX_PATTERN_LEN + 1,
         ] {
             let source = format!(":0\n* {}\ninbox/\n", "a".repeat(length));
-            let result = parse(&source);
+            let result = parse_wide(&source);
 
             if length <= MAX_REGEX_PATTERN_LEN {
                 let config = result.unwrap();
@@ -1744,7 +1859,7 @@ mod tests {
     #[test]
     fn size_conditions_do_not_use_regex_pattern_limit() {
         let value = "9".repeat(MAX_REGEX_PATTERN_LEN + 1);
-        let error = parse(&format!(":0\n* < {value}\ninbox/\n")).unwrap_err();
+        let error = parse_wide(&format!(":0\n* < {value}\ninbox/\n")).unwrap_err();
 
         assert_eq!(error.line, 2);
         assert_eq!(
@@ -1766,7 +1881,7 @@ mod tests {
     fn enforces_regex_count_at_the_boundary() {
         for count in [MAX_RC_REGEXES - 1, MAX_RC_REGEXES, MAX_RC_REGEXES + 1] {
             let source = config_with_regexes(count);
-            let result = parse(&source);
+            let result = parse_wide(&source);
 
             if count <= MAX_RC_REGEXES {
                 assert!(result.is_ok());
@@ -1819,7 +1934,7 @@ mod tests {
     fn rejects_oversized_source_before_splitting_lines() {
         for length in [MAX_RC_SIZE - 1, MAX_RC_SIZE, MAX_RC_SIZE + 1] {
             let source = format!("#{}", "x".repeat(length - 1));
-            let result = parse(&source);
+            let result = parse_wide(&source);
 
             if length <= MAX_RC_SIZE {
                 assert!(result.is_ok());
@@ -1842,7 +1957,7 @@ mod tests {
             MAX_ASSIGNMENT_NAME_LEN + 1,
         ] {
             let source = format!("{}=value\n", "A".repeat(length));
-            let result = parse(&source);
+            let result = parse_wide(&source);
 
             if length <= MAX_ASSIGNMENT_NAME_LEN {
                 let config = result.unwrap();
@@ -1871,7 +1986,7 @@ mod tests {
             MAX_ASSIGNMENT_VALUE_LEN + 1,
         ] {
             let source = format!("VALUE={}\n", "x".repeat(length));
-            let result = parse(&source);
+            let result = parse_wide(&source);
 
             if length <= MAX_ASSIGNMENT_VALUE_LEN {
                 let config = result.unwrap();
@@ -1896,10 +2011,10 @@ mod tests {
     fn enforces_shell_setting_length_at_the_boundary() {
         for name in ["SHELL", "SHELLFLAGS", "PATH"] {
             let accepted = format!("{name}={}\n", "x".repeat(MAX_SHELL_SETTING_LEN));
-            assert!(parse(&accepted).is_ok(), "{name}");
+            assert!(parse_wide(&accepted).is_ok(), "{name}");
 
             let rejected = format!("{name}={}\n", "x".repeat(MAX_SHELL_SETTING_LEN + 1));
-            let error = parse(&rejected).unwrap_err();
+            let error = parse_wide(&rejected).unwrap_err();
             assert_eq!(
                 error.message,
                 format!(
@@ -1916,7 +2031,7 @@ mod tests {
             "VALUE=  {}  # ignored\n",
             "x".repeat(MAX_ASSIGNMENT_VALUE_LEN)
         );
-        let config = parse(&source).unwrap();
+        let config = parse_wide(&source).unwrap();
         let Statement::Assignment(assignment) = &config.statements[0] else {
             panic!("expected assignment");
         };
@@ -1932,7 +2047,7 @@ mod tests {
             MAX_PATH_EXPRESSION_LEN + 1,
         ] {
             let source = format!(":0\nmaildir:{}\n", "x".repeat(length));
-            let result = parse(&source);
+            let result = parse_wide(&source);
 
             if length <= MAX_PATH_EXPRESSION_LEN {
                 let config = result.unwrap();
@@ -1957,7 +2072,7 @@ mod tests {
             oversized.clone(),
             format!("{oversized}/"),
         ] {
-            let error = parse(&format!(":0\n{action}\n")).unwrap_err();
+            let error = parse_wide(&format!(":0\n{action}\n")).unwrap_err();
             assert_path_limit_error(error, 2, "destination path");
         }
     }
@@ -1970,7 +2085,7 @@ mod tests {
             MAX_PATH_EXPRESSION_LEN + 1,
         ] {
             let source = format!(":0 :{}\ninbox/\n", "x".repeat(length));
-            let result = parse(&source);
+            let result = parse_wide(&source);
 
             if length <= MAX_PATH_EXPRESSION_LEN {
                 let config = result.unwrap();
@@ -1987,7 +2102,7 @@ mod tests {
     #[test]
     fn applies_path_limit_to_maildir_assignment() {
         let source = format!("MAILDIR={}\n", "x".repeat(MAX_PATH_EXPRESSION_LEN + 1));
-        let error = parse(&source).unwrap_err();
+        let error = parse_wide(&source).unwrap_err();
 
         assert_path_limit_error(error, 1, "MAILDIR path");
     }

@@ -57,6 +57,7 @@ pub enum AssignmentTarget {
     LockMethod,
     LockFile,
     LockTimeout,
+    LineBuf,
     Shell,
     ShellFlags,
     Path,
@@ -204,6 +205,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LOCKMETHOD" => VariablePolicy::RcOnly(AssignmentTarget::LockMethod),
         "LOCKFILE" => VariablePolicy::RcOnly(AssignmentTarget::LockFile),
         "LOCKTIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::LockTimeout),
+        "LINEBUF" => VariablePolicy::RcOnly(AssignmentTarget::LineBuf),
         "SHELL" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Shell),
         "SHELLFLAGS" => VariablePolicy::RcOrCommandLine(AssignmentTarget::ShellFlags),
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
@@ -269,6 +271,7 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
         | AssignmentTarget::Durability
         | AssignmentTarget::LockMethod
         | AssignmentTarget::LockTimeout
+        | AssignmentTarget::LineBuf
         | AssignmentTarget::ExitCode
         | AssignmentTarget::Host
         | AssignmentTarget::MessageLimit(_)

@@ -53,8 +53,13 @@ impl Assignment {
         let Some(expression) = self.expansion.as_ref() else {
             return Ok(self.value.clone());
         };
-        let limit = assignment_value_limit(self.target);
-        let value = evaluate_expression(expression, self.line, limit, &mut lookup, 0)?.text;
+        let value = evaluate_with_linebuf(
+            expression,
+            self.line,
+            assignment_value_limit(self.target),
+            &mut lookup,
+        )?
+        .text;
         match self.target {
             AssignmentTarget::LockMethod => super::validate_lock_method(&value),
             AssignmentTarget::LockTimeout => super::parse_lock_timeout_seconds(&value).map(drop),
@@ -90,14 +95,9 @@ impl RcFileExpression {
             parsed = parse_expression(&self.value, self.line)?;
             &parsed
         };
-        let value = evaluate_expression(
-            expression,
-            self.line,
-            MAX_PATH_EXPRESSION_LEN,
-            &mut lookup,
-            0,
-        )?
-        .text;
+        let value =
+            evaluate_with_linebuf(expression, self.line, MAX_PATH_EXPRESSION_LEN, &mut lookup)?
+                .text;
         if value.is_empty() {
             return Ok(value);
         }
@@ -157,12 +157,11 @@ impl Destination {
             parsed = parse_expression(&expression.source, expression.line)?;
             &parsed
         };
-        let source = evaluate_expression(
+        let source = evaluate_with_linebuf(
             compiled,
             expression.line,
             MAX_PATH_EXPRESSION_LEN,
             &mut lookup,
-            0,
         )?
         .text;
         let runtime_base = expression.runtime_base.then(|| lookup("MAILDIR")).flatten();
@@ -209,7 +208,7 @@ impl PathExpression {
             &parsed
         };
         let source =
-            evaluate_expression(compiled, self.line, MAX_PATH_EXPRESSION_LEN, &mut lookup, 0)?.text;
+            evaluate_with_linebuf(compiled, self.line, MAX_PATH_EXPRESSION_LEN, &mut lookup)?.text;
         if source.is_empty() {
             return Ok(source);
         }
@@ -307,14 +306,27 @@ fn expand_config(
     initial_variables: Vec<(String, String, VariableSource)>,
     mut maildir: Option<String>,
 ) -> Result<Config, ExpansionError> {
+    let mut linebuf = config.initial_linebuf;
     config.initial_variables = initial_variables;
+    variables
+        .entry("LINEBUF".to_owned())
+        .or_insert(ExpandedValue {
+            text: linebuf.to_string(),
+            depth: 0,
+        });
 
     for statement in &mut config.statements {
         match statement {
             Statement::Assignment(assignment) => {
-                let limit = assignment_value_limit(assignment.target);
-                let expanded = expand_text(&assignment.value, assignment.line, limit, &variables)?;
+                let hard_limit = assignment_value_limit(assignment.target);
+                let limit = hard_limit.min(linebuf);
+                let expanded =
+                    expand_text(&assignment.value, assignment.line, limit, &variables)
+                        .map_err(|error| relabel_linebuf_error(error, linebuf, hard_limit))?;
                 assignment.value = expanded.text;
+                if assignment.target == AssignmentTarget::LineBuf {
+                    linebuf = parse_linebuf(&assignment.value, assignment.line)?;
+                }
                 if assignment.target == AssignmentTarget::Maildir {
                     assignment.value = resolve_relative_path(
                         &assignment.value,
@@ -370,6 +382,55 @@ fn expand_config(
     }
 
     Ok(config)
+}
+
+fn active_linebuf(lookup: &mut impl FnMut(&str) -> Option<String>) -> usize {
+    lookup("LINEBUF")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(super::DEFAULT_LINEBUF)
+}
+
+fn evaluate_with_linebuf(
+    expression: &ExpansionExpression,
+    line: usize,
+    hard_limit: usize,
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<ExpandedValue, ExpansionError> {
+    let linebuf = active_linebuf(lookup);
+    let limit = linebuf.min(hard_limit);
+    evaluate_expression(expression, line, limit, lookup, 0)
+        .map_err(|error| relabel_linebuf_error(error, linebuf, hard_limit))
+}
+
+fn relabel_linebuf_error(
+    mut error: ExpansionError,
+    linebuf: usize,
+    hard_limit: usize,
+) -> ExpansionError {
+    if linebuf < hard_limit
+        && error.message == format!("expanded value exceeds the hard limit of {linebuf} bytes")
+    {
+        error.message =
+            format!("expanded value exceeds the active LINEBUF limit of {linebuf} bytes");
+    }
+    error
+}
+
+fn parse_linebuf(value: &str, line: usize) -> Result<usize, ExpansionError> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| ExpansionError::new(line, "LINEBUF must be an unsigned decimal integer"))?;
+    if !(super::MIN_LINEBUF..=super::MAX_LINEBUF).contains(&parsed) {
+        return Err(ExpansionError::new(
+            line,
+            format!(
+                "LINEBUF must be from {} through {} bytes",
+                super::MIN_LINEBUF,
+                super::MAX_LINEBUF
+            ),
+        ));
+    }
+    Ok(parsed)
 }
 
 fn expand_recipe(
@@ -447,6 +508,7 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::LockMethod
                         | AssignmentTarget::LockFile
                         | AssignmentTarget::LockTimeout
+                        | AssignmentTarget::LineBuf
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,
@@ -1038,6 +1100,12 @@ fn push_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_wide(input: &str) -> Result<Config, super::super::ParseError> {
+        let mut state = super::super::RcParseState::default();
+        state.limits.linebuf = super::super::MAX_LINEBUF;
+        super::super::parse_with_state(input, &mut state)
+    }
     use crate::config::{ConditionKind, MAX_SHELL_SETTING_LEN, parse};
 
     fn resolved_destination(config: &Config, statement_index: usize) -> Destination {
@@ -1056,7 +1124,11 @@ mod tests {
                         panic!("expected delivery recipe");
                     };
                     return destination
-                        .resolve_with(|name| variables.get(name).cloned())
+                        .resolve_with(|name| {
+                            variables.get(name).cloned().or_else(|| {
+                                (name == "LINEBUF").then(|| config.initial_linebuf.to_string())
+                            })
+                        })
                         .unwrap();
                 }
                 Statement::Recipe(_) => {}
@@ -1182,7 +1254,7 @@ mod tests {
             MAX_EXPANSION_DEPTH + 1,
             MAX_EXPANSION_DEPTH
         ));
-        let error = parse(&source).unwrap().expand().unwrap_err();
+        let error = parse_wide(&source).unwrap().expand().unwrap_err();
         assert_eq!(error.line, MAX_EXPANSION_DEPTH + 2);
         assert_eq!(
             error.message,
@@ -1321,7 +1393,7 @@ mod tests {
 
         let beyond_limit = format!("${{OUTER:-{within_limit}}}");
         let source = format!("A={beyond_limit}\n");
-        let error = parse(&source).unwrap().expand().unwrap_err();
+        let error = parse_wide(&source).unwrap().expand().unwrap_err();
         assert_eq!(
             error.message,
             format!("variable expansion exceeds the hard depth limit of {MAX_EXPANSION_DEPTH}")
@@ -1359,7 +1431,7 @@ mod tests {
             "a".repeat(MAX_PATH_EXPRESSION_LEN),
             "b"
         );
-        let error = parse(&source).unwrap().expand().unwrap_err();
+        let error = parse_wide(&source).unwrap().expand().unwrap_err();
 
         assert_eq!(error.line, 4);
         assert_eq!(
@@ -1378,7 +1450,7 @@ mod tests {
         ] {
             let suffix = "b".repeat(length - prefix.len());
             let source = format!("PREFIX={prefix}\nVALUE=${{PREFIX}}{suffix}\n");
-            let result = parse(&source).unwrap().expand();
+            let result = parse_wide(&source).unwrap().expand();
 
             if length <= MAX_ASSIGNMENT_VALUE_LEN {
                 let config = result.unwrap();
@@ -1400,10 +1472,26 @@ mod tests {
     }
 
     #[test]
+    fn linebuf_rejects_a_following_expansion_before_growth() {
+        let prefix = "x".repeat(100);
+        let config = parse(&format!(
+            "LINEBUF=128\nPREFIX={prefix}\nVALUE=$PREFIX$PREFIX\n"
+        ))
+        .unwrap();
+        let error = config.expand().unwrap_err();
+
+        assert_eq!(error.line, 3);
+        assert_eq!(
+            error.message,
+            "expanded value exceeds the active LINEBUF limit of 128 bytes"
+        );
+    }
+
+    #[test]
     fn bounds_expanded_shell_settings() {
         let prefix = "x".repeat(MAX_SHELL_SETTING_LEN / 2 + 1);
         let source = format!("PREFIX={prefix}\nSHELL=$PREFIX$PREFIX\n");
-        let error = parse(&source).unwrap().expand().unwrap_err();
+        let error = parse_wide(&source).unwrap().expand().unwrap_err();
 
         assert_eq!(error.line, 2);
         assert_eq!(
@@ -1422,7 +1510,7 @@ mod tests {
         ] {
             let suffix = "b".repeat(length - prefix.len());
             let source = format!("PREFIX={prefix}\n:0\nmaildir:${{PREFIX}}{suffix}\n");
-            let result = parse(&source).unwrap().expand();
+            let result = parse_wide(&source).unwrap().expand();
             if length <= MAX_PATH_EXPRESSION_LEN {
                 let config = result.unwrap();
                 let resolved = resolved_destination(&config, 1);
@@ -1446,7 +1534,7 @@ mod tests {
             "MAILDIR=/{}\n:0\nmaildir:child\n",
             "a".repeat(MAX_PATH_EXPRESSION_LEN - 1)
         );
-        let error = parse(&source).unwrap().expand().unwrap_err();
+        let error = parse_wide(&source).unwrap().expand().unwrap_err();
 
         assert_eq!(error.line, 3);
         assert_eq!(
@@ -1464,7 +1552,7 @@ mod tests {
         ] {
             let base_len = length - 2;
             let source = format!("MAILDIR=/{}\n:0\nmaildir:x\n", "a".repeat(base_len - 1));
-            let result = parse(&source).unwrap().expand();
+            let result = parse_wide(&source).unwrap().expand();
 
             if length <= MAX_PATH_EXPRESSION_LEN {
                 let config = result.unwrap();

@@ -1439,6 +1439,8 @@ fn invalid_configuration_does_not_consume_stdin() {
         "LOCKTIMEOUT=0\n:0\nmaildir:inbox\n",
         "LOCKTIMEOUT=86401\n:0\nmaildir:inbox\n",
         "LOCKTIMEOUT=invalid\n:0\nmaildir:inbox\n",
+        "LINEBUF=127\n:0\nmaildir:inbox\n",
+        "LINEBUF=1k\n:0\nmaildir:inbox\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
@@ -1459,6 +1461,38 @@ fn invalid_configuration_does_not_consume_stdin() {
         assert_eq!(input.stream_position().unwrap(), 0, "rules: {rules:?}");
         fs::remove_dir_all(config.parent().unwrap()).unwrap();
     }
+}
+
+#[test]
+fn linebuf_does_not_limit_mail_header_lines() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let selected = base.join("selected");
+    create_maildir(&selected);
+    fs::write(
+        &config,
+        format!(
+            "LINEBUF=128\nLIMIT_HEADER_LINE=256\nMAILDIR={}\n:0\nselected/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = format!("X-Long: {}\n\nbody", "x".repeat(200));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [input.into_bytes()]);
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

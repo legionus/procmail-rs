@@ -210,3 +210,11 @@ while appending to an mbox. It defaults to 1024 seconds and accepts decimal
 values from 1 through 86400. Unlike original procmail, zero is rejected
 because it requests an unbounded wait. Changes apply only to following lock
 attempts; they do not shorten a wait that has already begun.
+
+`LINEBUF` defaults to 2048 bytes and accepts literal decimal values from 128
+through 1048576. It bounds each following physical rc line, a continued pipe
+command as a whole, and values produced by procmail-rs expansion. Existing
+smaller path, command, assignment, and regex ceilings still apply. It does not
+limit message header lines or trace records, which retain their independent
+limits. Because procmail-rs builds its typed recipe tree before filtering,
+`LINEBUF` is rejected inside recipe blocks and cannot use variable expansion.
