@@ -13,6 +13,9 @@ a failure identifies the layer whose behavior changed.
   mbox filesystem behavior without relying on rc parsing.
 - CLI tests in `cli.rs` cover only behavior that crosses these boundaries,
   such as streaming stdin through evaluation into a real destination.
+- Long-running delivery stress tests live in `stress_delivery.rs` and are
+  ignored by default. Run them explicitly with
+  `cargo test --locked --test stress_delivery -- --ignored --test-threads=1`.
 - Stored compatibility fixtures retain the reference rc files and reviewed
   results, but ordinary tests execute only `procmail-rs`.
 
