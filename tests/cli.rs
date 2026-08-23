@@ -134,7 +134,7 @@ fn program_condition_can_select_a_block_and_update_a_quoted_variable() {
     let selected = base.join("unknown");
     create_maildir(&selected);
     let rules = format!(
-        "MAILDIR={}\nUNKNOWN_FOLDER=unknown\nLISTDIR=missing\n:0 Wi\n* ? test ! -e $LISTDIR\n{{\n    LISTDIR=\"$UNKNOWN_FOLDER\"\n}}\n:0\n$LISTDIR/\n",
+        "MAILDIR={}\nUNKNOWN_FOLDER=unknown\nLISTDIR=missing\n:0 W\n* ? test ! -e $LISTDIR\n{{\n    LISTDIR=\"$UNKNOWN_FOLDER\"\n}}\n:0\n$LISTDIR/\n",
         base.display()
     );
     fs::write(&path, rules).unwrap();
@@ -1458,6 +1458,33 @@ fn invalid_configuration_does_not_consume_stdin() {
 }
 
 #[test]
+fn filesystem_ignore_write_error_is_rejected_before_stdin() {
+    for destination in ["mbox:target", "maildir:target"] {
+        let rules = format!(":0 i\n{destination}\n");
+        let config = config_file(&rules);
+        let input_path = config.parent().unwrap().join("message.eml");
+        fs::write(&input_path, b"Subject: must remain unread\n\nbody").unwrap();
+        let mut input = fs::File::open(&input_path).unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(78));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("may publish an incomplete message"),
+            "{stderr}"
+        );
+        assert_eq!(input.stream_position().unwrap(), 0);
+        fs::remove_dir_all(config.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
 fn non_utf8_command_line_value_does_not_consume_stdin() {
     let config = config_file(":0\nmaildir:$DESTINATION\n");
     let input_path = config.parent().unwrap().join("message.eml");
@@ -2105,7 +2132,7 @@ fn filter_gets_home_and_logname_from_the_passwd_database() {
     fs::write(
         &config,
         format!(
-            "MAILDIR={}\n:0 Wi\n* ? test \"$HOME\" = \"$EXPECTED_HOME\" && test \"$LOGNAME\" = \"$EXPECTED_LOGNAME\"\n{{\n:0\nselected/\n}}\n",
+            "MAILDIR={}\n:0 W\n* ? test \"$HOME\" = \"$EXPECTED_HOME\" && test \"$LOGNAME\" = \"$EXPECTED_LOGNAME\"\n{{\n:0\nselected/\n}}\n",
             base.display()
         ),
     )

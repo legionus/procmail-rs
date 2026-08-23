@@ -5,6 +5,8 @@ implemented CLI can validate or explain an rc file and can filter one message
 from standard input into explicitly selected Maildir destinations.
 
 The program does not provide an implicit system mailbox or fallback delivery.
+See [Documentation/Compatibility.md](Documentation/Compatibility.md) for the
+supported compatibility boundary and deliberate differences from procmail.
 
 ## Commands
 

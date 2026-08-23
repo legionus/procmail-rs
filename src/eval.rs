@@ -4149,7 +4149,7 @@ mod tests {
 
     #[test]
     fn program_condition_uses_child_status_before_entering_block() {
-        let plan = compile(":0 Wi\n* ? test ! -e $LISTDIR\n{\n:0\nmaildir:selected\n}\n");
+        let plan = compile(":0 W\n* ? test ! -e $LISTDIR\n{\n:0\nmaildir:selected\n}\n");
         let raw = b"Subject: program\n condition\n\nbody";
         let matching_header = b"Subject: program condition\n\n";
         let mut runtime = RuntimeVariables::default();

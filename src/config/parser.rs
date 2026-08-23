@@ -380,6 +380,14 @@ fn parse_recipe(
     let has_program_condition = conditions
         .iter()
         .any(|condition| matches!(condition.kind, ConditionKind::Program(_)));
+    if !is_pipe && options.write_errors == WriteErrorMode::Ignore {
+        let message = if action == "{" {
+            "recipe flag 'i' is not supported on blocks; original procmail ignores it"
+        } else {
+            "recipe flag 'i' is not supported for filesystem delivery because it may publish an incomplete message"
+        };
+        return Err(ParseError::new(start + 1, message));
+    }
     if !is_pipe
         && (options.action_input != ActionInput::Message
             || options.action_mode != ActionMode::Deliver
@@ -390,7 +398,7 @@ fn parse_recipe(
     {
         return Err(ParseError::new(
             start + 1,
-            "flags h, b, f, and r require a pipe action; flags w, W, and i require a pipe action or program condition",
+            "flags h, b, f, and r require a pipe action; flags w and W require a pipe action or program condition",
         ));
     }
 
@@ -1300,8 +1308,33 @@ mod tests {
         assert_eq!(error.line, 1);
         assert_eq!(
             error.message,
-            "flags h, b, f, and r require a pipe action; flags w, W, and i require a pipe action or program condition"
+            "flags h, b, f, and r require a pipe action; flags w and W require a pipe action or program condition"
         );
+
+        for destination in ["mbox:target", "maildir:target"] {
+            let error = parse(&format!(":0 i\n{destination}\n")).unwrap_err();
+            assert_eq!(error.line, 1);
+            assert_eq!(
+                error.message,
+                "recipe flag 'i' is not supported for filesystem delivery because it may publish an incomplete message"
+            );
+        }
+
+        let error = parse(":0 i\n{\n:0\nmaildir:target\n}\n").unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(
+            error.message,
+            "recipe flag 'i' is not supported on blocks; original procmail ignores it"
+        );
+    }
+
+    #[test]
+    fn documents_filesystem_ignore_write_error_rejection() {
+        let compatibility = include_str!("../../Documentation/Compatibility.md");
+
+        assert!(compatibility.contains("`i` on mbox or Maildir"));
+        assert!(compatibility.contains("publish a truncated Maildir file"));
+        assert!(compatibility.contains("Rejected before message input"));
     }
 
     #[test]
@@ -1432,8 +1465,7 @@ mod tests {
     #[test]
     fn parses_program_condition_and_quoted_block_assignment() {
         let config =
-            parse(":0 Wi\n* ? test ! -e $LISTDIR\n{\n    LISTDIR=\"$UNKNOWN_FOLDER\"\n}\n")
-                .unwrap();
+            parse(":0 W\n* ? test ! -e $LISTDIR\n{\n    LISTDIR=\"$UNKNOWN_FOLDER\"\n}\n").unwrap();
         let Statement::Recipe(recipe) = &config.statements[0] else {
             panic!("expected recipe");
         };
