@@ -15,9 +15,9 @@ pub(crate) use parser::parse_with_state;
 pub use variables::{
     AssignmentTarget, MAX_COMMAND_LINE_VARIABLES, MAX_LOCK_TIMEOUT_SECONDS,
     MAX_PROCESS_TIMEOUT_SECONDS, MessageLimitVariable, RcLimitVariable, SuppliedVariable,
-    SuppliedVariableError, VariablePolicy, VariableSource, assignment_value_limit,
-    parse_lock_timeout_seconds, parse_process_timeout_seconds, parse_umask, validate_lock_method,
-    validate_trap_command, variable_policy,
+    SuppliedVariableError, UNSUPPORTED_PROCMAIL_VARIABLES, VariablePolicy, VariableSource,
+    assignment_value_limit, parse_lock_timeout_seconds, parse_process_timeout_seconds, parse_umask,
+    validate_lock_method, validate_trap_command, variable_policy,
 };
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;

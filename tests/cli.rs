@@ -1783,6 +1783,74 @@ fn invalid_configuration_does_not_consume_stdin() {
 }
 
 #[test]
+fn known_unsupported_constructs_fail_check_before_message_input() {
+    let mut cases = procmail_rs::config::UNSUPPORTED_PROCMAIL_VARIABLES
+        .iter()
+        .map(|name| {
+            (
+                format!("{name}=value\n:0\nmaildir:unused\n"),
+                format!("rules.rc:line 1: procmail variable {name} is not supported"),
+            )
+        })
+        .collect::<Vec<_>>();
+    cases.extend([
+        (
+            ":0\n! user@example.test\n".to_owned(),
+            "rules.rc:line 2: forward actions are not supported".to_owned(),
+        ),
+        (
+            "HOST=other-host\n".to_owned(),
+            "rules.rc:line 1: non-empty HOST assignments are not supported yet".to_owned(),
+        ),
+        (
+            ":0\nambiguous-path\n".to_owned(),
+            "rules.rc:line 2: destination type is ambiguous".to_owned(),
+        ),
+    ]);
+
+    for (rules, expected) in cases {
+        let config = config_file(&rules);
+        let input_path = config.parent().unwrap().join("message.eml");
+        fs::write(&input_path, b"Subject: must remain unread\n\nbody").unwrap();
+
+        // Check the source-located user diagnostic first, then use a shared
+        // file offset with filter because check never opens message input and
+        // therefore cannot by itself prove pre-input rejection.
+        let checked = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["check", "--config"])
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert_eq!(checked.status.code(), Some(78), "{rules:?}");
+        assert!(
+            String::from_utf8_lossy(&checked.stderr).contains(&expected),
+            "rules: {rules:?}, stderr: {:?}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+
+        let mut input = fs::File::open(&input_path).unwrap();
+        let filtered = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+        assert_eq!(filtered.status.code(), Some(78), "{rules:?}");
+        assert_eq!(input.stream_position().unwrap(), 0, "{rules:?}");
+
+        fs::remove_dir_all(config.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn compatibility_document_lists_every_unsupported_variable() {
+    let documentation = include_str!("../Documentation/Compatibility.md");
+    for name in procmail_rs::config::UNSUPPORTED_PROCMAIL_VARIABLES {
+        assert!(documentation.contains(&format!("`{name}`")), "{name}");
+    }
+}
+
+#[test]
 fn linebuf_does_not_limit_mail_header_lines() {
     let config = config_file("");
     let base = config.parent().unwrap();

@@ -1257,18 +1257,7 @@ mod tests {
 
     #[test]
     fn rejects_known_unsupported_procmail_variables() {
-        for name in [
-            "DEFAULT",
-            "ORGMAIL",
-            "COMSAT",
-            "LOGABSTRACT",
-            "MSGPREFIX",
-            "NORESRETRY",
-            "SUSPEND",
-            "SENDMAIL",
-            "SENDMAILFLAGS",
-            "SHIFT",
-        ] {
+        for name in super::super::UNSUPPORTED_PROCMAIL_VARIABLES {
             let error = parse(&format!("{name}=value\n")).unwrap_err();
             assert_eq!(error.line, 1, "{name}");
             assert_eq!(

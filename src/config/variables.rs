@@ -8,6 +8,18 @@ use super::{MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING
 pub const MAX_COMMAND_LINE_VARIABLES: usize = 256;
 pub const MAX_LOCK_TIMEOUT_SECONDS: u64 = 86_400;
 pub const MAX_PROCESS_TIMEOUT_SECONDS: u64 = 86_400;
+pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
+    "DEFAULT",
+    "ORGMAIL",
+    "COMSAT",
+    "LOGABSTRACT",
+    "MSGPREFIX",
+    "NORESRETRY",
+    "SUSPEND",
+    "SENDMAIL",
+    "SENDMAILFLAGS",
+    "SHIFT",
+];
 
 pub fn parse_umask(value: &str) -> Result<u32, String> {
     if value.is_empty() || value.len() > 4 || !value.bytes().all(|byte| matches!(byte, b'0'..=b'7'))
@@ -300,8 +312,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LIMIT_RECIPE_NESTING" => {
             VariablePolicy::RcOnly(AssignmentTarget::RcLimit(RcLimitVariable::NestingDepth))
         }
-        "DEFAULT" | "ORGMAIL" | "COMSAT" | "LOGABSTRACT" | "MSGPREFIX" | "NORESRETRY"
-        | "SUSPEND" | "SENDMAIL" | "SENDMAILFLAGS" | "SHIFT" => VariablePolicy::Unsupported,
+        name if UNSUPPORTED_PROCMAIL_VARIABLES.contains(&name) => VariablePolicy::Unsupported,
         _ => VariablePolicy::RcOrCommandLine(AssignmentTarget::User),
     }
 }
@@ -417,6 +428,13 @@ mod tests {
             error.to_string(),
             "procmail variable DEFAULT is not supported"
         );
+    }
+
+    #[test]
+    fn registry_classifies_every_unsupported_procmail_variable() {
+        for name in UNSUPPORTED_PROCMAIL_VARIABLES {
+            assert_eq!(variable_policy(name), VariablePolicy::Unsupported, "{name}");
+        }
     }
 
     #[test]
