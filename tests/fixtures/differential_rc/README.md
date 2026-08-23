@@ -8,6 +8,7 @@ Each case contains the original `procmail.rc`, the corresponding
 `procmail-rs.rc`, all runtime rc files, one input message, and three reviewed
 results produced by the reference run:
 
+- `expected.backend` selects the mbox or Maildir assertion path;
 - `expected.status` is the exact process exit status;
 - `expected.destinations` records every selected destination;
 - `expected.delivery` contains the exact bytes written by reference procmail.
@@ -21,3 +22,7 @@ by these fixtures.
 The external-actions case also verifies that header-only and body-only filters
 replace only the selected area, waited filters preserve their successful
 output, and a program condition can select a runtime destination assignment.
+
+The Maildir case ignores only the generated filename. It requires one exact
+message in `new/`, no files in `tmp/` or `cur/`, and verifies variable
+expansion in the selected destination path.

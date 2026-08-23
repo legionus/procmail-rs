@@ -50,6 +50,20 @@ fn runtime_rc_behavior_matches_reference_procmail() {
     for case in fixture_cases() {
         let directory = Path::new(FIXTURES).join(&case).canonicalize().unwrap();
         let output_directory = TempDirectory::create();
+        let backend = fs::read_to_string(directory.join("expected.backend")).unwrap();
+        let backend = backend.trim_end();
+        let expected = destination_names(&directory.join("expected.destinations"));
+        if backend == "maildir" {
+            for destination in &expected {
+                let path = output_directory.0.join(destination);
+                fs::create_dir(&path).unwrap();
+                for subdirectory in ["tmp", "new", "cur"] {
+                    fs::create_dir(path.join(subdirectory)).unwrap();
+                }
+            }
+        } else {
+            assert_eq!(backend, "mbox", "fixture: {case}");
+        }
         let message = fs::File::open(directory.join("message.eml")).unwrap();
 
         let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
@@ -74,7 +88,6 @@ fn runtime_rc_behavior_matches_reference_procmail() {
             "fixture {case}: {:?}",
             output.stderr
         );
-        let expected = destination_names(&directory.join("expected.destinations"));
         let mut actual = fs::read_dir(&output_directory.0)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -84,12 +97,25 @@ fn runtime_rc_behavior_matches_reference_procmail() {
 
         let expected_delivery = fs::read(directory.join("expected.delivery")).unwrap();
         for destination in actual {
-            let delivered = fs::read(output_directory.0.join(&destination)).unwrap();
-            assert_eq!(
-                mbox_payload(&delivered),
-                expected_delivery,
-                "fixture: {case}, destination: {destination}"
-            );
+            let path = output_directory.0.join(&destination);
+            if backend == "mbox" {
+                let delivered = fs::read(path).unwrap();
+                assert_eq!(
+                    mbox_payload(&delivered),
+                    expected_delivery,
+                    "fixture: {case}, destination: {destination}"
+                );
+            } else {
+                assert_eq!(fs::read_dir(path.join("tmp")).unwrap().count(), 0);
+                assert_eq!(fs::read_dir(path.join("cur")).unwrap().count(), 0);
+                let mut published = fs::read_dir(path.join("new")).unwrap();
+                let delivered = fs::read(published.next().unwrap().unwrap().path()).unwrap();
+                assert!(published.next().is_none(), "fixture: {case}");
+                assert_eq!(
+                    delivered, expected_delivery,
+                    "fixture: {case}, destination: {destination}"
+                );
+            }
         }
     }
 }

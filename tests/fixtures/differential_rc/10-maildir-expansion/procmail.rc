@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+BOX=selected
+
+:0
+* ^Subject: Maildir expansion$
+$OUT/$BOX/
