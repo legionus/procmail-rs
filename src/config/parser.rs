@@ -388,17 +388,22 @@ fn parse_recipe(
         };
         return Err(ParseError::new(start + 1, message));
     }
+    if action == "{" && options.output_ending == OutputEnding::Preserve {
+        return Err(ParseError::new(
+            start + 1,
+            "recipe flag 'r' is not supported on blocks; original procmail ignores it",
+        ));
+    }
     if !is_pipe
         && (options.action_input != ActionInput::Message
             || options.action_mode != ActionMode::Deliver
             || (!has_program_condition
                 && (options.child_status != ChildStatusMode::Ignore
-                    || options.write_errors != WriteErrorMode::Fail))
-            || options.output_ending != OutputEnding::Normalize)
+                    || options.write_errors != WriteErrorMode::Fail)))
     {
         return Err(ParseError::new(
             start + 1,
-            "flags h, b, f, and r require a pipe action; flags w and W require a pipe action or program condition",
+            "flags h, b, and f require a pipe action; flags w and W require a pipe action or program condition",
         ));
     }
 
@@ -1308,7 +1313,7 @@ mod tests {
         assert_eq!(error.line, 1);
         assert_eq!(
             error.message,
-            "flags h, b, f, and r require a pipe action; flags w and W require a pipe action or program condition"
+            "flags h, b, and f require a pipe action; flags w and W require a pipe action or program condition"
         );
 
         for destination in ["mbox:target", "maildir:target"] {
@@ -1326,15 +1331,25 @@ mod tests {
             error.message,
             "recipe flag 'i' is not supported on blocks; original procmail ignores it"
         );
+
+        let error = parse(":0 r\n{\n:0\nmaildir:target\n}\n").unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(
+            error.message,
+            "recipe flag 'r' is not supported on blocks; original procmail ignores it"
+        );
     }
 
     #[test]
-    fn documents_filesystem_ignore_write_error_rejection() {
+    fn documents_filesystem_flag_compatibility() {
         let compatibility = include_str!("../../Documentation/Compatibility.md");
 
         assert!(compatibility.contains("`i` on mbox or Maildir"));
         assert!(compatibility.contains("publish a truncated Maildir file"));
         assert!(compatibility.contains("Rejected before message input"));
+        assert!(compatibility.contains("`r` on Maildir"));
+        assert!(compatibility.contains("`r` on mbox"));
+        assert!(compatibility.contains("following postmark starts on a new line"));
     }
 
     #[test]

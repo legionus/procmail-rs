@@ -25,6 +25,9 @@ files are checked when their `INCLUDERC` or `SWITCHRC` statement executes.
 | `i` on a pipe | Ignores an error while writing the selected message bytes to the child. | Supported with the same limited purpose. Child status and filter-output validation remain separate. |
 | `i` on mbox or Maildir | May ignore a failed write and report success after a partial append or publish a truncated Maildir file. | Rejected before message input. Filesystem publication must complete successfully. |
 | `i` on a recipe block | Ignored with a warning. | Rejected as unsupported instead of silently discarding the flag. |
+| `r` on Maildir | Maildir delivery already preserves the message ending, so `r` has no additional effect. | Preserves the message bytes with or without `r`. |
+| `r` on mbox | Raw file delivery suppresses the usual mailbox delimiter handling as well as final-newline normalization. | Retains the generated postmark and mboxrd quoting. It omits the normal blank record separator but adds one LF when needed so a following postmark starts on a new line. |
+| `r` on a recipe block | Ignored with a warning. | Rejected as unsupported instead of silently discarding the flag. |
 
 ## Updating this document
 

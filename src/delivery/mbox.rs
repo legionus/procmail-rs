@@ -15,6 +15,8 @@ use rustix::fs::{
     FileType, FlockOperation, Mode, OFlags, SeekFrom, flock, fstat, fsync, ftruncate, openat, seek,
 };
 
+use crate::config::OutputEnding;
+
 use super::maildir::Durability;
 use super::maildir::open_directory_path;
 use super::{DeliveryFailureClass, PublishedDelivery};
@@ -202,11 +204,12 @@ impl LockedMbox {
     pub fn append(
         self,
         message: &[u8],
+        output_ending: OutputEnding,
         durability: Durability,
     ) -> Result<PublishedDelivery, MboxAppendError> {
         self.append_with(durability, |file| {
             let postmark = Postmark::generated(SystemTime::now()).map_err(io::Error::other)?;
-            write_record(&mut FdWriter(file), &postmark, message)
+            write_record_with_ending(&mut FdWriter(file), &postmark, message, output_ending)
         })
     }
 
@@ -311,6 +314,15 @@ pub fn write_record(
     postmark: &Postmark,
     message: &[u8],
 ) -> io::Result<()> {
+    write_record_with_ending(writer, postmark, message, OutputEnding::Normalize)
+}
+
+pub fn write_record_with_ending(
+    writer: &mut impl Write,
+    postmark: &Postmark,
+    message: &[u8],
+    output_ending: OutputEnding,
+) -> io::Result<()> {
     writer.write_all(postmark.as_bytes())?;
 
     // Quote directly from the input slices so one hostile line cannot cause a
@@ -332,10 +344,18 @@ pub fn write_record(
         offset = end;
     }
 
-    if !message.ends_with(b"\n") {
+    // Even raw-mode records need the next postmark to begin on a fresh line.
+    // Add only that structural LF in preserve mode; the normal mode adds one
+    // more LF so adjacent records retain the project's documented separator.
+    if !message.ends_with(b"\n")
+        && (output_ending == OutputEnding::Normalize || !message.is_empty())
+    {
         writer.write_all(b"\n")?;
     }
-    writer.write_all(b"\n")
+    if output_ending == OutputEnding::Normalize {
+        writer.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 fn io_error(error: rustix::io::Errno) -> io::Error {
@@ -389,7 +409,11 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use std::{sync::Arc, sync::Barrier, thread};
 
-    use super::{MAX_POSTMARK_LEN, MboxFile, Postmark, PostmarkError, write_record};
+    use crate::config::OutputEnding;
+
+    use super::{
+        MAX_POSTMARK_LEN, MboxFile, Postmark, PostmarkError, write_record, write_record_with_ending,
+    };
     use crate::delivery::maildir::Durability;
 
     fn temporary_path(name: &str) -> std::path::PathBuf {
@@ -433,6 +457,21 @@ mod tests {
             write_record(&mut output, &postmark(), message).unwrap();
             assert!(output.ends_with(suffix));
             assert_eq!(message, original);
+        }
+    }
+
+    #[test]
+    fn raw_mode_adds_only_the_line_ending_required_for_mbox_framing() {
+        for (message, suffix) in [
+            (&b"body"[..], &b"body\n"[..]),
+            (&b"body\n"[..], &b"body\n"[..]),
+            (&b"body\n\n"[..], &b"body\n\n"[..]),
+            (&b""[..], &b"1970\n"[..]),
+        ] {
+            let mut output = Vec::new();
+            write_record_with_ending(&mut output, &postmark(), message, OutputEnding::Preserve)
+                .unwrap();
+            assert!(output.ends_with(suffix), "{output:?}");
         }
     }
 
@@ -530,7 +569,11 @@ mod tests {
             .unwrap()
             .lock()
             .unwrap()
-            .append(b"Subject: test\n\nFrom body", Durability::File)
+            .append(
+                b"Subject: test\n\nFrom body",
+                OutputEnding::Normalize,
+                Durability::File,
+            )
             .unwrap();
 
         assert_eq!(published.last_folder(), mailbox);
@@ -610,7 +653,11 @@ mod tests {
                     .unwrap()
                     .lock()
                     .unwrap()
-                    .append(message.as_bytes(), Durability::None)
+                    .append(
+                        message.as_bytes(),
+                        OutputEnding::Normalize,
+                        Durability::None,
+                    )
                     .unwrap();
             }));
         }
@@ -651,7 +698,11 @@ mod tests {
             .unwrap()
             .lock()
             .unwrap()
-            .append(b"Subject: appended\n\nbody", Durability::None)
+            .append(
+                b"Subject: appended\n\nbody",
+                OutputEnding::Normalize,
+                Durability::None,
+            )
             .unwrap();
 
         let bytes = fs::read(&mailbox).unwrap();

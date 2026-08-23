@@ -1631,6 +1631,44 @@ fn filter_delivers_mboxrd_record() {
 }
 
 #[test]
+fn raw_filesystem_delivery_preserves_maildir_and_minimizes_mbox_framing() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let maildir = base.join("raw-maildir");
+    let mailbox = base.join("raw-mbox");
+    create_maildir(&maildir);
+    let input = b"Subject: raw\n\nFrom body without newline";
+
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0 cr\nraw-maildir/\n:0 r\nmbox:{}\n",
+            base.display(),
+            mailbox.display()
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&maildir), [input.to_vec()]);
+    let stored = fs::read(&mailbox).unwrap();
+    assert!(stored.starts_with(b"From MAILER-DAEMON "));
+    assert!(stored.ends_with(b"Subject: raw\n\n>From body without newline\n"));
+    assert!(!stored.ends_with(b"\n\n"));
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn error_recipe_recovers_from_a_real_delivery_failure() {
     let path = config_file("");
     let base = path.parent().unwrap();

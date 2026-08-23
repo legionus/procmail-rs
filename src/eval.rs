@@ -8,8 +8,8 @@ use regex::bytes::Regex;
 
 use crate::config::{
     Assignment, AssignmentTarget, ConditionInput, ConditionKind, Config, ContinuationMode,
-    ControlFlow, Destination, PipeAction, RcFileExpression, Recipe, RecipeAction, RecipeOptions,
-    RegexCondition, Statement,
+    ControlFlow, Destination, OutputEnding, PipeAction, RcFileExpression, Recipe, RecipeAction,
+    RecipeOptions, RegexCondition, Statement,
 };
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::rc_file::{MAX_RC_TRANSITIONS, RcFileLoader};
@@ -102,6 +102,7 @@ enum CompiledAction {
     Deliver {
         destination: Destination,
         continuation: ContinuationMode,
+        output_ending: OutputEnding,
     },
     Pipe {
         action: PipeAction,
@@ -415,6 +416,7 @@ pub struct DeliveryPlan {
 pub struct PlannedDelivery {
     destination: Destination,
     continuation: DeliveryContinuation,
+    output_ending: OutputEnding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,6 +460,10 @@ impl PlannedDelivery {
 
     pub fn is_copy(&self) -> bool {
         self.continuation == DeliveryContinuation::Continue
+    }
+
+    pub fn output_ending(&self) -> OutputEnding {
+        self.output_ending
     }
 }
 
@@ -843,6 +849,7 @@ impl CompiledSequence {
         D: FnMut(
             &Destination,
             &[u8],
+            OutputEnding,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -1188,6 +1195,7 @@ impl CompiledSequence {
                 CompiledAction::Deliver {
                     destination,
                     continuation,
+                    ..
                 } => {
                     let destination_kind = match destination {
                         Destination::Maildir(_) => DestinationKind::Maildir,
@@ -1340,6 +1348,7 @@ impl CompiledNode {
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
                 destination: destination.clone(),
                 continuation: recipe.options.continuation,
+                output_ending: recipe.options.output_ending,
             },
             RecipeAction::Block(statements) => {
                 CompiledAction::Block(CompiledSequence::compile(statements, &mut Vec::new()))
@@ -1380,6 +1389,7 @@ impl CompiledNode {
                 CompiledAction::Deliver {
                     destination,
                     continuation: _,
+                    ..
                 } => {
                     destination.needs_runtime_variables()
                         || matches!(destination, Destination::Mbox(_))
@@ -1423,6 +1433,7 @@ impl CompiledNode {
         D: FnMut(
             &Destination,
             &[u8],
+            OutputEnding,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -1595,6 +1606,7 @@ impl CompiledNode {
             CompiledAction::Deliver {
                 destination,
                 continuation,
+                ..
             } => {
                 let destination =
                     match destination.bind_with(|name| runtime.get(name).map(str::to_owned)) {
@@ -1649,6 +1661,7 @@ impl CompiledNode {
         D: FnMut(
             &Destination,
             &[u8],
+            OutputEnding,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -1726,6 +1739,7 @@ impl CompiledNode {
             CompiledAction::Deliver {
                 destination,
                 continuation,
+                output_ending,
             } => {
                 let destination = destination
                     .bind_with(|name| context.runtime.get(name).map(str::to_owned))
@@ -1736,7 +1750,13 @@ impl CompiledNode {
                         .raw()
                         .ok_or(EvalError::BodyWasNotBuffered)
                         .map_err(OrderedExecutionError::Evaluation)?;
-                match (context.deliver)(&destination, message, context.runtime, context.trace) {
+                match (context.deliver)(
+                    &destination,
+                    message,
+                    *output_ending,
+                    context.runtime,
+                    context.trace,
+                ) {
                     Ok(()) => {
                         context.published += 1;
                         context.pending_error = None;
@@ -1797,6 +1817,7 @@ impl CompiledNode {
         let CompiledAction::Deliver {
             destination,
             continuation,
+            output_ending,
         } = &self.action
         else {
             return Ok(SequenceControl::Continue);
@@ -1812,6 +1833,7 @@ impl CompiledNode {
             } else {
                 DeliveryContinuation::Stop
             },
+            output_ending: *output_ending,
         });
         execution.original_delivered |= !copy;
         if copy || has_error_handler {
@@ -1948,6 +1970,7 @@ where
     D: FnMut(
         &Destination,
         &[u8],
+        OutputEnding,
         &mut RuntimeVariables,
         &mut T,
     ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2438,6 +2461,7 @@ impl ExecutionPlan {
         D: FnMut(
             &Destination,
             &[u8],
+            OutputEnding,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2461,6 +2485,7 @@ impl ExecutionPlan {
         D: FnMut(
             &Destination,
             &[u8],
+            OutputEnding,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2488,6 +2513,7 @@ impl ExecutionPlan {
         D: FnMut(
             &Destination,
             &[u8],
+            OutputEnding,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2516,6 +2542,7 @@ impl ExecutionPlan {
         D: FnMut(
             &Destination,
             &[u8],
+            OutputEnding,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2557,6 +2584,7 @@ impl ExecutionPlan {
         D: FnMut(
             &Destination,
             &[u8],
+            OutputEnding,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -4031,7 +4059,7 @@ mod tests {
                 b"Subject: test\n\n".len(),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, runtime, _| {
+                &mut |destination, _, _, runtime, _| {
                     let destination = destination
                         .resolve_with(|name| runtime.get(name).map(str::to_owned))
                         .unwrap();
@@ -4062,7 +4090,7 @@ mod tests {
                 b"Subject: test\n\n".len(),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, _| {
+                &mut |destination, _, _, _, _| {
                     attempted.push(destination.path().to_owned());
                     if destination.path() == "primary" {
                         Err(DeliveryAttemptError::Recoverable("primary failed"))
@@ -4094,7 +4122,7 @@ mod tests {
                 b"Subject: test\n\n".len(),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, _| {
+                &mut |destination, _, _, _, _| {
                     attempted.push(destination.path().to_owned());
                     if destination.path() == "primary" {
                         Err(DeliveryAttemptError::Recoverable("primary failed"))
@@ -4125,7 +4153,7 @@ mod tests {
                 MappedMessageInput::new(original, b"X-State: old\n\n".len(), None),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, message, _, _| {
+                &mut |destination, message, _, _, _| {
                     delivered.push((destination.path().to_owned(), message.to_vec()));
                     Ok::<_, DeliveryAttemptError<&str>>(())
                 },
@@ -4166,7 +4194,7 @@ mod tests {
                 ),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, _| {
+                &mut |destination, _, _, _, _| {
                     delivered.push(destination.path().to_owned());
                     Ok::<_, DeliveryAttemptError<&str>>(())
                 },
@@ -4201,7 +4229,7 @@ mod tests {
                 MappedMessageInput::new(original, b"Subject: original\n\n".len(), None),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, message, _, _| {
+                &mut |destination, message, _, _, _| {
                     delivered.push((destination.path().to_owned(), message.to_vec()));
                     Ok::<_, DeliveryAttemptError<&str>>(())
                 },
@@ -4234,7 +4262,7 @@ mod tests {
                     MappedMessageInput::new(original, b"Subject: original\n\n".len(), None),
                     &mut runtime,
                     &mut trace,
-                    &mut |_, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+                    &mut |_, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
                     &mut |_, _, input, _, _| {
                         assert_eq!(input.selected(), expected, "flags {flags}");
                         Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(
@@ -4261,7 +4289,7 @@ mod tests {
                 b"Subject: test\n\n".len(),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, _| {
+                &mut |destination, _, _, _, _| {
                     attempted.push(destination.path().to_owned());
                     Err(DeliveryAttemptError::Fatal("durability failed"))
                 },

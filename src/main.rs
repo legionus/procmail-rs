@@ -430,9 +430,16 @@ fn deliver_staged(
                 MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                 runtime,
                 trace,
-                &mut |destination, message, runtime, trace| {
+                &mut |destination, message, output_ending, runtime, trace| {
                     let result = if matches!(destination, Destination::Mbox(_)) {
-                        deliver_mbox(destination, message, options.durability, runtime, trace)
+                        deliver_mbox(
+                            destination,
+                            message,
+                            output_ending,
+                            options.durability,
+                            runtime,
+                            trace,
+                        )
                     } else {
                         deliver_one_maildir(
                             destination,
@@ -807,6 +814,7 @@ fn deliver_one_maildir(
 fn deliver_mbox(
     unresolved: &Destination,
     message: &[u8],
+    output_ending: procmail_rs::config::OutputEnding,
     durability: Durability,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
@@ -846,7 +854,7 @@ fn deliver_mbox(
             )
         })
         .map_err(OrderedStepError::before_publication)?;
-    match locked.append(message, durability) {
+    match locked.append(message, output_ending, durability) {
         Ok(published) => {
             record_delivery(unresolved, DeliveryStage::Published, trace);
             runtime
