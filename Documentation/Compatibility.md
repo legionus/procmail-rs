@@ -18,6 +18,10 @@ files are checked when their `INCLUDERC` or `SWITCHRC` statement executes.
 | --- | --- | --- |
 | Destination type | May infer a directory or mailbox from the current filesystem. | Requires `maildir:PATH`, a trailing `/`, or `mbox:PATH`. |
 | Default delivery | Can fall back to `DEFAULT`, `ORGMAIL`, or the system mailbox. | Never selects an implicit destination. An undelivered original is an error. |
+| Forwarding | A `!` action forwards through the configured sendmail command. | Rejected before message input; procmail-rs never forwards or invokes sendmail implicitly. |
+| Generic directory delivery | A destination may select directory delivery after inspecting the filesystem. | Never inferred from the filesystem. Only `maildir:PATH` or the explicit trailing-slash Maildir syntax selects a directory backend, which must have `tmp`, `new`, and `cur`. |
+| Comsat notification | `COMSAT` may enable notification after delivery. | `COMSAT` is rejected as an unsupported reserved variable; delivery has no notification side effect. |
+| Non-empty `HOST` | Can stop processing when its hostname comparison succeeds. | Rejected before message input because hostname comparison is not implemented. An empty `HOST` remains available for failure handlers. |
 | Runtime rc files | Opens paths using the process filesystem permissions. | Requires trusted regular files owned by the current uid and rejects broadly writable files and symlinks. |
 | Initial variables | Imports a broad process environment. | Gets `HOME` and `LOGNAME` from the current uid and accepts other external values only through `--set`. |
 | Unsupported reserved variables | Variables such as `DEFAULT`, `ORGMAIL`, `COMSAT`, `LOGABSTRACT`, `MSGPREFIX`, `NORESRETRY`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` retain their original special meanings. | Rejects these names explicitly in assignments, `--set`, and expansion references. Unknown names remain ordinary user variables. |

@@ -1732,6 +1732,11 @@ fn umask_is_bound_to_each_selected_delivery_in_statement_order() {
 fn invalid_configuration_does_not_consume_stdin() {
     for rules in [
         ":0\n| unsupported\n",
+        ":0\n! user@example.test\n",
+        "DEFAULT=mailbox\n:0\nmaildir:inbox\n",
+        "ORGMAIL=mailbox\n:0\nmaildir:inbox\n",
+        "COMSAT=yes\n:0\nmaildir:inbox\n",
+        "HOST=other-host\n:0\nmaildir:inbox\n",
         "LIMIT_MSG_BODY=10KB\n:0\ninbox/\n",
         ":0 B\n* body\ninbox/\n",
         ":0\nmaildir:$UNDEFINED\n",
