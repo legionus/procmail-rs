@@ -327,12 +327,11 @@ fn expand_recipe(
     variables: &BTreeMap<String, ExpandedValue>,
     maildir: Option<&str>,
 ) -> Result<(), ExpansionError> {
-    if let Some(lock) = &mut recipe.lock {
-        *lock = expand_text(lock, recipe.line, MAX_PATH_EXPRESSION_LEN, variables)?.text;
-        if !lock.is_empty() {
-            *lock = resolve_relative_path(lock, maildir, recipe.line)?;
-            validate_filesystem_path(lock, recipe.line, "lockfile", false)?;
-        }
+    if recipe.lock.is_some() {
+        return Err(ExpansionError::new(
+            recipe.line,
+            "local recipe lockfiles are not supported yet",
+        ));
     }
 
     match &mut recipe.action {
@@ -424,9 +423,11 @@ fn prepare_runtime_recipe(
     dynamic: &BTreeSet<String>,
     maildir: Option<&str>,
 ) -> Result<(), ExpansionError> {
-    if let Some(lock) = &recipe.lock {
-        let expression = parse_expression(lock, recipe.line)?;
-        validate_runtime_references(&expression, recipe.line, known, dynamic)?;
+    if recipe.lock.is_some() {
+        return Err(ExpansionError::new(
+            recipe.line,
+            "local recipe lockfiles are not supported yet",
+        ));
     }
 
     match &mut recipe.action {
@@ -969,26 +970,32 @@ mod tests {
 
     #[test]
     fn expands_both_variable_reference_forms_sequentially() {
-        let config = parse(
-            "ROOT=mail\nBOX=${ROOT}/inbox\nMAILDIR=/srv/$ROOT\n:0 :lock-$BOX\nmaildir:$BOX\n",
-        )
-        .unwrap()
-        .expand()
-        .unwrap();
+        let config = parse("ROOT=mail\nBOX=${ROOT}/inbox\nMAILDIR=/srv/$ROOT\n:0\nmaildir:$BOX\n")
+            .unwrap()
+            .expand()
+            .unwrap();
 
         let Statement::Assignment(box_assignment) = &config.statements[1] else {
             panic!("expected assignment");
         };
         assert_eq!(box_assignment.value, "mail/inbox");
         assert_eq!(config.maildir(), Some("/srv/mail"));
-        let Statement::Recipe(recipe) = &config.statements[3] else {
-            panic!("expected recipe");
-        };
-        assert_eq!(recipe.lock.as_deref(), Some("/srv/mail/lock-mail/inbox"));
         assert_eq!(
             resolved_destination(&config, 3),
             Destination::Maildir("/srv/mail/mail/inbox".into())
         );
+    }
+
+    #[test]
+    fn rejects_named_and_implicit_local_recipe_lockfiles() {
+        for source in [":0 :named.lock\nmaildir:inbox\n", ":0 :\nmaildir:inbox\n"] {
+            let error = parse(source).unwrap().expand().unwrap_err();
+            assert_eq!(error.line, 1);
+            assert_eq!(
+                error.message,
+                "local recipe lockfiles are not supported yet"
+            );
+        }
     }
 
     #[test]
@@ -1287,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_expanded_destination_and_lock_paths_at_the_boundary() {
+    fn bounds_expanded_destination_paths_at_the_boundary() {
         let prefix = "a".repeat(MAX_PATH_EXPRESSION_LEN / 2);
         for length in [
             MAX_PATH_EXPRESSION_LEN - 1,
@@ -1295,29 +1302,21 @@ mod tests {
             MAX_PATH_EXPRESSION_LEN + 1,
         ] {
             let suffix = "b".repeat(length - prefix.len());
-            for source in [
-                format!("PREFIX={prefix}\n:0\nmaildir:${{PREFIX}}{suffix}\n"),
-                format!("PREFIX={prefix}\n:0 :${{PREFIX}}{suffix}\nmaildir:target\n"),
-            ] {
-                let result = parse(&source).unwrap().expand();
-                if length <= MAX_PATH_EXPRESSION_LEN {
-                    let config = result.unwrap();
-                    let Statement::Recipe(recipe) = &config.statements[1] else {
-                        panic!("expected recipe");
-                    };
-                    let resolved = resolved_destination(&config, 1);
-                    let actual = recipe.lock.as_deref().unwrap_or_else(|| resolved.path());
-                    assert_eq!(actual.len(), length);
-                } else {
-                    let error = result.unwrap_err();
-                    assert!(matches!(error.line, 2 | 3));
-                    assert_eq!(
-                        error.message,
-                        format!(
-                            "expanded value exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes"
-                        )
-                    );
-                }
+            let source = format!("PREFIX={prefix}\n:0\nmaildir:${{PREFIX}}{suffix}\n");
+            let result = parse(&source).unwrap().expand();
+            if length <= MAX_PATH_EXPRESSION_LEN {
+                let config = result.unwrap();
+                let resolved = resolved_destination(&config, 1);
+                assert_eq!(resolved.path().len(), length);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.line, 3);
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "expanded value exceeds the hard limit of {MAX_PATH_EXPRESSION_LEN} bytes"
+                    )
+                );
             }
         }
     }

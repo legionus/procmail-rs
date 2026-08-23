@@ -1458,6 +1458,35 @@ fn invalid_configuration_does_not_consume_stdin() {
 }
 
 #[test]
+fn local_recipe_lockfiles_are_rejected_before_stdin() {
+    for rules in [
+        ":0 :selected.lock\nmaildir:selected\n",
+        ":0 :\nmaildir:selected\n",
+    ] {
+        let config = config_file(rules);
+        let input_path = config.parent().unwrap().join("message.eml");
+        fs::write(&input_path, b"Subject: must remain unread\n\nbody").unwrap();
+        let mut input = fs::File::open(&input_path).unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(78));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("rules.rc:line 1: local recipe lockfiles are not supported yet"),
+            "{stderr}"
+        );
+        assert_eq!(input.stream_position().unwrap(), 0);
+        fs::remove_dir_all(config.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
 fn filesystem_ignore_write_error_is_rejected_before_stdin() {
     for destination in ["mbox:target", "maildir:target"] {
         let rules = format!(":0 i\n{destination}\n");
