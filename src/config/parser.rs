@@ -1266,6 +1266,29 @@ mod tests {
     }
 
     #[test]
+    fn repeated_linebuf_assignments_apply_to_following_lines() {
+        let accepted_after_raise = format!(
+            "LINEBUF={MIN_LINEBUF}\nLINEBUF={}\n#{}\n",
+            MIN_LINEBUF + 1,
+            "x".repeat(MIN_LINEBUF - 1)
+        );
+        assert!(parse(&accepted_after_raise).is_ok());
+
+        let rejected_after_lowering = format!(
+            "LINEBUF={}\n#{}\nLINEBUF={MIN_LINEBUF}\n#{}\n",
+            MIN_LINEBUF + 1,
+            "x".repeat(MIN_LINEBUF - 1),
+            "x".repeat(MIN_LINEBUF)
+        );
+        let error = parse(&rejected_after_lowering).unwrap_err();
+        assert_eq!(error.line, 4);
+        assert_eq!(
+            error.message,
+            format!("rc line exceeds the active LINEBUF limit of {MIN_LINEBUF} bytes")
+        );
+    }
+
+    #[test]
     fn every_structural_limit_rejects_the_next_matching_item() {
         let cases = [
             (
