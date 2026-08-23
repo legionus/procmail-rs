@@ -118,6 +118,7 @@ pub enum VariablePolicy {
     RcOnly(AssignmentTarget),
     RcOrCommandLine(AssignmentTarget),
     RuntimeOnly,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +154,11 @@ impl SuppliedVariable {
             ));
         }
         let policy = variable_policy(name);
+        if policy == VariablePolicy::Unsupported {
+            return Err(SuppliedVariableError::new(format!(
+                "procmail variable {name} is not supported"
+            )));
+        }
         if !policy.allows(VariableSource::CommandLine) {
             return Err(SuppliedVariableError::new(format!(
                 "variable {name} cannot be supplied with --set"
@@ -294,6 +300,8 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LIMIT_RECIPE_NESTING" => {
             VariablePolicy::RcOnly(AssignmentTarget::RcLimit(RcLimitVariable::NestingDepth))
         }
+        "DEFAULT" | "ORGMAIL" | "COMSAT" | "LOGABSTRACT" | "MSGPREFIX" | "NORESRETRY"
+        | "SUSPEND" | "SENDMAIL" | "SENDMAILFLAGS" | "SHIFT" => VariablePolicy::Unsupported,
         _ => VariablePolicy::RcOrCommandLine(AssignmentTarget::User),
     }
 }
@@ -394,6 +402,20 @@ mod tests {
         assert_eq!(
             variable_policy("PATH").assignment_target(VariableSource::RcFile),
             Some(AssignmentTarget::Path)
+        );
+        assert_eq!(variable_policy("DEFAULT"), VariablePolicy::Unsupported);
+        assert_eq!(
+            variable_policy("USER_VALUE"),
+            VariablePolicy::RcOrCommandLine(AssignmentTarget::User)
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_procmail_variables_from_command_line() {
+        let error = SuppliedVariable::parse("DEFAULT=mailbox".to_owned()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "procmail variable DEFAULT is not supported"
         );
     }
 

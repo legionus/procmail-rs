@@ -10,7 +10,7 @@ use super::{
     MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE,
     MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression, PipeAction, RcFileExpression,
     RcLimits, RcParseCounts, RcParseState, Recipe, RecipeAction, RecipeOptions, RegexCondition,
-    Statement, VariableSource, WriteErrorMode, variable_policy,
+    Statement, VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
 };
 
 #[cfg(test)]
@@ -297,7 +297,14 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
             format!("assignment value exceeds the hard limit of {MAX_ASSIGNMENT_VALUE_LEN} bytes"),
         ));
     }
-    let target = variable_policy(name)
+    let policy = variable_policy(name);
+    if policy == VariablePolicy::Unsupported {
+        return Err(ParseError::new(
+            line_number,
+            format!("procmail variable {name} is not supported"),
+        ));
+    }
+    let target = policy
         .assignment_target(VariableSource::RcFile)
         .ok_or_else(|| {
             ParseError::new(
@@ -1177,6 +1184,31 @@ mod tests {
         };
 
         assert_eq!(assignment.target, crate::config::AssignmentTarget::User);
+    }
+
+    #[test]
+    fn rejects_known_unsupported_procmail_variables() {
+        for name in [
+            "DEFAULT",
+            "ORGMAIL",
+            "COMSAT",
+            "LOGABSTRACT",
+            "MSGPREFIX",
+            "NORESRETRY",
+            "SUSPEND",
+            "SENDMAIL",
+            "SENDMAILFLAGS",
+            "SHIFT",
+        ] {
+            let error = parse(&format!("{name}=value\n")).unwrap_err();
+            assert_eq!(error.line, 1, "{name}");
+            assert_eq!(
+                error.message,
+                format!("procmail variable {name} is not supported")
+            );
+        }
+
+        assert!(parse("USER_VARIABLE=value\n").is_ok());
     }
 
     #[test]

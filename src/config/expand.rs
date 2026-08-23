@@ -1082,6 +1082,12 @@ fn parse_expression_until(
             }
             (input[name_start..*index].to_owned(), None)
         };
+        if variable_policy(&name) == VariablePolicy::Unsupported {
+            return Err(ExpansionError::new(
+                line,
+                format!("procmail variable {name} is not supported"),
+            ));
+        }
         parts.push(ExpansionPart::Variable { name, default });
         literal_start = *index;
     }
@@ -1385,6 +1391,19 @@ mod tests {
     fn rejects_unsupported_and_malformed_references() {
         for source in ["A=$$\n", "A=${NAME:=value}\n", "A=${NAME\n", "A=$\n"] {
             assert!(parse(source).unwrap().expand().is_err(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_procmail_variables_inside_expansions() {
+        for value in ["$DEFAULT", "${ORGMAIL}", "${SENDMAIL:-/usr/sbin/sendmail}"] {
+            let error = parse(&format!("VALUE={value}\n"))
+                .unwrap()
+                .expand()
+                .unwrap_err();
+            assert_eq!(error.line, 1);
+            assert!(error.message.contains("procmail variable"), "{value}");
+            assert!(error.message.contains("is not supported"), "{value}");
         }
     }
 
