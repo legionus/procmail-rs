@@ -94,19 +94,41 @@ impl LocalLock {
         expected_uid: u32,
         timeout: Duration,
     ) -> io::Result<Self> {
+        Self::acquire_with_mask(path, method, expected_uid, timeout, 0)
+    }
+
+    pub fn acquire_with_mask(
+        path: &Path,
+        method: LockMethod,
+        expected_uid: u32,
+        timeout: Duration,
+        mask: u32,
+    ) -> io::Result<Self> {
         let retry = match method {
             LockMethod::Flock => FLOCK_RETRY,
             LockMethod::Dotlock => DOTLOCK_RETRY,
         };
-        Self::acquire_with_policy(path, method, expected_uid, timeout, retry)
+        Self::acquire_with_policy_and_mask(path, method, expected_uid, timeout, retry, mask)
     }
 
+    #[cfg(test)]
     fn acquire_with_policy(
         path: &Path,
         method: LockMethod,
         expected_uid: u32,
         timeout: Duration,
         retry: Duration,
+    ) -> io::Result<Self> {
+        Self::acquire_with_policy_and_mask(path, method, expected_uid, timeout, retry, 0)
+    }
+
+    fn acquire_with_policy_and_mask(
+        path: &Path,
+        method: LockMethod,
+        expected_uid: u32,
+        timeout: Duration,
+        retry: Duration,
+        mask: u32,
     ) -> io::Result<Self> {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(
@@ -117,8 +139,8 @@ impl LocalLock {
         let parent_path = path.parent().unwrap_or_else(|| Path::new("."));
         let parent = open_directory_path(parent_path)?;
         match method {
-            LockMethod::Flock => acquire_flock(parent, name, expected_uid, timeout, retry),
-            LockMethod::Dotlock => acquire_dotlock(parent, name, timeout, retry),
+            LockMethod::Flock => acquire_flock(parent, name, expected_uid, timeout, retry, mask),
+            LockMethod::Dotlock => acquire_dotlock(parent, name, timeout, retry, mask),
         }
     }
 }
@@ -129,12 +151,13 @@ fn acquire_flock(
     expected_uid: u32,
     timeout: Duration,
     retry: Duration,
+    mask: u32,
 ) -> io::Result<LocalLock> {
     let file = openat(
         &parent,
         name.as_bytes(),
         OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::from_raw_mode(LOCK_FILE_MODE),
+        Mode::from_raw_mode(LOCK_FILE_MODE & !mask),
     )
     .map_err(io_error)?;
     let stat = fstat(&file).map_err(io_error)?;
@@ -186,6 +209,7 @@ fn acquire_dotlock(
     name: &OsStr,
     timeout: Duration,
     retry: Duration,
+    mask: u32,
 ) -> io::Result<LocalLock> {
     let started = Instant::now();
     loop {
@@ -193,7 +217,7 @@ fn acquire_dotlock(
             &parent,
             name.as_bytes(),
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::from_raw_mode(DOTLOCK_FILE_MODE),
+            Mode::from_raw_mode(DOTLOCK_FILE_MODE & !mask),
         ) {
             Ok(file) => {
                 drop(file);
@@ -438,6 +462,24 @@ mod tests {
         let error =
             LocalLock::acquire(&broad, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn creation_mask_can_only_remove_lockfile_permissions() {
+        let directory = temporary_directory("creation-mask");
+        let uid = fs::metadata(&directory).unwrap().uid();
+        for (method, name) in [
+            (LockMethod::Flock, "flock"),
+            (LockMethod::Dotlock, "dotlock"),
+        ] {
+            let path = directory.join(name);
+            let lock =
+                LocalLock::acquire_with_mask(&path, method, uid, DEFAULT_LOCK_TIMEOUT, 0o777)
+                    .unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0);
+            drop(lock);
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -229,6 +229,14 @@ values from 1 through 86400. Unlike original procmail, zero is rejected
 because it requests an unbounded wait. Changes apply only to following lock
 attempts; they do not shorten a wait that has already begun.
 
+`UMASK` defaults to octal `077` and accepts octal values from `0000` through
+`0777`. It applies in rc statement order to newly created Maildir messages,
+mbox files, local lockfiles, and `LOGFILE`. The value is combined with each
+backend's restrictive requested mode, so it can remove owner permissions but
+cannot grant group or other access. Existing files and private staging files
+are not chmodded. procmail-rs does not change the process-wide umask; the
+ambient process umask may therefore remove additional permissions.
+
 `LINEBUF` defaults to 2048 bytes and accepts literal decimal values from 128
 through 1048576. It bounds each following physical rc line, a continued pipe
 command as a whole, and values produced by procmail-rs expansion. Existing

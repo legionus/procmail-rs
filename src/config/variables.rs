@@ -9,6 +9,19 @@ pub const MAX_COMMAND_LINE_VARIABLES: usize = 256;
 pub const MAX_LOCK_TIMEOUT_SECONDS: u64 = 86_400;
 pub const MAX_PROCESS_TIMEOUT_SECONDS: u64 = 86_400;
 
+pub fn parse_umask(value: &str) -> Result<u32, String> {
+    if value.is_empty() || value.len() > 4 || !value.bytes().all(|byte| matches!(byte, b'0'..=b'7'))
+    {
+        return Err("UMASK must be an octal integer from 0000 to 0777".to_owned());
+    }
+    let mask = u32::from_str_radix(value, 8)
+        .map_err(|_| "UMASK must be an octal integer from 0000 to 0777".to_owned())?;
+    if mask > 0o777 {
+        return Err("UMASK must be an octal integer from 0000 to 0777".to_owned());
+    }
+    Ok(mask)
+}
+
 pub fn validate_lock_method(value: &str) -> Result<(), String> {
     match value {
         "flock" | "dotlock" => Ok(()),
@@ -72,6 +85,7 @@ pub enum AssignmentTarget {
     LockTimeout,
     LineBuf,
     ProcessTimeout,
+    Umask,
     Shell,
     ShellFlags,
     Path,
@@ -221,6 +235,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LOCKTIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::LockTimeout),
         "LINEBUF" => VariablePolicy::RcOnly(AssignmentTarget::LineBuf),
         "TIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::ProcessTimeout),
+        "UMASK" => VariablePolicy::RcOnly(AssignmentTarget::Umask),
         "SHELL" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Shell),
         "SHELLFLAGS" => VariablePolicy::RcOrCommandLine(AssignmentTarget::ShellFlags),
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
@@ -288,6 +303,7 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
         | AssignmentTarget::LockTimeout
         | AssignmentTarget::LineBuf
         | AssignmentTarget::ProcessTimeout
+        | AssignmentTarget::Umask
         | AssignmentTarget::ExitCode
         | AssignmentTarget::Host
         | AssignmentTarget::MessageLimit(_)
@@ -437,6 +453,32 @@ mod tests {
                     "--set {name} value exceeds the hard limit of {MAX_SHELL_SETTING_LEN} bytes"
                 )
             );
+        }
+    }
+
+    #[test]
+    fn parses_umask_at_accepted_boundaries() {
+        for (value, expected) in [
+            ("0", 0),
+            ("0000", 0),
+            ("077", 0o077),
+            ("0776", 0o776),
+            ("0777", 0o777),
+        ] {
+            assert_eq!(parse_umask(value).unwrap(), expected);
+        }
+        for value in [
+            "",
+            "00000",
+            "8",
+            "078",
+            "1000",
+            "777777777777777777777777",
+            "-1",
+            "0o77",
+            " 077",
+        ] {
+            assert!(parse_umask(value).is_err(), "{value:?}");
         }
     }
 }

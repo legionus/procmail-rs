@@ -66,6 +66,7 @@ impl Assignment {
             AssignmentTarget::ProcessTimeout => {
                 super::parse_process_timeout_seconds(&value).map(drop)
             }
+            AssignmentTarget::Umask => super::parse_umask(&value).map(drop),
             _ => Ok(()),
         }
         .map_err(|message| ExpansionError::new(self.line, message))?;
@@ -513,6 +514,7 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::LockTimeout
                         | AssignmentTarget::LineBuf
                         | AssignmentTarget::ProcessTimeout
+                        | AssignmentTarget::Umask
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,
@@ -536,6 +538,20 @@ fn prepare_runtime_statements(
                         0,
                     )?;
                     super::parse_process_timeout_seconds(&value.text)
+                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
+                }
+                if assignment.target == AssignmentTarget::Umask
+                    && !expression_needs_runtime(&expression, known)
+                    && !expression_references_any(&expression, dynamic)
+                {
+                    let value = evaluate_config_expression(
+                        &expression,
+                        assignment.line,
+                        assignment_value_limit(assignment.target),
+                        known,
+                        0,
+                    )?;
+                    super::parse_umask(&value.text)
                         .map_err(|message| ExpansionError::new(assignment.line, message))?;
                 }
                 assignment.expansion = Some(expression);

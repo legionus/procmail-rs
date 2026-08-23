@@ -122,6 +122,10 @@ impl std::error::Error for PostmarkError {}
 
 impl MboxFile {
     pub fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_mask(path, 0)
+    }
+
+    pub fn open_with_mask(path: &Path, mask: u32) -> io::Result<Self> {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "mbox path has no file name")
         })?;
@@ -131,7 +135,7 @@ impl MboxFile {
             &parent,
             name.as_bytes(),
             OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::from_raw_mode(MBOX_FILE_MODE),
+            Mode::from_raw_mode(MBOX_FILE_MODE & !mask),
         )
         .map_err(io_error)?;
         let stat = fstat(&fd).map_err(io_error)?;

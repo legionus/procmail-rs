@@ -455,6 +455,7 @@ pub struct PlannedDelivery {
     continuation: DeliveryContinuation,
     output_ending: OutputEnding,
     lock: Option<String>,
+    umask: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,6 +507,10 @@ impl PlannedDelivery {
 
     pub fn lock(&self) -> Option<&str> {
         self.lock.as_deref()
+    }
+
+    pub fn umask(&self) -> &str {
+        &self.umask
     }
 }
 
@@ -1929,6 +1934,7 @@ impl CompiledNode {
             },
             output_ending: *output_ending,
             lock,
+            umask: runtime.get("UMASK").unwrap_or("077").to_owned(),
         });
         execution.original_delivered |= !copy;
         if copy || has_error_handler {

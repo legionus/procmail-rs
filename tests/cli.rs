@@ -1425,6 +1425,59 @@ fn check_rejects_invalid_message_limit() {
 }
 
 #[test]
+fn umask_is_bound_to_each_selected_delivery_in_statement_order() {
+    let config = config_file("");
+    let directory = config.parent().unwrap();
+    let maildir = directory.join("selected");
+    let mailbox = directory.join("copy.mbox");
+    create_maildir(&maildir);
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nUMASK=0777\n:0 c\nmbox:{}\nUMASK=0000\n:0\nmaildir:{}/\n",
+            directory.display(),
+            mailbox.display(),
+            maildir.display()
+        ),
+    )
+    .unwrap();
+    let message = b"Subject: permissions\n\nbody\n";
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(message)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::metadata(&mailbox).unwrap().permissions().mode() & 0o777,
+        0
+    );
+    let entries = fs::read_dir(maildir.join("new"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(fs::read(entries[0].path()).unwrap(), message);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn invalid_configuration_does_not_consume_stdin() {
     for rules in [
         ":0\n| unsupported\n",
@@ -1445,6 +1498,10 @@ fn invalid_configuration_does_not_consume_stdin() {
         "TIMEOUT=86401\n:0\nmaildir:inbox\n",
         "TIMEOUT=invalid\n:0\nmaildir:inbox\n",
         ":0\n{\nTIMEOUT=0\n:0\nmaildir:inbox\n}\n",
+        "UMASK=\n:0\nmaildir:inbox\n",
+        "UMASK=078\n:0\nmaildir:inbox\n",
+        "UMASK=1000\n:0\nmaildir:inbox\n",
+        ":0\n{\nUMASK=invalid\n:0\nmaildir:inbox\n}\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");

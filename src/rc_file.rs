@@ -417,6 +417,7 @@ fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &st
                         | AssignmentTarget::LockTimeout
                         | AssignmentTarget::LineBuf
                         | AssignmentTarget::ProcessTimeout
+                        | AssignmentTarget::Umask
                         | AssignmentTarget::RcLimit(_)
                 ) =>
             {

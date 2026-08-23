@@ -238,7 +238,8 @@ mod tests {
         assert_eq!(environment.get("SHELLFLAGS"), Some(DEFAULT_SHELL_FLAGS));
         assert_eq!(environment.get("LINEBUF"), Some("2048"));
         assert_eq!(environment.get("TIMEOUT"), Some("960"));
-        assert_eq!(environment.values().count(), 6);
+        assert_eq!(environment.get("UMASK"), Some("077"));
+        assert_eq!(environment.values().count(), 7);
     }
 
     #[test]

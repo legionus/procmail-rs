@@ -76,6 +76,14 @@ impl MaildirSink {
     }
 
     pub fn create_with_durability(path: &Path, durability: Durability) -> io::Result<Self> {
+        Self::create_with_durability_and_mask(path, durability, 0)
+    }
+
+    pub fn create_with_durability_and_mask(
+        path: &Path,
+        durability: Durability,
+        mask: u32,
+    ) -> io::Result<Self> {
         let maildir = open_directory_path(path)?;
 
         // Validate all three standard components before creating a pending
@@ -87,7 +95,7 @@ impl MaildirSink {
         let new_dir = open_directory_at(&maildir, OsStr::new("new"))?;
         let _cur_dir = open_directory_at(&maildir, OsStr::new("cur"))?;
 
-        let file = create_unnamed_pending_file(&tmp_dir)?;
+        let file = create_unnamed_pending_file(&tmp_dir, mask)?;
         Ok(Self {
             file,
             tmp_dir,
@@ -98,7 +106,7 @@ impl MaildirSink {
     }
 }
 
-fn create_unnamed_pending_file(dir: &OwnedFd) -> io::Result<OwnedFd> {
+fn create_unnamed_pending_file(dir: &OwnedFd, mask: u32) -> io::Result<OwnedFd> {
     // Keeping the inode unnamed until commit makes abort a close-only
     // operation. No directory entry needs deletion when validation or a write
     // fails, so another process cannot substitute a victim for cleanup.
@@ -106,7 +114,7 @@ fn create_unnamed_pending_file(dir: &OwnedFd) -> io::Result<OwnedFd> {
         dir,
         ".",
         OFlags::WRONLY | OFlags::TMPFILE | OFlags::CLOEXEC,
-        Mode::from_raw_mode(MAILDIR_FILE_MODE),
+        Mode::from_raw_mode(MAILDIR_FILE_MODE & !mask),
     )
     .map_err(io_error)
 }
@@ -393,7 +401,7 @@ mod tests {
         fs::write(&path, b"owned by another delivery").unwrap();
         let tmp_dir = open_directory_path(&maildir.path().join("tmp")).unwrap();
 
-        let file = create_unnamed_pending_file(&tmp_dir).unwrap();
+        let file = create_unnamed_pending_file(&tmp_dir, 0).unwrap();
         let error = link_unique_pending_file(&file, &tmp_dir, || Ok(name.clone())).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(path).unwrap(), b"owned by another delivery");
@@ -409,7 +417,7 @@ mod tests {
         let tmp_dir = open_directory_path(&tmp_path).unwrap();
         let mut attempts = 0u64;
 
-        let file = create_unnamed_pending_file(&tmp_dir).unwrap();
+        let file = create_unnamed_pending_file(&tmp_dir, 0).unwrap();
         let name = link_unique_pending_file(&file, &tmp_dir, || {
             attempts += 1;
             Ok(if attempts < MAX_NAME_ATTEMPTS {
@@ -434,7 +442,7 @@ mod tests {
         let tmp_dir = open_directory_path(&tmp_path).unwrap();
         let mut attempts = 0u64;
 
-        let file = create_unnamed_pending_file(&tmp_dir).unwrap();
+        let file = create_unnamed_pending_file(&tmp_dir, 0).unwrap();
         let error = link_unique_pending_file(&file, &tmp_dir, || {
             attempts += 1;
             Ok(occupied.to_owned())
@@ -562,7 +570,7 @@ mod tests {
         let maildir = TestMaildir::create();
         let tmp_dir = open_directory_path(&maildir.path().join("tmp")).unwrap();
         let new_dir = open_directory_path(&maildir.path().join("new")).unwrap();
-        let file = create_unnamed_pending_file(&tmp_dir).unwrap();
+        let file = create_unnamed_pending_file(&tmp_dir, 0).unwrap();
         let name = "procmail-rs.collision";
         linkat(&file, "", &tmp_dir, name, AtFlags::EMPTY_PATH).unwrap();
         fs::write(maildir.path().join("new").join(name), b"existing").unwrap();

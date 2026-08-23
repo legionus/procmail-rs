@@ -16,12 +16,27 @@ pub use variables::{
     AssignmentTarget, MAX_COMMAND_LINE_VARIABLES, MAX_LOCK_TIMEOUT_SECONDS,
     MAX_PROCESS_TIMEOUT_SECONDS, MessageLimitVariable, RcLimitVariable, SuppliedVariable,
     SuppliedVariableError, VariablePolicy, VariableSource, assignment_value_limit,
-    parse_lock_timeout_seconds, parse_process_timeout_seconds, validate_lock_method,
+    parse_lock_timeout_seconds, parse_process_timeout_seconds, parse_umask, validate_lock_method,
     variable_policy,
 };
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;
 pub const MAX_ASSIGNMENT_VALUE_LEN: usize = 64 * 1024;
+
+pub fn umask_from_config(config: &Config) -> Result<u32, String> {
+    let mut mask = parse_umask("077")?;
+    for statement in &config.statements {
+        let Statement::Assignment(assignment) = statement else {
+            continue;
+        };
+        if assignment.target != AssignmentTarget::Umask {
+            continue;
+        }
+        mask = parse_umask(&assignment.value)
+            .map_err(|message| format!("line {}: {message}", assignment.line))?;
+    }
+    Ok(mask)
+}
 pub const MAX_SHELL_SETTING_LEN: usize = 4096;
 pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
 pub const MAX_EXPANSION_DEPTH: usize = 32;
