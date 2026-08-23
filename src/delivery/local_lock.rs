@@ -191,9 +191,24 @@ pub(super) fn acquire_flock_fd(
     retry: Duration,
     timeout_message: &'static str,
 ) -> io::Result<()> {
+    acquire_flock_fd_with(file, timeout, retry, timeout_message, |file| {
+        flock(file, FlockOperation::NonBlockingLockExclusive)
+    })
+}
+
+fn acquire_flock_fd_with(
+    file: &OwnedFd,
+    timeout: Duration,
+    retry: Duration,
+    timeout_message: &'static str,
+    mut try_lock: impl FnMut(&OwnedFd) -> rustix::io::Result<()>,
+) -> io::Result<()> {
+    // Route every attempt through one operation so tests can distinguish a
+    // terminal kernel error from the retryable EINTR and EAGAIN cases. The
+    // production caller supplies the nonblocking exclusive flock operation.
     let started = Instant::now();
     loop {
-        match flock(file, FlockOperation::NonBlockingLockExclusive) {
+        match try_lock(file) {
             Ok(()) => return Ok(()),
             Err(rustix::io::Errno::INTR) => continue,
             Err(rustix::io::Errno::AGAIN) => {
@@ -462,6 +477,39 @@ mod tests {
         let error =
             LocalLock::acquire(&broad, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn injected_flock_error_is_returned_without_retrying() {
+        let directory = temporary_directory("injected-flock");
+        let parent = open_directory_path(&directory).unwrap();
+        let file = openat(
+            &parent,
+            "lock",
+            OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC,
+            Mode::from_raw_mode(LOCK_FILE_MODE),
+        )
+        .unwrap();
+        let mut attempts = 0usize;
+
+        let error = acquire_flock_fd_with(
+            &file,
+            Duration::ZERO,
+            Duration::ZERO,
+            "injected timeout",
+            |_| {
+                attempts += 1;
+                Err(rustix::io::Errno::IO)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts, 1);
+        assert_eq!(
+            error.raw_os_error(),
+            Some(rustix::io::Errno::IO.raw_os_error())
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

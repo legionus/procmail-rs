@@ -214,8 +214,24 @@ impl LockedMbox {
         self,
         durability: Durability,
         write: impl FnOnce(&OwnedFd) -> io::Result<()>,
-        sync: impl Fn(&OwnedFd) -> io::Result<()>,
+        sync: impl FnMut(&OwnedFd) -> io::Result<()>,
     ) -> Result<PublishedDelivery, MboxAppendError> {
+        self.append_with_operations(durability, write, sync, |file, length| {
+            ftruncate(file, length).map_err(io_error)
+        })
+    }
+
+    fn append_with_operations(
+        self,
+        durability: Durability,
+        write: impl FnOnce(&OwnedFd) -> io::Result<()>,
+        mut sync: impl FnMut(&OwnedFd) -> io::Result<()>,
+        mut truncate: impl FnMut(&OwnedFd, u64) -> io::Result<()>,
+    ) -> Result<PublishedDelivery, MboxAppendError> {
+        // Use the same append and recovery sequence for real syscalls and
+        // injected failures. This lets tests prove that a failed recovery is
+        // reported separately without maintaining a test-only copy of the
+        // mailbox state transitions.
         let original_len = seek(&self.file, SeekFrom::End(0))
             .map_err(|error| MboxAppendError::before_publication(io_error(error), None))?;
 
@@ -227,7 +243,14 @@ impl LockedMbox {
             Durability::File | Durability::Full => sync(&self.file),
         });
         if let Err(source) = operation {
-            let rollback = rollback(&self.file, original_len, durability).err();
+            let rollback = rollback_with(
+                &self.file,
+                original_len,
+                durability,
+                &mut truncate,
+                &mut sync,
+            )
+            .err();
             let _unlock = flock(&self.file, FlockOperation::Unlock);
             return Err(MboxAppendError::before_publication(source, rollback));
         }
@@ -235,7 +258,14 @@ impl LockedMbox {
         if durability == Durability::Full
             && let Err(source) = sync(&self.parent)
         {
-            let rollback = rollback(&self.file, original_len, durability).err();
+            let rollback = rollback_with(
+                &self.file,
+                original_len,
+                durability,
+                &mut truncate,
+                &mut sync,
+            )
+            .err();
             let _unlock = flock(&self.file, FlockOperation::Unlock);
             return Err(MboxAppendError::before_publication(source, rollback));
         }
@@ -363,11 +393,17 @@ impl Write for FdWriter<'_> {
     }
 }
 
-fn rollback(file: &OwnedFd, original_len: u64, durability: Durability) -> io::Result<()> {
-    ftruncate(file, original_len).map_err(io_error)?;
+fn rollback_with(
+    file: &OwnedFd,
+    original_len: u64,
+    durability: Durability,
+    truncate: &mut impl FnMut(&OwnedFd, u64) -> io::Result<()>,
+    sync: &mut impl FnMut(&OwnedFd) -> io::Result<()>,
+) -> io::Result<()> {
+    truncate(file, original_len)?;
     seek(file, SeekFrom::End(0)).map_err(io_error)?;
     if durability != Durability::None {
-        fsync(file).map_err(io_error)?;
+        sync(file)?;
     }
     Ok(())
 }
@@ -606,6 +642,7 @@ mod tests {
         fs::write(&mailbox, b"existing").unwrap();
         let locked = MboxFile::open(&mailbox).unwrap().lock().unwrap();
 
+        let mut sync_calls = 0usize;
         let error = locked
             .append_with_sync(
                 Durability::File,
@@ -613,13 +650,46 @@ mod tests {
                     rustix::io::write(file, b"complete-record").map_err(super::io_error)?;
                     Ok(())
                 },
-                |_| Err(io::Error::other("injected sync failure")),
+                |_| {
+                    sync_calls += 1;
+                    if sync_calls == 1 {
+                        Err(io::Error::other("injected sync failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
             )
             .unwrap_err();
 
         assert!(!error.published());
         assert!(!error.rollback_failed());
         assert_eq!(fs::read(&mailbox).unwrap(), b"existing");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn truncate_failure_reports_failed_rollback_and_preserves_partial_bytes() {
+        let directory = temporary_path("truncate-failure");
+        fs::create_dir(&directory).unwrap();
+        let mailbox = directory.join("mailbox");
+        fs::write(&mailbox, b"existing").unwrap();
+        let locked = MboxFile::open(&mailbox).unwrap().lock().unwrap();
+
+        let error = locked
+            .append_with_operations(
+                Durability::None,
+                |file| {
+                    rustix::io::write(file, b"partial").map_err(super::io_error)?;
+                    Err(io::Error::other("injected write failure"))
+                },
+                |_| Ok(()),
+                |_, _| Err(io::Error::other("injected truncate failure")),
+            )
+            .unwrap_err();
+
+        assert!(!error.published());
+        assert!(error.rollback_failed());
+        assert_eq!(fs::read(&mailbox).unwrap(), b"existingpartial");
         fs::remove_dir_all(directory).unwrap();
     }
 

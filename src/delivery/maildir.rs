@@ -158,9 +158,26 @@ impl Write for MaildirSink {
 
 impl PendingSink for MaildirSink {
     fn commit(self: Box<Self>) -> Result<PublishedDelivery, SinkCommitError> {
+        (*self).commit_with(|file| fsync(file).map_err(io_error), publish_linked_file)
+    }
+
+    fn abort(self: Box<Self>) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl MaildirSink {
+    // Keep publication ordering in one path while allowing tests to fail the
+    // otherwise hard-to-reproduce sync and rename syscalls. The supplied
+    // operations must have the same success effects as fsync and the
+    // descriptor-relative tmp-to-new rename used by production.
+    fn commit_with(
+        self,
+        mut sync: impl FnMut(&OwnedFd) -> io::Result<()>,
+        rename: impl FnOnce(&OwnedFd, &OwnedFd, &str) -> io::Result<()>,
+    ) -> Result<PublishedDelivery, SinkCommitError> {
         if self.durability != Durability::None {
-            fsync(&self.file)
-                .map_err(|error| SinkCommitError::before_publication(io_error(error)))?;
+            sync(&self.file).map_err(SinkCommitError::before_publication)?;
         }
 
         let name = link_unique_pending_file(&self.file, &self.tmp_dir, unique_name)
@@ -170,16 +187,13 @@ impl PendingSink for MaildirSink {
         // either no entry or the complete file. A cross-mount layout fails
         // with EXDEV; falling back to copy-and-remove would expose partial
         // contents and is deliberately not attempted.
-        match publish_linked_file(&self.tmp_dir, &self.new_dir, &name) {
+        match rename(&self.tmp_dir, &self.new_dir, &name) {
             Ok(()) => {
                 let published = PublishedDelivery::new(self.maildir.join("new").join(&name));
                 if self.durability == Durability::Full {
                     for directory in [&self.tmp_dir, &self.new_dir] {
-                        if let Err(error) = fsync(directory) {
-                            return Err(SinkCommitError::after_publication(
-                                io_error(error),
-                                published,
-                            ));
+                        if let Err(error) = sync(directory) {
+                            return Err(SinkCommitError::after_publication(error, published));
                         }
                     }
                 }
@@ -187,10 +201,6 @@ impl PendingSink for MaildirSink {
             }
             Err(error) => Err(SinkCommitError::before_publication(error)),
         }
-    }
-
-    fn abort(self: Box<Self>) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -485,6 +495,98 @@ mod tests {
         PendingSink::abort(sink).unwrap();
         assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
         assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn injected_write_failure_never_creates_a_maildir_entry() {
+        let maildir = TestMaildir::create();
+        let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+        sink.file = openat(
+            CWD,
+            "/dev/full",
+            OFlags::WRONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+
+        let error = sink.write_all(b"message").unwrap_err();
+        assert_eq!(
+            error.raw_os_error(),
+            Some(rustix::io::Errno::NOSPC.raw_os_error())
+        );
+        PendingSink::abort(sink).unwrap();
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn injected_file_sync_failure_happens_before_maildir_publication() {
+        let maildir = TestMaildir::create();
+        let mut sink = Box::new(
+            MaildirSink::create_with_durability(maildir.path(), Durability::File).unwrap(),
+        );
+        sink.write_all(b"complete message").unwrap();
+
+        let error = (*sink)
+            .commit_with(
+                |_| Err(io::Error::other("injected file sync failure")),
+                publish_linked_file,
+            )
+            .unwrap_err();
+
+        assert!(error.published().is_none());
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn injected_rename_failure_does_not_publish_a_maildir_message() {
+        let maildir = TestMaildir::create();
+        let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+        sink.write_all(b"complete message").unwrap();
+
+        let error = (*sink)
+            .commit_with(
+                |_| Ok(()),
+                |_, _, _| Err(io::Error::other("injected rename failure")),
+            )
+            .unwrap_err();
+
+        assert!(error.published().is_none());
+        assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn injected_directory_sync_failure_reports_visible_maildir_message() {
+        let maildir = TestMaildir::create();
+        let mut sink = Box::new(
+            MaildirSink::create_with_durability(maildir.path(), Durability::Full).unwrap(),
+        );
+        sink.write_all(b"complete message").unwrap();
+        let mut sync_calls = 0usize;
+
+        let error = (*sink)
+            .commit_with(
+                |_| {
+                    sync_calls += 1;
+                    if sync_calls == 2 {
+                        Err(io::Error::other("injected directory sync failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                publish_linked_file,
+            )
+            .unwrap_err();
+
+        let published = error.published().unwrap();
+        assert_eq!(
+            fs::read(published.last_folder()).unwrap(),
+            b"complete message"
+        );
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 1);
     }
 
     #[test]
