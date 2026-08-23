@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+MAILDIR=$CASE
+TOKEN=yes
+TARGET=missing
+
+:0 fhw
+| sed 's/^Subject: External actions$/Subject: Header filtered/'
+
+:0 fbW
+| sed 's/^body old$/body filtered/'
+
+:0 W
+* ? test "$TOKEN" = yes
+{
+  TARGET=result
+}
+
+:0
+mbox:$OUT/$TARGET

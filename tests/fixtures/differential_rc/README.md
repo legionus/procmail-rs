@@ -17,3 +17,7 @@ the explicit `mbox:` backend always adds one. The maintained test therefore
 requires a generated `From MAILER-DAEMON` postmark and compares every byte
 after that line with `expected.delivery`. This is the only normalization made
 by these fixtures.
+
+The external-actions case also verifies that header-only and body-only filters
+replace only the selected area, waited filters preserve their successful
+output, and a program condition can select a runtime destination assignment.

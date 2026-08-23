@@ -2,10 +2,10 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use std::fmt;
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
-use crate::config::OutputEnding;
+use crate::config::{ActionInput, OutputEnding};
 use crate::environment::{ProcessEnvironment, ShellPolicy};
 use crate::external_filter::{ChildExit, FilterOutput, InputWrite};
 use crate::limits::MessageLimits;
@@ -78,6 +78,7 @@ pub fn run_filter(
     command: &str,
     input: &[u8],
     output_ending: OutputEnding,
+    action_input: ActionInput,
     limits: MessageLimits,
     stderr: Stdio,
 ) -> Result<FilterRun, ExternalProcessError> {
@@ -110,7 +111,15 @@ pub fn run_filter(
     let (input_write, output, status) = std::thread::scope(|scope| {
         let writer =
             scope.spawn(move || write_action_input(&mut child_stdin, input, output_ending));
-        let output = Message::read_from(&mut BufReader::new(child_stdout), limits);
+        // Body-only output has no header separator. Prefix a private separator
+        // while parsing stdout so arbitrary body bytes are governed by body
+        // limits instead of being mistaken for an unterminated header field.
+        let output = if action_input == ActionInput::Body {
+            let reader = std::io::Cursor::new(&b"\n"[..]).chain(child_stdout);
+            Message::read_from(&mut BufReader::new(reader), limits)
+        } else {
+            Message::read_from(&mut BufReader::new(child_stdout), limits)
+        };
         let status = child.wait();
         let input_write = writer.join();
         (input_write, output, status)
@@ -192,7 +201,7 @@ fn write_action_input(
     output_ending: OutputEnding,
 ) -> std::io::Result<()> {
     writer.write_all(input)?;
-    if output_ending == OutputEnding::Normalize && (input.len() < 2 || !input.ends_with(b"\n\n")) {
+    if output_ending == OutputEnding::Normalize && !input.ends_with(b"\n") {
         writer.write_all(b"\n")?;
     }
     Ok(())
@@ -241,9 +250,10 @@ mod tests {
         let run = run_filter(
             &policy,
             &environment,
-            "printf 'X-Token: %s\\n\\nbody' \"$TOKEN\"",
+            "cat >/dev/null; printf 'X-Token: %s\\n\\nbody' \"$TOKEN\"",
             b"ignored\n\n",
             OutputEnding::Preserve,
+            ActionInput::Message,
             MessageLimits::default(),
             Stdio::null(),
         )
@@ -269,6 +279,7 @@ mod tests {
             "cat",
             &input,
             OutputEnding::Preserve,
+            ActionInput::Message,
             MessageLimits::default(),
             Stdio::null(),
         )
@@ -290,6 +301,7 @@ mod tests {
             "printf 'Subject: ok\\n\\n'; printf 'filter diagnostic' >&2",
             b"",
             OutputEnding::Preserve,
+            ActionInput::Message,
             MessageLimits::default(),
             Stdio::from(file),
         )
@@ -309,6 +321,7 @@ mod tests {
             "printf 'Subject: failed\\n\\noutput'; exit 23",
             b"",
             OutputEnding::Preserve,
+            ActionInput::Message,
             MessageLimits::default(),
             Stdio::null(),
         )
@@ -334,6 +347,7 @@ mod tests {
             "printf '\\n1234'",
             b"",
             OutputEnding::Preserve,
+            ActionInput::Message,
             limits,
             Stdio::null(),
         )
@@ -363,6 +377,11 @@ mod tests {
                 &b"Subject: x\n\nbody\n\n"[..],
             ),
             (
+                &b"Subject: x\n\nbody\n"[..],
+                OutputEnding::Normalize,
+                &b"Subject: x\n\nbody\n"[..],
+            ),
+            (
                 &b"Subject: x\n\nbody"[..],
                 OutputEnding::Preserve,
                 &b"Subject: x\n\nbody"[..],
@@ -374,6 +393,7 @@ mod tests {
                 "cat",
                 input,
                 ending,
+                ActionInput::Message,
                 MessageLimits::default(),
                 Stdio::null(),
             )
@@ -391,6 +411,7 @@ mod tests {
             "exit 0",
             b"",
             OutputEnding::Preserve,
+            ActionInput::Message,
             MessageLimits::default(),
             Stdio::null(),
         )

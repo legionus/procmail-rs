@@ -23,8 +23,8 @@ use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{
     ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind, ExecutionPlan,
-    HeaderEvaluation, MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation,
-    PlannedDelivery,
+    ExternalActionInput, HeaderEvaluation, MappedMessageInput, MatchingMessage,
+    OrderedExecutionError, PlanExplanation, PlannedDelivery,
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
 use procmail_rs::external_process::{run_filter, run_program};
@@ -537,7 +537,7 @@ fn execute_external_action(
     limits: MessageLimits,
     command: &str,
     options: procmail_rs::config::RecipeOptions,
-    input: &[u8],
+    input: ExternalActionInput<'_>,
     runtime: &mut RuntimeVariables,
 ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
     let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
@@ -558,7 +558,7 @@ fn execute_external_action(
             &shell_policy,
             &environment,
             command,
-            input,
+            input.selected(),
             options.output_ending,
             stderr,
         )
@@ -589,8 +589,9 @@ fn execute_external_action(
         &shell_policy,
         &environment,
         command,
-        input,
+        input.selected(),
         options.output_ending,
+        options.action_input,
         limits,
         stderr,
     )
@@ -626,10 +627,22 @@ fn execute_external_action(
             "external filter did not complete successfully",
         ));
     }
-    Ok(Some(
-        run.into_output()
-            .expect("successful filter output was validated"),
-    ))
+    let output = run
+        .into_output()
+        .expect("successful filter output was validated");
+    let replacement = Message::from_filter_output(
+        input.header(),
+        input.body(),
+        &output,
+        options.action_input,
+        limits,
+    )
+    .map_err(|error| {
+        recoverable_external_error(format!(
+            "external filter returned an invalid replacement message: {error}"
+        ))
+    })?;
+    Ok(Some(replacement))
 }
 
 fn recoverable_external_error(

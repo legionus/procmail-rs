@@ -206,11 +206,32 @@ struct OrderedTreeExecution<'a, E, D, T> {
 type ExternalActionExecutor<'a, E, T> = dyn FnMut(
         &PipeAction,
         RecipeOptions,
-        &[u8],
+        ExternalActionInput<'_>,
         &mut RuntimeVariables,
         &mut T,
     ) -> Result<Option<Message>, DeliveryAttemptError<E>>
     + 'a;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExternalActionInput<'a> {
+    selected: &'a [u8],
+    header: &'a [u8],
+    body: &'a [u8],
+}
+
+impl ExternalActionInput<'_> {
+    pub fn selected(&self) -> &[u8] {
+        self.selected
+    }
+
+    pub fn header(&self) -> &[u8] {
+        self.header
+    }
+
+    pub fn body(&self) -> &[u8] {
+        self.body
+    }
+}
 
 type ExternalConditionExecutor<'a, E, T> = dyn FnMut(&str, &[u8], &mut RuntimeVariables, &mut T) -> Result<bool, DeliveryAttemptError<E>>
     + 'a;
@@ -1635,7 +1656,9 @@ impl CompiledNode {
     {
         match &self.action {
             CompiledAction::Pipe { action, options } => {
-                let input = current_ordered_message(context.message, context.replacement.as_ref())
+                let message =
+                    current_ordered_message(context.message, context.replacement.as_ref());
+                let input = message
                     .action_input(options.action_input)
                     .ok_or(EvalError::BodyWasNotBuffered)
                     .map_err(OrderedExecutionError::Evaluation)?;
@@ -1649,7 +1672,21 @@ impl CompiledNode {
                 // completed and validated all output. Only an accepted filter
                 // result replaces the owned current version used by later
                 // recipes in this sequence.
-                match external(action, *options, input, context.runtime, context.trace) {
+                let action_input = ExternalActionInput {
+                    selected: input,
+                    header: message.raw_header(),
+                    body: message
+                        .body()
+                        .ok_or(EvalError::BodyWasNotBuffered)
+                        .map_err(OrderedExecutionError::Evaluation)?,
+                };
+                match external(
+                    action,
+                    *options,
+                    action_input,
+                    context.runtime,
+                    context.trace,
+                ) {
                     Ok(replacement) => {
                         context.pending_error = None;
                         if options.action_mode == crate::config::ActionMode::Filter {
@@ -2457,7 +2494,7 @@ impl ExecutionPlan {
         X: FnMut(
             &PipeAction,
             RecipeOptions,
-            &[u8],
+            ExternalActionInput<'_>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
@@ -2491,7 +2528,7 @@ impl ExecutionPlan {
         X: FnMut(
             &PipeAction,
             RecipeOptions,
-            &[u8],
+            ExternalActionInput<'_>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
@@ -4096,7 +4133,7 @@ mod tests {
                     external_calls += 1;
                     assert_eq!(action.command, "rewrite");
                     assert_eq!(options.action_mode, crate::config::ActionMode::Filter);
-                    assert_eq!(input, original);
+                    assert_eq!(input.selected(), original);
                     Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(
                         replacement.to_vec(),
                     )))
@@ -4169,7 +4206,7 @@ mod tests {
                     Ok::<_, DeliveryAttemptError<&str>>(())
                 },
                 &mut |_, _, input, _, _| {
-                    assert_eq!(input, original);
+                    assert_eq!(input.selected(), original);
                     Err(DeliveryAttemptError::Recoverable("filter failed"))
                 },
             )
@@ -4199,7 +4236,7 @@ mod tests {
                     &mut trace,
                     &mut |_, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
                     &mut |_, _, input, _, _| {
-                        assert_eq!(input, expected, "flags {flags}");
+                        assert_eq!(input.selected(), expected, "flags {flags}");
                         Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(
                             original.to_vec(),
                         )))

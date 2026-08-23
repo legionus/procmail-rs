@@ -2,9 +2,10 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use std::fmt;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::ops::Range;
 
+use crate::config::ActionInput;
 use crate::limits::MessageLimits;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,39 @@ pub struct StreamedMessage {
 }
 
 impl Message {
+    pub fn from_filter_output(
+        header: &[u8],
+        body: &[u8],
+        output: &Message,
+        area: ActionInput,
+        limits: MessageLimits,
+    ) -> Result<Self, MessageReadError> {
+        let output = if area == ActionInput::Body {
+            output.as_bytes().get(1..).ok_or_else(|| {
+                MessageReadError::Io(std::io::Error::other(
+                    "body filter output lost its private separator",
+                ))
+            })?
+        } else {
+            output.as_bytes()
+        };
+
+        // A partial filter replaces only the bytes sent to the command. Feed
+        // the joined slices back through bounded ingestion so retained input
+        // plus child output cannot exceed any message or header limit.
+        match area {
+            ActionInput::Message => Self::read_from(&mut std::io::Cursor::new(output), limits),
+            ActionInput::Headers => {
+                let reader = std::io::Cursor::new(output).chain(std::io::Cursor::new(body));
+                Self::read_from(&mut std::io::BufReader::new(reader), limits)
+            }
+            ActionInput::Body => {
+                let reader = std::io::Cursor::new(header).chain(std::io::Cursor::new(output));
+                Self::read_from(&mut std::io::BufReader::new(reader), limits)
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn from_bytes(raw: Vec<u8>) -> Self {
         let body_start = find_body_start(&raw).unwrap_or(raw.len());
@@ -432,7 +466,64 @@ mod tests {
     use std::io::{self, BufReader, Cursor, Read, Write};
 
     use super::{Message, MessageLimit, MessageReadError};
+    use crate::config::ActionInput;
     use crate::limits::MessageLimits;
+
+    #[test]
+    fn partial_filter_output_preserves_the_unselected_area() {
+        let header_output = Message::from_bytes(b"Subject: new\n\n".to_vec());
+        let body_output = Message::from_bytes(b"\nnew body".to_vec());
+
+        let replaced_header = Message::from_filter_output(
+            b"Subject: old\n\n",
+            b"old body",
+            &header_output,
+            ActionInput::Headers,
+            MessageLimits::default(),
+        )
+        .unwrap();
+        let replaced_body = Message::from_filter_output(
+            b"Subject: old\n\n",
+            b"old body",
+            &body_output,
+            ActionInput::Body,
+            MessageLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(replaced_header.as_bytes(), b"Subject: new\n\nold body");
+        assert_eq!(replaced_body.as_bytes(), b"Subject: old\n\nnew body");
+    }
+
+    #[test]
+    fn partial_filter_output_rechecks_the_combined_message_limit() {
+        let output = Message::from_bytes(b"\n1234".to_vec());
+        let limits = MessageLimits {
+            message_size: 8,
+            body_size: 4,
+            ..MessageLimits::default()
+        };
+
+        assert!(
+            Message::from_filter_output(b"X:\n\n", b"old", &output, ActionInput::Body, limits)
+                .is_ok()
+        );
+
+        let limits = MessageLimits {
+            message_size: 7,
+            ..limits
+        };
+        let error =
+            Message::from_filter_output(b"X:\n\n", b"old", &output, ActionInput::Body, limits)
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageReadError::LimitExceeded {
+                kind: MessageLimit::Message,
+                limit: 7
+            }
+        ));
+    }
 
     #[test]
     fn splits_lf_message() {
