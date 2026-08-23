@@ -131,6 +131,24 @@ copy and staging file receive the same input pass but remain private until the
 body has been read and validated. An input-limit or write failure therefore
 cannot publish that early copy.
 
+## External command timeout
+
+`TIMEOUT` defaults to 960 seconds and accepts decimal values from 1 through
+86400. It applies in statement order to pipe actions, filters, and program
+conditions. Zero is rejected because it requests an unbounded wait.
+
+Each shell runs in a separate process group. Timeout supervision remains
+active while procmail-rs writes stdin, reads filter stdout, and waits for the
+direct shell. On expiration it sends `SIGTERM` to the group, waits 250 ms,
+sends `SIGKILL`, and reaps the direct shell. The result then follows the usual
+status flags: no `w` or `W` ignores it, `w` reports it, `W` suppresses that
+diagnostic, `i` affects only stdin write errors, and an observed failure can
+select an `e` recipe.
+
+A trusted command can deliberately leave its process group. Such a process is
+outside this timeout mechanism and requires an external cgroup, namespace, or
+service-manager policy when containment is required.
+
 ## Mbox format
 
 Mbox delivery writes the **mboxrd** on-disk format, using the reversible

@@ -19,6 +19,7 @@ impl Default for RuntimeVariables {
             "LINEBUF".to_owned(),
             crate::config::DEFAULT_LINEBUF.to_string(),
         );
+        values.insert("TIMEOUT".to_owned(), "960".to_owned());
         Self { values }
     }
 }

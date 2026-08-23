@@ -7,6 +7,7 @@ use crate::config::{ChildStatusMode, WriteErrorMode};
 pub enum ChildExit {
     Success,
     Failure,
+    TimedOut,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +85,7 @@ fn decide(
     ExternalActionDecision {
         succeeded,
         replace_message: succeeded && output == Some(FilterOutput::CompleteAndValid),
-        report_child_failure: child_exit == ChildExit::Failure
+        report_child_failure: child_exit != ChildExit::Success
             && status_mode == ChildStatusMode::Wait,
     }
 }
@@ -164,5 +165,23 @@ mod tests {
         );
         assert!(ignored.succeeded());
         assert!(!ignored.replace_message());
+    }
+
+    #[test]
+    fn timeout_uses_the_existing_child_status_modes() {
+        for (mode, succeeded, report) in [
+            (ChildStatusMode::Ignore, true, false),
+            (ChildStatusMode::Wait, false, true),
+            (ChildStatusMode::WaitQuietly, false, false),
+        ] {
+            let decision = decide_program(
+                mode,
+                WriteErrorMode::Ignore,
+                InputWrite::Failed,
+                ChildExit::TimedOut,
+            );
+            assert_eq!(decision.succeeded(), succeeded);
+            assert_eq!(decision.report_child_failure(), report);
+        }
     }
 }

@@ -3,13 +3,41 @@
 
 use std::fmt;
 use std::io::{BufReader, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use crate::config::{ActionInput, OutputEnding};
+use rustix::process::{Pid, Signal, kill_process_group};
+
+use crate::config::{ActionInput, AssignmentTarget, Config, OutputEnding, Statement};
 use crate::environment::{ProcessEnvironment, ShellPolicy};
 use crate::external_filter::{ChildExit, FilterOutput, InputWrite};
 use crate::limits::MessageLimits;
 use crate::message::{Message, MessageReadError};
+
+pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(960);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const TERMINATION_GRACE: Duration = Duration::from_millis(250);
+
+pub fn process_timeout_from_config(config: &Config) -> Result<Duration, String> {
+    let mut timeout = DEFAULT_PROCESS_TIMEOUT;
+    for statement in &config.statements {
+        let Statement::Assignment(assignment) = statement else {
+            continue;
+        };
+        if assignment.target != AssignmentTarget::ProcessTimeout {
+            continue;
+        }
+        timeout = parse_process_timeout(&assignment.value)
+            .map_err(|error| format!("line {}: {error}", assignment.line))?;
+    }
+    Ok(timeout)
+}
+
+pub fn parse_process_timeout(value: &str) -> Result<Duration, String> {
+    crate::config::parse_process_timeout_seconds(value).map(Duration::from_secs)
+}
 
 #[derive(Debug)]
 pub struct FilterRun {
@@ -32,6 +60,7 @@ pub struct FilterOptions {
     output_ending: OutputEnding,
     action_input: ActionInput,
     limits: MessageLimits,
+    timeout: Duration,
 }
 
 impl FilterOptions {
@@ -44,7 +73,13 @@ impl FilterOptions {
             output_ending,
             action_input,
             limits,
+            timeout: DEFAULT_PROCESS_TIMEOUT,
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -107,7 +142,8 @@ pub fn run_filter(
     let invocation = policy
         .authorize(environment)
         .map_err(|error| process_error(error.to_string()))?;
-    let mut child = Command::new(invocation.path())
+    let mut command_builder = Command::new(invocation.path());
+    let mut child = command_builder
         .arg(invocation.flags())
         .arg(command)
         .env_clear()
@@ -115,6 +151,7 @@ pub fn run_filter(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(stderr)
+        .process_group(0)
         .spawn()
         .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
     let mut child_stdin = child
@@ -133,6 +170,7 @@ pub fn run_filter(
     let (input_write, output, status) = std::thread::scope(|scope| {
         let writer =
             scope.spawn(move || write_action_input(&mut child_stdin, input, options.output_ending));
+        let waiter = scope.spawn(move || wait_for_process_group(&mut child, options.timeout));
         // Body-only output has no header separator. Prefix a private separator
         // while parsing stdout so arbitrary body bytes are governed by body
         // limits instead of being mistaken for an unterminated header field.
@@ -142,12 +180,13 @@ pub fn run_filter(
         } else {
             Message::read_from(&mut BufReader::new(child_stdout), options.limits)
         };
-        let status = child.wait();
         let input_write = writer.join();
+        let status = waiter.join();
         (input_write, output, status)
     });
 
-    let status = status
+    let (status, timed_out) = status
+        .map_err(|_| process_error("external command wait worker failed"))?
         .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?;
     let input_write = match input_write {
         Ok(Ok(())) => InputWrite::Complete,
@@ -158,7 +197,9 @@ pub fn run_filter(
     Ok(FilterRun {
         input_write,
         output,
-        child_exit: if status.success() {
+        child_exit: if timed_out {
+            ChildExit::TimedOut
+        } else if status.success() {
             ChildExit::Success
         } else {
             ChildExit::Failure
@@ -174,10 +215,31 @@ pub fn run_program(
     output_ending: OutputEnding,
     stderr: Stdio,
 ) -> Result<ProgramRun, ExternalProcessError> {
+    run_program_with_timeout(
+        policy,
+        environment,
+        command,
+        input,
+        output_ending,
+        DEFAULT_PROCESS_TIMEOUT,
+        stderr,
+    )
+}
+
+pub fn run_program_with_timeout(
+    policy: &ShellPolicy,
+    environment: &ProcessEnvironment,
+    command: &str,
+    input: &[u8],
+    output_ending: OutputEnding,
+    timeout: Duration,
+    stderr: Stdio,
+) -> Result<ProgramRun, ExternalProcessError> {
     let invocation = policy
         .authorize(environment)
         .map_err(|error| process_error(error.to_string()))?;
-    let mut child = Command::new(invocation.path())
+    let mut command_builder = Command::new(invocation.path());
+    let mut child = command_builder
         .arg(invocation.flags())
         .arg(command)
         .env_clear()
@@ -188,6 +250,7 @@ pub fn run_program(
         // discard output without buffering it or exposing it to our caller.
         .stdout(Stdio::null())
         .stderr(stderr)
+        .process_group(0)
         .spawn()
         .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
     let mut child_stdin = child
@@ -195,26 +258,90 @@ pub fn run_program(
         .take()
         .expect("piped child stdin is available after spawn");
 
-    // Close the input pipe before waiting even when the command stops reading
-    // early. The direct child is then always reaped, while the caller's `i`
-    // policy decides whether a write error changes the recipe result.
-    let input_write = match write_action_input(&mut child_stdin, input, output_ending) {
-        Ok(()) => InputWrite::Complete,
-        Err(_) => InputWrite::Failed,
-    };
-    drop(child_stdin);
-    let status = child
-        .wait()
-        .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?;
+    // Wait supervision must run while stdin is written. A command that never
+    // reads can otherwise fill the pipe and prevent this thread from reaching
+    // the timeout code that is supposed to terminate it.
+    let (input_write, waited) = thread::scope(|scope| {
+        let waiter = scope.spawn(move || wait_for_process_group(&mut child, timeout));
+        let input_write = match write_action_input(&mut child_stdin, input, output_ending) {
+            Ok(()) => InputWrite::Complete,
+            Err(_) => InputWrite::Failed,
+        };
+        drop(child_stdin);
+        (input_write, waiter.join())
+    });
+    let (status, timed_out) =
+        waited.map_err(|_| process_error("external command wait worker failed"))??;
 
     Ok(ProgramRun {
         input_write,
-        child_exit: if status.success() {
+        child_exit: if timed_out {
+            ChildExit::TimedOut
+        } else if status.success() {
             ChildExit::Success
         } else {
             ChildExit::Failure
         },
     })
+}
+
+fn wait_for_process_group(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, bool), ExternalProcessError> {
+    let group = i32::try_from(child.id())
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| process_error("external command returned an invalid process id"))?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?
+        {
+            return Ok((status, false));
+        }
+        let elapsed = started.elapsed();
+        let Some(remaining) = timeout.checked_sub(elapsed) else {
+            break;
+        };
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL.min(remaining));
+    }
+
+    // The shell starts a fresh group so its descendants receive termination
+    // together. Keep the direct child unreaped during the grace interval: its
+    // PID continues to anchor the group number and cannot be reused before
+    // the final signal is sent.
+    match kill_process_group(group, Signal::TERM) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::SRCH) => {
+            let status = child.wait().map_err(|error| {
+                process_error(format!("cannot reap timed-out command: {error}"))
+            })?;
+            return Ok((status, true));
+        }
+        Err(error) => {
+            return Err(process_error(format!(
+                "cannot terminate timed-out process group: {error}"
+            )));
+        }
+    }
+    thread::sleep(TERMINATION_GRACE);
+    match kill_process_group(group, Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+        Err(error) => {
+            return Err(process_error(format!(
+                "cannot kill timed-out process group: {error}"
+            )));
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| process_error(format!("cannot reap timed-out command: {error}")))?;
+    Ok((status, true))
 }
 
 fn write_action_input(
@@ -482,5 +609,87 @@ mod tests {
         .unwrap();
 
         assert_eq!(run.child_exit(), ChildExit::Failure);
+    }
+
+    #[test]
+    fn timeout_terminates_a_program_and_its_process_group() {
+        let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+        let started = Instant::now();
+        let run = run_program_with_timeout(
+            &policy,
+            &environment,
+            "trap '' TERM; (trap '' TERM; sleep 30) & wait",
+            b"",
+            OutputEnding::Preserve,
+            Duration::from_millis(50),
+            Stdio::null(),
+        )
+        .unwrap();
+
+        assert_eq!(run.child_exit(), ChildExit::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn timeout_interrupts_filter_output_waiting() {
+        let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+        let run = run_filter(
+            &policy,
+            &environment,
+            "sleep 30",
+            b"Subject: input\n\nbody",
+            FilterOptions::new(
+                OutputEnding::Preserve,
+                ActionInput::Message,
+                MessageLimits::default(),
+            )
+            .with_timeout(Duration::from_millis(50)),
+            Stdio::null(),
+        )
+        .unwrap();
+
+        assert_eq!(run.child_exit(), ChildExit::TimedOut);
+    }
+
+    #[test]
+    fn timeout_interrupts_a_blocked_program_input_write() {
+        let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+        let input = vec![b'x'; 1024 * 1024];
+        let started = Instant::now();
+        let run = run_program_with_timeout(
+            &policy,
+            &environment,
+            "sleep 30",
+            &input,
+            OutputEnding::Preserve,
+            Duration::from_millis(50),
+            Stdio::null(),
+        )
+        .unwrap();
+
+        assert_eq!(run.input_write(), InputWrite::Failed);
+        assert_eq!(run.child_exit(), ChildExit::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn parses_timeout_at_boundaries_and_in_statement_order() {
+        assert_eq!(parse_process_timeout("1").unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            parse_process_timeout(&crate::config::MAX_PROCESS_TIMEOUT_SECONDS.to_string()).unwrap(),
+            Duration::from_secs(crate::config::MAX_PROCESS_TIMEOUT_SECONDS)
+        );
+        for value in ["", "0", "1s", "86401", "18446744073709551616"] {
+            assert!(parse_process_timeout(value).is_err(), "accepted {value:?}");
+        }
+
+        let config = crate::config::parse("TIMEOUT=1\nTIMEOUT=2\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        assert_eq!(
+            process_timeout_from_config(&config).unwrap(),
+            Duration::from_secs(2)
+        );
     }
 }

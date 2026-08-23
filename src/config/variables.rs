@@ -7,6 +7,7 @@ use super::{MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING
 
 pub const MAX_COMMAND_LINE_VARIABLES: usize = 256;
 pub const MAX_LOCK_TIMEOUT_SECONDS: u64 = 86_400;
+pub const MAX_PROCESS_TIMEOUT_SECONDS: u64 = 86_400;
 
 pub fn validate_lock_method(value: &str) -> Result<(), String> {
     match value {
@@ -22,6 +23,18 @@ pub fn parse_lock_timeout_seconds(value: &str) -> Result<u64, String> {
     if !(1..=MAX_LOCK_TIMEOUT_SECONDS).contains(&seconds) {
         return Err(format!(
             "LOCKTIMEOUT must be an integer from 1 to {MAX_LOCK_TIMEOUT_SECONDS}"
+        ));
+    }
+    Ok(seconds)
+}
+
+pub fn parse_process_timeout_seconds(value: &str) -> Result<u64, String> {
+    let seconds = value.parse::<u64>().map_err(|_| {
+        format!("TIMEOUT must be an integer from 1 to {MAX_PROCESS_TIMEOUT_SECONDS}")
+    })?;
+    if !(1..=MAX_PROCESS_TIMEOUT_SECONDS).contains(&seconds) {
+        return Err(format!(
+            "TIMEOUT must be an integer from 1 to {MAX_PROCESS_TIMEOUT_SECONDS}"
         ));
     }
     Ok(seconds)
@@ -58,6 +71,7 @@ pub enum AssignmentTarget {
     LockFile,
     LockTimeout,
     LineBuf,
+    ProcessTimeout,
     Shell,
     ShellFlags,
     Path,
@@ -206,6 +220,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LOCKFILE" => VariablePolicy::RcOnly(AssignmentTarget::LockFile),
         "LOCKTIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::LockTimeout),
         "LINEBUF" => VariablePolicy::RcOnly(AssignmentTarget::LineBuf),
+        "TIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::ProcessTimeout),
         "SHELL" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Shell),
         "SHELLFLAGS" => VariablePolicy::RcOrCommandLine(AssignmentTarget::ShellFlags),
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
@@ -272,6 +287,7 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
         | AssignmentTarget::LockMethod
         | AssignmentTarget::LockTimeout
         | AssignmentTarget::LineBuf
+        | AssignmentTarget::ProcessTimeout
         | AssignmentTarget::ExitCode
         | AssignmentTarget::Host
         | AssignmentTarget::MessageLimit(_)

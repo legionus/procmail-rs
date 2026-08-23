@@ -30,7 +30,10 @@ use procmail_rs::eval::{
     OrderedExecutionError, PlanExplanation, PlannedDelivery,
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
-use procmail_rs::external_process::{FilterOptions, run_filter, run_program};
+use procmail_rs::external_process::{
+    FilterOptions, parse_process_timeout, process_timeout_from_config, run_filter,
+    run_program_with_timeout,
+};
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::RcFileLoader;
@@ -167,6 +170,8 @@ fn run() -> Result<u8, OperationalError> {
     let _lock_method = LockMethod::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let _lock_timeout = lock_timeout_from_config(&config)
+        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
+    let _process_timeout = process_timeout_from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let _trace_config = TraceConfig::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
@@ -599,6 +604,8 @@ fn execute_external_condition(
     input: &[u8],
     runtime: &mut RuntimeVariables,
 ) -> Result<bool, DeliveryAttemptError<OperationalError>> {
+    let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))
+        .map_err(recoverable_external_error)?;
     let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
         recoverable_external_error(format!(
             "cannot build external condition environment: {error}"
@@ -616,12 +623,13 @@ fn execute_external_condition(
     // Program conditions always wait for the child and decide solely from its
     // exit status. A child that closes stdin early must still be usable for
     // commands such as test(1), which do not consume the message at all.
-    let run = run_program(
+    let run = run_program_with_timeout(
         &shell_policy,
         &environment,
         command,
         input,
         procmail_rs::config::OutputEnding::Preserve,
+        timeout,
         stderr,
     )
     .map_err(|error| recoverable_external_error(error.to_string()))?;
@@ -635,6 +643,8 @@ fn execute_external_action(
     input: ExternalActionInput<'_>,
     runtime: &mut RuntimeVariables,
 ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
+    let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))
+        .map_err(recoverable_external_error)?;
     let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
         recoverable_external_error(format!(
             "cannot build external command environment: {error}"
@@ -649,12 +659,13 @@ fn execute_external_action(
         recoverable_external_error(format!("cannot open external command log: {error}"))
     })?;
     if options.action_mode == ActionMode::Deliver {
-        let run = run_program(
+        let run = run_program_with_timeout(
             &shell_policy,
             &environment,
             command,
             input.selected(),
             options.output_ending,
+            timeout,
             stderr,
         )
         .map_err(|error| recoverable_external_error(error.to_string()))?;
@@ -665,7 +676,7 @@ fn execute_external_action(
             run.child_exit(),
         );
         if decision.report_child_failure() {
-            report_external_child_failure(runtime).map_err(|error| {
+            report_external_child_failure(runtime, run.child_exit()).map_err(|error| {
                 recoverable_external_error(format!(
                     "cannot write external command failure diagnostic: {error}"
                 ))
@@ -685,7 +696,8 @@ fn execute_external_action(
         &environment,
         command,
         input.selected(),
-        FilterOptions::new(options.output_ending, options.action_input, limits),
+        FilterOptions::new(options.output_ending, options.action_input, limits)
+            .with_timeout(timeout),
         stderr,
     )
     .map_err(|error| recoverable_external_error(error.to_string()))?;
@@ -697,7 +709,7 @@ fn execute_external_action(
         run.child_exit(),
     );
     if decision.report_child_failure() {
-        report_external_child_failure(runtime).map_err(|error| {
+        report_external_child_failure(runtime, run.child_exit()).map_err(|error| {
             recoverable_external_error(format!(
                 "cannot write external command failure diagnostic: {error}"
             ))
@@ -751,8 +763,15 @@ fn external_stderr(runtime: &RuntimeVariables) -> io::Result<Stdio> {
     })
 }
 
-fn report_external_child_failure(runtime: &RuntimeVariables) -> io::Result<()> {
-    let diagnostic = b"procmail-rs: external command exited unsuccessfully\n";
+fn report_external_child_failure(
+    runtime: &RuntimeVariables,
+    child_exit: ChildExit,
+) -> io::Result<()> {
+    let diagnostic = if child_exit == ChildExit::TimedOut {
+        b"procmail-rs: external command exceeded TIMEOUT\n".as_slice()
+    } else {
+        b"procmail-rs: external command exited unsuccessfully\n".as_slice()
+    };
     match open_external_log(runtime)? {
         Some(mut file) => file.write_all(diagnostic),
         None => io::stderr().lock().write_all(diagnostic),

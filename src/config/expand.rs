@@ -63,6 +63,9 @@ impl Assignment {
         match self.target {
             AssignmentTarget::LockMethod => super::validate_lock_method(&value),
             AssignmentTarget::LockTimeout => super::parse_lock_timeout_seconds(&value).map(drop),
+            AssignmentTarget::ProcessTimeout => {
+                super::parse_process_timeout_seconds(&value).map(drop)
+            }
             _ => Ok(()),
         }
         .map_err(|message| ExpansionError::new(self.line, message))?;
@@ -509,6 +512,7 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::LockFile
                         | AssignmentTarget::LockTimeout
                         | AssignmentTarget::LineBuf
+                        | AssignmentTarget::ProcessTimeout
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,
@@ -520,6 +524,20 @@ fn prepare_runtime_statements(
                 }
                 let expression = parse_expression(&assignment.value, assignment.line)?;
                 validate_runtime_references(&expression, assignment.line, known, dynamic)?;
+                if assignment.target == AssignmentTarget::ProcessTimeout
+                    && !expression_needs_runtime(&expression, known)
+                    && !expression_references_any(&expression, dynamic)
+                {
+                    let value = evaluate_config_expression(
+                        &expression,
+                        assignment.line,
+                        assignment_value_limit(assignment.target),
+                        known,
+                        0,
+                    )?;
+                    super::parse_process_timeout_seconds(&value.text)
+                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
+                }
                 assignment.expansion = Some(expression);
 
                 // A conditional assignment exists only if execution selects

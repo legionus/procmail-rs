@@ -1441,6 +1441,10 @@ fn invalid_configuration_does_not_consume_stdin() {
         "LOCKTIMEOUT=invalid\n:0\nmaildir:inbox\n",
         "LINEBUF=127\n:0\nmaildir:inbox\n",
         "LINEBUF=1k\n:0\nmaildir:inbox\n",
+        "TIMEOUT=0\n:0\nmaildir:inbox\n",
+        "TIMEOUT=86401\n:0\nmaildir:inbox\n",
+        "TIMEOUT=invalid\n:0\nmaildir:inbox\n",
+        ":0\n{\nTIMEOUT=0\n:0\nmaildir:inbox\n}\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
@@ -1492,6 +1496,47 @@ fn linebuf_does_not_limit_mail_header_lines() {
 
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     assert_eq!(delivered_messages(&selected), [input.into_bytes()]);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn timed_out_waited_program_runs_its_error_recipe() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let selected = base.join("selected");
+    let log = base.join("trace.log");
+    create_maildir(&selected);
+    fs::write(
+        &config,
+        format!(
+            "TIMEOUT=1\nLOGFILE={}\nMAILDIR={}\n:0 w\n| sleep 30\n:0 e\nselected/\n",
+            log.display(),
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: timeout\n\nbody";
+    let started = std::time::Instant::now();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(input)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert_eq!(delivered_messages(&selected), [input.to_vec()]);
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .contains("external command exceeded TIMEOUT")
+    );
     fs::remove_dir_all(base).unwrap();
 }
 
