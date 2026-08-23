@@ -63,8 +63,14 @@ fn runtime_rc_behavior_matches_reference_procmail() {
             .output()
             .unwrap();
 
-        assert!(
-            output.status.success(),
+        let expected_status = fs::read_to_string(directory.join("expected.status"))
+            .unwrap()
+            .trim_end()
+            .parse::<i32>()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expected_status),
             "fixture {case}: {:?}",
             output.stderr
         );
@@ -75,7 +81,29 @@ fn runtime_rc_behavior_matches_reference_procmail() {
             .collect::<Vec<_>>();
         actual.sort();
         assert_eq!(actual, expected, "fixture: {case}");
+
+        let expected_delivery = fs::read(directory.join("expected.delivery")).unwrap();
+        for destination in actual {
+            let delivered = fs::read(output_directory.0.join(&destination)).unwrap();
+            assert_eq!(
+                mbox_payload(&delivered),
+                expected_delivery,
+                "fixture: {case}, destination: {destination}"
+            );
+        }
     }
+}
+
+fn mbox_payload(delivery: &[u8]) -> &[u8] {
+    let postmark_end = delivery
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("fixture mbox delivery must contain an LF-terminated postmark");
+    assert!(
+        delivery[..postmark_end].starts_with(b"From MAILER-DAEMON "),
+        "fixture mbox delivery must start with the generated postmark"
+    );
+    &delivery[postmark_end + 1..]
 }
 
 fn destination_names(path: &Path) -> Vec<String> {
