@@ -302,6 +302,257 @@ fn external_filter_stderr_is_appended_to_logfile() {
 }
 
 #[test]
+fn trap_receives_the_final_filtered_message_and_logs_both_outputs() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    let captured = base.join("trap-message.eml");
+    let logfile = base.join("trap.log");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nCAPTURE={}\nLOGFILE={}\nTRAP=\"cat > $CAPTURE; printf trap-out; printf trap-err >&2\"\n:0 fw\n| sed 's/original/replaced/'\n:0\nselected/\n",
+            base.display(),
+            captured.display(),
+            logfile.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: original\n\nbody\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(
+        fs::read(&captured).unwrap(),
+        b"Subject: replaced\n\nbody\n\n"
+    );
+    let log = fs::read(&logfile).unwrap();
+    assert!(
+        log.windows(b"trap-out".len())
+            .any(|part| part == b"trap-out")
+    );
+    assert!(
+        log.windows(b"trap-err".len())
+            .any(|part| part == b"trap-err")
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn trap_exit_status_follows_exitcode_selection() {
+    for (assignment, trap_status, expected) in [
+        (None, 6, 0),
+        (Some(""), 0, 0),
+        (Some(""), 5, 5),
+        (Some("7"), 8, 7),
+    ] {
+        let path = config_file("");
+        let base = path.parent().unwrap();
+        let selected = base.join("selected");
+        create_maildir(&selected);
+        let exitcode = assignment
+            .map(|value| format!("EXITCODE=\"{value}\"\n"))
+            .unwrap_or_default();
+        fs::write(
+            &path,
+            format!(
+                "MAILDIR={}\n{exitcode}TRAP=\"exit {trap_status};\"\n:0\nselected/\n",
+                base.display()
+            ),
+        )
+        .unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(b"Subject: status\n\nbody\n")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "assignment={assignment:?}, trap_status={trap_status}, stderr={:?}",
+            output.stderr
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+}
+
+#[test]
+fn empty_trap_does_not_require_staging() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!("TRAP=\"\"\n:0\nmaildir:{}/\n", selected.display()),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: no trap\n\nbody\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(!base.join(".procmail-rs-staging").exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn successful_trap_does_not_hide_a_delivery_failure() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let marker = base.join("trap-ran");
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nMARKER={}\nEXITCODE=\"\"\nTRAP=\"touch $MARKER\"\n:0\nmissing/\n",
+            base.display(),
+            marker.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: failure\n\nbody\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(73), "{:?}", output.stderr);
+    assert!(marker.is_file());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn timed_out_trap_uses_a_temporary_status_when_exitcode_is_empty() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    let logfile = base.join("trap.log");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nLOGFILE={}\nTIMEOUT=1\nEXITCODE=\"\"\nTRAP=\"trap '' TERM; sleep 30\"\n:0\nselected/\n",
+            base.display(),
+            logfile.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: timeout\n\nbody\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(75), "{:?}", output.stderr);
+    assert!(
+        fs::read_to_string(&logfile)
+            .unwrap()
+            .contains("TRAP exceeded TIMEOUT")
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn selected_runtime_include_can_install_trap_before_body_staging() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    let child_rc = base.join("trap.rc");
+    let captured = base.join("runtime-trap.eml");
+    create_maildir(&selected);
+    fs::write(
+        &child_rc,
+        format!("CAPTURE={}\nTRAP=\"cat > $CAPTURE\"\n", captured.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nCHILD={}\n:0\n* ^Subject: runtime trap\n{{\nINCLUDERC=$CHILD\n}}\n:0\nselected/\n",
+            base.display(),
+            child_rc.display()
+        ),
+    )
+    .unwrap();
+    let message = b"Subject: runtime trap\n\nbody\n";
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(message)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    let mut expected = message.to_vec();
+    expected.push(b'\n');
+    assert_eq!(fs::read(&captured).unwrap(), expected);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn regular_pipe_delivers_to_program_and_discards_stdout() {
     let path = config_file("");
     let base = path.parent().unwrap();
@@ -1502,6 +1753,8 @@ fn invalid_configuration_does_not_consume_stdin() {
         "UMASK=078\n:0\nmaildir:inbox\n",
         "UMASK=1000\n:0\nmaildir:inbox\n",
         ":0\n{\nUMASK=invalid\n:0\nmaildir:inbox\n}\n",
+        "TRAP=:\n:0\nmaildir:inbox\n",
+        "TRAP=bad\0command\n:0\nmaildir:inbox\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");

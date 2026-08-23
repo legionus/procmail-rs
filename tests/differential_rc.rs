@@ -88,9 +88,18 @@ fn runtime_rc_behavior_matches_reference_procmail() {
             "fixture {case}: {:?}",
             output.stderr
         );
+        let expected_trap = fs::read(directory.join("expected.trap")).ok();
+        if let Some(expected_trap) = expected_trap.as_ref() {
+            assert_eq!(
+                fs::read(output_directory.0.join("trap-message")).unwrap(),
+                *expected_trap,
+                "fixture: {case}, TRAP stdin"
+            );
+        }
         let mut actual = fs::read_dir(&output_directory.0)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| expected_trap.is_none() || name != "trap-message")
             .collect::<Vec<_>>();
         actual.sort();
         assert_eq!(actual, expected, "fixture: {case}");

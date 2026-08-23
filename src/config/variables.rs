@@ -22,6 +22,14 @@ pub fn parse_umask(value: &str) -> Result<u32, String> {
     Ok(mask)
 }
 
+pub fn validate_trap_command(value: &str) -> Result<(), String> {
+    if value.as_bytes().contains(&0) {
+        Err("TRAP command must not contain NUL".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn validate_lock_method(value: &str) -> Result<(), String> {
     match value {
         "flock" | "dotlock" => Ok(()),
@@ -86,6 +94,7 @@ pub enum AssignmentTarget {
     LineBuf,
     ProcessTimeout,
     Umask,
+    Trap,
     Shell,
     ShellFlags,
     Path,
@@ -236,6 +245,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LINEBUF" => VariablePolicy::RcOnly(AssignmentTarget::LineBuf),
         "TIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::ProcessTimeout),
         "UMASK" => VariablePolicy::RcOnly(AssignmentTarget::Umask),
+        "TRAP" => VariablePolicy::RcOnly(AssignmentTarget::Trap),
         "SHELL" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Shell),
         "SHELLFLAGS" => VariablePolicy::RcOrCommandLine(AssignmentTarget::ShellFlags),
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
@@ -304,6 +314,7 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
         | AssignmentTarget::LineBuf
         | AssignmentTarget::ProcessTimeout
         | AssignmentTarget::Umask
+        | AssignmentTarget::Trap
         | AssignmentTarget::ExitCode
         | AssignmentTarget::Host
         | AssignmentTarget::MessageLimit(_)

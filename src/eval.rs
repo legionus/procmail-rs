@@ -127,11 +127,16 @@ enum CompiledStatement {
     Switch(CompiledSwitch),
 }
 
-fn is_global_lock_assignment(statement: &CompiledStatement) -> bool {
+fn assignment_requires_ordered_message(statement: &CompiledStatement) -> bool {
     matches!(
         statement,
         CompiledStatement::Assignment(assignment)
-            if assignment.assignment.target == AssignmentTarget::LockFile
+            if matches!(
+                assignment.assignment.target,
+                AssignmentTarget::LockFile
+            )
+                || assignment.assignment.target == AssignmentTarget::Trap
+                    && !assignment.assignment.value.is_empty()
     )
 }
 
@@ -249,6 +254,9 @@ type ExternalConditionExecutor<'a, E, T> = dyn FnMut(&str, &[u8], &mut RuntimeVa
     + 'a;
 
 type GlobalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + 'a;
+
+type CompletionExecutor<'a, E, T> =
+    dyn FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>) + 'a;
 
 struct OptionalOrderedExecutors<'a, E, T> {
     external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
@@ -468,6 +476,27 @@ pub enum DeliveryAttemptError<E> {
 pub enum OrderedExecutionError<E> {
     Evaluation(EvalError),
     Delivery(E),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CompletionState<'a, E> {
+    Completed(DeliveryOutcome),
+    Failed(&'a OrderedExecutionError<E>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FinalMessage<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> FinalMessage<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.bytes
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -835,13 +864,13 @@ impl CompiledSequence {
     fn requires_ordered_delivery(&self) -> bool {
         self.trailing_statements
             .iter()
-            .any(is_global_lock_assignment)
+            .any(assignment_requires_ordered_message)
             || self.recipes.iter().enumerate().any(|(index, recipe)| {
                 recipe.requires_ordered_delivery()
                     || recipe
                         .preceding_statements
                         .iter()
-                        .any(is_global_lock_assignment)
+                        .any(assignment_requires_ordered_message)
                     || (index != 0
                         && matches!(
                             recipe.control,
@@ -2620,6 +2649,7 @@ impl ExecutionPlan {
                 external_condition: None,
                 global_lock: None,
             },
+            None,
         )
     }
 
@@ -2660,6 +2690,7 @@ impl ExecutionPlan {
                 external_condition: None,
                 global_lock: None,
             },
+            None,
         )
     }
 
@@ -2708,6 +2739,58 @@ impl ExecutionPlan {
                 external_condition: Some(external_condition),
                 global_lock: Some(global_lock),
             },
+            None,
+        )
+    }
+
+    pub fn execute_mapped_ordered_with_processes_and_completion_trace<E, D, C, X, G, F, T>(
+        &self,
+        message: MappedMessageInput<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut T,
+        deliver: &mut D,
+        executors: (&mut C, &mut X, &mut G),
+        completion: &mut F,
+    ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            OutputEnding,
+            Option<&str>,
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        C: FnMut(
+            &str,
+            &[u8],
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<bool, DeliveryAttemptError<E>>,
+        X: FnMut(
+            &PipeAction,
+            RecipeOptions,
+            Option<&str>,
+            ExternalActionInput<'_>,
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
+        G: FnMut(&str, &mut RuntimeVariables) -> Result<(), E>,
+        F: FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>),
+        T: TraceSink,
+    {
+        let (external_condition, external, global_lock) = executors;
+        self.execute_mapped_ordered_inner(
+            message,
+            runtime,
+            trace,
+            deliver,
+            OptionalOrderedExecutors {
+                external: Some(external),
+                external_condition: Some(external_condition),
+                global_lock: Some(global_lock),
+            },
+            Some(completion),
         )
     }
 
@@ -2718,6 +2801,7 @@ impl ExecutionPlan {
         trace: &'a mut T,
         deliver: &'a mut D,
         executors: OptionalOrderedExecutors<'a, E, T>,
+        mut completion: Option<&mut CompletionExecutor<'_, E, T>>,
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
         D: FnMut(
@@ -2773,14 +2857,42 @@ impl ExecutionPlan {
             global_lock: executors.global_lock,
             rc: self.rc_context(),
         };
-        self.root.execute_ordered(&mut context)?;
-        if let Some(error) = context.pending_error {
-            return Err(OrderedExecutionError::Delivery(error));
+        let execution = self.root.execute_ordered(&mut context);
+        let result = match execution {
+            Err(error) => Err(error),
+            Ok(_) => match context.pending_error.take() {
+                Some(error) => Err(OrderedExecutionError::Delivery(error)),
+                None => Ok(DeliveryOutcome {
+                    published: context.published,
+                    original_delivered: context.original_delivered,
+                }),
+            },
+        };
+
+        // The replacement buffer belongs to the evaluator and the original
+        // bytes belong to mapped staging. Invoke completion while either
+        // owner is still alive so callers such as TRAP can consume the final
+        // message without allocating another message-sized buffer.
+        if let Some(completion) = completion.as_mut() {
+            let Some(message) =
+                current_ordered_message(context.message, context.replacement.as_ref()).raw()
+            else {
+                return Err(OrderedExecutionError::Evaluation(
+                    EvalError::BodyWasNotBuffered,
+                ));
+            };
+            let state = match &result {
+                Ok(outcome) => CompletionState::Completed(*outcome),
+                Err(error) => CompletionState::Failed(error),
+            };
+            completion(
+                FinalMessage::new(message),
+                context.runtime,
+                context.trace,
+                state,
+            );
         }
-        Ok(DeliveryOutcome {
-            published: context.published,
-            original_delivered: context.original_delivered,
-        })
+        result
     }
 
     fn resume_tree(

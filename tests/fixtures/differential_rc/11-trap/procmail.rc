@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+MAILDIR=.
+TRAP="cat > $OUT/trap-message"
+
+:0 fw
+| sed 's/original/replaced/'
+
+:0
+$OUT/result

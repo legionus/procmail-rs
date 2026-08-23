@@ -25,14 +25,14 @@ use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{
-    ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind, ExecutionPlan,
-    ExternalActionInput, HeaderEvaluation, MappedMessageInput, MatchingMessage,
-    OrderedExecutionError, PlanExplanation, PlannedDelivery,
+    CompletionState, ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind,
+    ExecutionPlan, ExternalActionInput, FinalMessage, HeaderEvaluation, MappedMessageInput,
+    MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery,
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
 use procmail_rs::external_process::{
     FilterOptions, parse_process_timeout, process_timeout_from_config, run_filter,
-    run_program_with_timeout,
+    run_program_with_timeout, run_trap_with_timeout,
 };
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
@@ -443,7 +443,7 @@ fn deliver_staged(
     if execution.requires_ordered_delivery() {
         let mut global_lock = None;
         let outcome = execution
-            .execute_mapped_ordered_with_processes_trace(
+            .execute_mapped_ordered_with_processes_and_completion_trace(
                 MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                 runtime,
                 trace,
@@ -514,6 +514,9 @@ fn deliver_staged(
                         }
                     },
                 ),
+                &mut |message: FinalMessage<'_>, runtime, _, state| {
+                    execute_trap(message.as_bytes(), runtime, completion_exit_status(state));
+                },
             )
             .map_err(|error| match error {
                 OrderedExecutionError::Evaluation(error) => OperationalError::PermanentDestination(
@@ -549,6 +552,120 @@ fn deliver_staged(
     commit_delivery(validated, plan.deliveries(), runtime, trace)?;
 
     delivery_outcome(&plan)
+}
+
+fn completion_exit_status(state: CompletionState<'_, OperationalError>) -> u8 {
+    match state {
+        CompletionState::Completed(outcome) if outcome.original_delivered() => {
+            ExitStatus::Success as u8
+        }
+        CompletionState::Completed(_) => ExitStatus::Undelivered as u8,
+        CompletionState::Failed(OrderedExecutionError::Evaluation(_)) => {
+            ExitStatus::PermanentDestination as u8
+        }
+        CompletionState::Failed(OrderedExecutionError::Delivery(error)) => {
+            error.exit_status() as u8
+        }
+    }
+}
+
+fn execute_trap(message: &[u8], runtime: &mut RuntimeVariables, provisional_status: u8) {
+    let Some(command) = runtime.get("TRAP").filter(|command| !command.is_empty()) else {
+        return;
+    };
+    let command = command.to_owned();
+    let exitcode_was_absent = runtime.get("EXITCODE").is_none();
+    let exitcode_was_empty = runtime.get("EXITCODE") == Some("");
+    if exitcode_was_absent {
+        runtime.set("EXITCODE", provisional_status.to_string());
+    }
+
+    let result = (|| {
+        let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))?;
+        let environment = ProcessEnvironment::from_runtime(runtime)
+            .map_err(|error| format!("cannot build TRAP environment: {error}"))?;
+        let configured_shell = environment
+            .get("SHELL")
+            .ok_or_else(|| "bounded TRAP environment has no SHELL".to_owned())?;
+        let shell_policy =
+            ShellPolicy::approve(configured_shell).map_err(|error| error.to_string())?;
+        let (stdout, stderr) = trap_output(runtime);
+        run_trap_with_timeout(
+            &shell_policy,
+            &environment,
+            &command,
+            message,
+            timeout,
+            stdout,
+            stderr,
+        )
+        .map_err(|error| error.to_string())
+    })();
+
+    match result {
+        Ok(run) if exitcode_was_empty => {
+            if run.child_exit() == ChildExit::TimedOut {
+                report_trap_diagnostic(runtime, "TRAP exceeded TIMEOUT");
+            }
+            if let Some(code) = run.exit_code().filter(|code| *code != 0) {
+                runtime.set("EXITCODE", code.to_string());
+            } else if run.child_exit() != ChildExit::Success {
+                runtime.set(
+                    "EXITCODE",
+                    (ExitStatus::TemporaryDelivery as u8).to_string(),
+                );
+            }
+        }
+        Ok(run) => {
+            if run.child_exit() == ChildExit::TimedOut {
+                report_trap_diagnostic(runtime, "TRAP exceeded TIMEOUT");
+            }
+        }
+        Err(error) => {
+            report_trap_diagnostic(runtime, &format!("TRAP failed: {error}"));
+            if exitcode_was_empty {
+                runtime.set(
+                    "EXITCODE",
+                    (ExitStatus::TemporaryDelivery as u8).to_string(),
+                );
+            }
+        }
+    }
+}
+
+fn report_trap_diagnostic(runtime: &RuntimeVariables, message: &str) {
+    let record = format!("procmail-rs: {message}\n");
+    let result = match open_external_log(runtime) {
+        Ok(Some(mut file)) => file.write_all(record.as_bytes()),
+        Ok(None) => io::stderr().lock().write_all(record.as_bytes()),
+        Err(error) => {
+            eprintln!("procmail-rs: cannot write TRAP diagnostic to LOGFILE: {error}");
+            return;
+        }
+    };
+    if let Err(error) = result {
+        eprintln!("procmail-rs: cannot write TRAP diagnostic: {error}");
+    }
+}
+
+fn trap_output(runtime: &RuntimeVariables) -> (Stdio, Stdio) {
+    match open_external_log(runtime) {
+        Ok(Some(file)) => match file.try_clone() {
+            Ok(stdout) => return (Stdio::from(stdout), Stdio::from(file)),
+            Err(error) => {
+                eprintln!("procmail-rs: cannot duplicate LOGFILE for TRAP output: {error}");
+            }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("procmail-rs: cannot open LOGFILE for TRAP output: {error}");
+        }
+    }
+
+    // TRAP combines stdout with stderr in original procmail. Duplicate the
+    // inherited descriptor instead of routing stdout to the caller's normal
+    // output, where command text could corrupt a protocol-facing response.
+    (Stdio::from(io::stderr()), Stdio::from(io::stderr()))
 }
 
 fn acquire_recipe_lock(

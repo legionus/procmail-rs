@@ -121,10 +121,12 @@ plan, the body is streamed directly from standard input to the selected sinks
 without creating a staging file.
 
 An executed body or whole-message condition, a final-size test, mbox delivery,
-or an order-dependent action requires a replayable message. In that case the
-complete bounded input is written to private staging under the `MAILDIR` active
-at the point where evaluation is deferred. A runtime rc file that is never
-selected cannot by itself trigger staging.
+a reachable `TRAP`, or another order-dependent action requires a replayable
+message. In that case the complete bounded input is written to private staging
+under the `MAILDIR` active at the point where evaluation is deferred. A runtime
+rc file that is never selected cannot by itself trigger staging. At completion,
+one bounded view represents either the mapped staged message or the owned
+result of the last successful filter, without copying either one.
 
 When a copy destination is selected before a later rule needs the body, the
 copy and staging file receive the same input pass but remain private until the
@@ -134,8 +136,8 @@ cannot publish that early copy.
 ## External command timeout
 
 `TIMEOUT` defaults to 960 seconds and accepts decimal values from 1 through
-86400. It applies in statement order to pipe actions, filters, and program
-conditions. Zero is rejected because it requests an unbounded wait.
+86400. It applies in statement order to pipe actions, filters, program
+conditions, and `TRAP`. Zero is rejected because it requests an unbounded wait.
 
 Each shell runs in a separate process group. Timeout supervision remains
 active while procmail-rs writes stdin, reads filter stdout, and waits for the
@@ -148,6 +150,27 @@ select an `e` recipe.
 A trusted command can deliberately leave its process group. Such a process is
 outside this timeout mechanism and requires an external cgroup, namespace, or
 service-manager policy when containment is required.
+
+## Exit trap
+
+`TRAP` stores a bounded trusted-shell command. The last executed non-empty
+assignment runs after recipe processing and complete-input validation; an
+empty assignment disables it. `check` and `explain` report shell use but never
+execute the command. No trap runs for a configuration error, incomplete or
+rejected message input, or termination by a signal.
+
+The command receives the final message after successful filters and one
+additional LF, matching recorded procmail behavior. Its stdout and stderr are
+both appended to `LOGFILE`, or both inherit procmail-rs stderr when no log is
+selected. The command uses the active bounded environment, shell settings,
+`UMASK`, and `TIMEOUT` process-group supervision.
+
+When `EXITCODE` was never assigned, its provisional filtering status is made
+available to the command and the trap status does not replace it. An explicit
+non-empty `EXITCODE` also remains authoritative. With `EXITCODE=""`, a nonzero
+trap status becomes the final status; a successful trap leaves the filtering
+result unchanged, while failure to start or a timeout selects temporary
+failure status 75.
 
 ## Mbox format
 

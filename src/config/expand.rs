@@ -50,16 +50,18 @@ impl Assignment {
         &self,
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<String, ExpansionError> {
-        let Some(expression) = self.expansion.as_ref() else {
-            return Ok(self.value.clone());
+        let value = match self.expansion.as_ref() {
+            Some(expression) => {
+                evaluate_with_linebuf(
+                    expression,
+                    self.line,
+                    assignment_value_limit(self.target),
+                    &mut lookup,
+                )?
+                .text
+            }
+            None => self.value.clone(),
         };
-        let value = evaluate_with_linebuf(
-            expression,
-            self.line,
-            assignment_value_limit(self.target),
-            &mut lookup,
-        )?
-        .text;
         match self.target {
             AssignmentTarget::LockMethod => super::validate_lock_method(&value),
             AssignmentTarget::LockTimeout => super::parse_lock_timeout_seconds(&value).map(drop),
@@ -67,6 +69,7 @@ impl Assignment {
                 super::parse_process_timeout_seconds(&value).map(drop)
             }
             AssignmentTarget::Umask => super::parse_umask(&value).map(drop),
+            AssignmentTarget::Trap => super::validate_trap_command(&value),
             _ => Ok(()),
         }
         .map_err(|message| ExpansionError::new(self.line, message))?;
@@ -328,6 +331,10 @@ fn expand_config(
                     expand_text(&assignment.value, assignment.line, limit, &variables)
                         .map_err(|error| relabel_linebuf_error(error, linebuf, hard_limit))?;
                 assignment.value = expanded.text;
+                if assignment.target == AssignmentTarget::Trap {
+                    super::validate_trap_command(&assignment.value)
+                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
+                }
                 if assignment.target == AssignmentTarget::LineBuf {
                     linebuf = parse_linebuf(&assignment.value, assignment.line)?;
                 }
@@ -515,6 +522,7 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::LineBuf
                         | AssignmentTarget::ProcessTimeout
                         | AssignmentTarget::Umask
+                        | AssignmentTarget::Trap
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+MAILDIR=$CASE
+CAPTURE=$OUT/trap-message
+TRAP="cat > $CAPTURE"
+
+:0 fw
+| sed 's/original/replaced/'
+
+:0
+mbox:$OUT/result

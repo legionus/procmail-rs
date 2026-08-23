@@ -26,3 +26,8 @@ output, and a program condition can select a runtime destination assignment.
 The Maildir case ignores only the generated filename. It requires one exact
 message in `new/`, no files in `tmp/` or `cur/`, and verifies variable
 expansion in the selected destination path.
+
+The TRAP case records that the command receives the final message after an
+`fw` replacement and that procmail appends one LF to the command input. Its
+`expected.trap` file is compared byte for byte and is not treated as a
+delivery destination.

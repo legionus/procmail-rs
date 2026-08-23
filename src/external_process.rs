@@ -50,6 +50,15 @@ pub struct FilterRun {
 pub struct ProgramRun {
     input_write: InputWrite,
     child_exit: ChildExit,
+    exit_code: Option<u8>,
+}
+
+struct ProgramIoOptions {
+    output_ending: OutputEnding,
+    timeout: Duration,
+    stdout: Stdio,
+    stderr: Stdio,
+    append_lf: bool,
 }
 
 // These settings jointly describe how one filter invocation consumes and
@@ -90,6 +99,10 @@ impl ProgramRun {
 
     pub fn child_exit(self) -> ChildExit {
         self.child_exit
+    }
+
+    pub fn exit_code(self) -> Option<u8> {
+        self.exit_code
     }
 }
 
@@ -168,8 +181,9 @@ pub fn run_filter(
     // neither finite pipe buffer can make an otherwise progressing filter
     // wait forever for procmail-rs.
     let (input_write, output, status) = std::thread::scope(|scope| {
-        let writer =
-            scope.spawn(move || write_action_input(&mut child_stdin, input, options.output_ending));
+        let writer = scope.spawn(move || {
+            write_action_input(&mut child_stdin, input, options.output_ending, false)
+        });
         let waiter = scope.spawn(move || wait_for_process_group(&mut child, options.timeout));
         // Body-only output has no header separator. Prefix a private separator
         // while parsing stdout so arbitrary body bytes are governed by body
@@ -235,6 +249,62 @@ pub fn run_program_with_timeout(
     timeout: Duration,
     stderr: Stdio,
 ) -> Result<ProgramRun, ExternalProcessError> {
+    // Original procmail closes stdout for a regular pipe delivery. The safe
+    // standard process API cannot request a closed descriptor, so discard it
+    // here while the shared runner remains able to route TRAP output.
+    run_program_with_streams(
+        policy,
+        environment,
+        command,
+        input,
+        ProgramIoOptions {
+            output_ending,
+            timeout,
+            stdout: Stdio::null(),
+            stderr,
+            append_lf: false,
+        },
+    )
+}
+
+pub fn run_trap_with_timeout(
+    policy: &ShellPolicy,
+    environment: &ProcessEnvironment,
+    command: &str,
+    input: &[u8],
+    timeout: Duration,
+    stdout: Stdio,
+    stderr: Stdio,
+) -> Result<ProgramRun, ExternalProcessError> {
+    run_program_with_streams(
+        policy,
+        environment,
+        command,
+        input,
+        ProgramIoOptions {
+            output_ending: OutputEnding::Normalize,
+            timeout,
+            stdout,
+            stderr,
+            append_lf: true,
+        },
+    )
+}
+
+fn run_program_with_streams(
+    policy: &ShellPolicy,
+    environment: &ProcessEnvironment,
+    command: &str,
+    input: &[u8],
+    options: ProgramIoOptions,
+) -> Result<ProgramRun, ExternalProcessError> {
+    let ProgramIoOptions {
+        output_ending,
+        timeout,
+        stdout,
+        stderr,
+        append_lf,
+    } = options;
     let invocation = policy
         .authorize(environment)
         .map_err(|error| process_error(error.to_string()))?;
@@ -245,10 +315,7 @@ pub fn run_program_with_timeout(
         .env_clear()
         .envs(environment.values())
         .stdin(Stdio::piped())
-        // Original procmail closes stdout for a regular pipe delivery. The
-        // safe standard process API cannot request a closed descriptor, so
-        // discard output without buffering it or exposing it to our caller.
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(stderr)
         .process_group(0)
         .spawn()
@@ -263,16 +330,18 @@ pub fn run_program_with_timeout(
     // the timeout code that is supposed to terminate it.
     let (input_write, waited) = thread::scope(|scope| {
         let waiter = scope.spawn(move || wait_for_process_group(&mut child, timeout));
-        let input_write = match write_action_input(&mut child_stdin, input, output_ending) {
-            Ok(()) => InputWrite::Complete,
-            Err(_) => InputWrite::Failed,
-        };
+        let input_write =
+            match write_action_input(&mut child_stdin, input, output_ending, append_lf) {
+                Ok(()) => InputWrite::Complete,
+                Err(_) => InputWrite::Failed,
+            };
         drop(child_stdin);
         (input_write, waiter.join())
     });
     let (status, timed_out) =
         waited.map_err(|_| process_error("external command wait worker failed"))??;
 
+    let exit_code = status.code().and_then(|code| u8::try_from(code).ok());
     Ok(ProgramRun {
         input_write,
         child_exit: if timed_out {
@@ -282,6 +351,7 @@ pub fn run_program_with_timeout(
         } else {
             ChildExit::Failure
         },
+        exit_code,
     })
 }
 
@@ -348,9 +418,10 @@ fn write_action_input(
     writer: &mut impl Write,
     input: &[u8],
     output_ending: OutputEnding,
+    append_lf: bool,
 ) -> std::io::Result<()> {
     writer.write_all(input)?;
-    if output_ending == OutputEnding::Normalize && !input.ends_with(b"\n") {
+    if append_lf || output_ending == OutputEnding::Normalize && !input.ends_with(b"\n") {
         writer.write_all(b"\n")?;
     }
     Ok(())
@@ -609,6 +680,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(run.child_exit(), ChildExit::Failure);
+        assert_eq!(run.exit_code(), Some(19));
     }
 
     #[test]
