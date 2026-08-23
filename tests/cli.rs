@@ -1436,6 +1436,9 @@ fn invalid_configuration_does_not_consume_stdin() {
         ":0\nmaildir:one//two\n",
         "MAILDIR=\n:0\nmaildir:inbox\n",
         "LOCKMETHOD=other\n:0\nmaildir:inbox\n",
+        "LOCKTIMEOUT=0\n:0\nmaildir:inbox\n",
+        "LOCKTIMEOUT=86401\n:0\nmaildir:inbox\n",
+        "LOCKTIMEOUT=invalid\n:0\nmaildir:inbox\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
@@ -1631,6 +1634,97 @@ fn flock_serializes_external_actions_across_processes() {
     assert!(second.wait().unwrap().success());
 
     assert_eq!(fs::read(&events).unwrap(), b"start\nend\nstart\nend\n");
+    assert!(lock.is_file());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn global_lockfile_replacement_follows_statement_order() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let first = base.join("first.lock");
+    let second = base.join("second.lock");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKMETHOD=dotlock\nFIRST={}\nSECOND={}\nLOCKFILE=$FIRST\n:0 cw\n| test -f \"$FIRST\"\nLOCKFILE=$SECOND\n:0 w\n| test ! -e \"$FIRST\" && test -f \"$SECOND\"\n",
+            base.display(),
+            first.display(),
+            second.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: global lock\n\nbody")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(!first.exists());
+    assert!(!second.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn locktimeout_bounds_global_flock_wait() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let lock = base.join("global.lock");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKTIMEOUT=1\nLOCKFILE={}\n:0 w\n| sleep 2\n",
+            base.display(),
+            lock.display()
+        ),
+    )
+    .unwrap();
+
+    let spawn = || {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Subject: timeout\n\nbody")
+            .unwrap();
+        child
+    };
+    let mut first = spawn();
+    for _ in 0..100 {
+        if lock.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(lock.exists());
+    let started = std::time::Instant::now();
+    let second = spawn().wait_with_output().unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(second.status.code(), Some(75), "{:?}", second.stderr);
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "{elapsed:?}"
+    );
+    assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+    assert!(first.wait().unwrap().success());
     assert!(lock.is_file());
     fs::remove_dir_all(base).unwrap();
 }

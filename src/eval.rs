@@ -127,6 +127,14 @@ enum CompiledStatement {
     Switch(CompiledSwitch),
 }
 
+fn is_global_lock_assignment(statement: &CompiledStatement) -> bool {
+    matches!(
+        statement,
+        CompiledStatement::Assignment(assignment)
+            if assignment.assignment.target == AssignmentTarget::LockFile
+    )
+}
+
 #[derive(Debug)]
 struct CompiledInclude {
     expression: RcFileExpression,
@@ -202,6 +210,7 @@ struct OrderedTreeExecution<'a, E, D, T> {
     pending_error: Option<E>,
     external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
     external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
+    global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
     rc: RcExecutionContext<'a>,
 }
 
@@ -238,6 +247,14 @@ impl ExternalActionInput<'_> {
 
 type ExternalConditionExecutor<'a, E, T> = dyn FnMut(&str, &[u8], &mut RuntimeVariables, &mut T) -> Result<bool, DeliveryAttemptError<E>>
     + 'a;
+
+type GlobalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + 'a;
+
+struct OptionalOrderedExecutors<'a, E, T> {
+    external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
+    external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
+    global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
+}
 
 #[derive(Debug)]
 struct OwnedCompleteMessage {
@@ -558,6 +575,10 @@ pub enum EvalError {
         line: usize,
         statement: &'static str,
     },
+    RuntimeSettingUnavailable {
+        line: usize,
+        name: &'static str,
+    },
     RuntimeRc(String),
     ExternalActionUnsupported {
         line: usize,
@@ -600,6 +621,10 @@ impl fmt::Display for EvalError {
             Self::RuntimeRcLoaderUnavailable { line, statement } => write!(
                 formatter,
                 "line {line}: {statement} requires the runtime rc loader"
+            ),
+            Self::RuntimeSettingUnavailable { line, name } => write!(
+                formatter,
+                "line {line}: {name} requires runtime setting support"
             ),
             Self::RuntimeRc(message) => formatter.write_str(message),
             Self::ExternalActionUnsupported { line } => {
@@ -803,14 +828,21 @@ impl CompiledSequence {
     }
 
     fn requires_ordered_delivery(&self) -> bool {
-        self.recipes.iter().enumerate().any(|(index, recipe)| {
-            recipe.requires_ordered_delivery()
-                || (index != 0
-                    && matches!(
-                        recipe.control,
-                        ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
-                    ))
-        })
+        self.trailing_statements
+            .iter()
+            .any(is_global_lock_assignment)
+            || self.recipes.iter().enumerate().any(|(index, recipe)| {
+                recipe.requires_ordered_delivery()
+                    || recipe
+                        .preceding_statements
+                        .iter()
+                        .any(is_global_lock_assignment)
+                    || (index != 0
+                        && matches!(
+                            recipe.control,
+                            ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
+                        ))
+            })
     }
 
     fn needs_message_contents(&self) -> bool {
@@ -2045,6 +2077,21 @@ where
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, context.runtime, context.trace)
                     .map_err(OrderedExecutionError::Evaluation)?;
+                if assignment.assignment.target == AssignmentTarget::LockFile {
+                    let value = context
+                        .runtime
+                        .get("LOCKFILE")
+                        .unwrap_or_default()
+                        .to_owned();
+                    let global_lock = context.global_lock.as_mut().ok_or_else(|| {
+                        OrderedExecutionError::Evaluation(EvalError::RuntimeSettingUnavailable {
+                            line: assignment.assignment.line,
+                            name: "LOCKFILE",
+                        })
+                    })?;
+                    global_lock(&value, context.runtime)
+                        .map_err(OrderedExecutionError::Delivery)?;
+                }
             }
             CompiledStatement::Host(assignment) => {
                 execute_assignment(assignment, context.runtime, context.trace)
@@ -2562,8 +2609,11 @@ impl ExecutionPlan {
             runtime,
             trace,
             deliver,
-            None,
-            None,
+            OptionalOrderedExecutors {
+                external: None,
+                external_condition: None,
+                global_lock: None,
+            },
         )
     }
 
@@ -2594,17 +2644,26 @@ impl ExecutionPlan {
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
         T: TraceSink,
     {
-        self.execute_mapped_ordered_inner(message, runtime, trace, deliver, Some(external), None)
+        self.execute_mapped_ordered_inner(
+            message,
+            runtime,
+            trace,
+            deliver,
+            OptionalOrderedExecutors {
+                external: Some(external),
+                external_condition: None,
+                global_lock: None,
+            },
+        )
     }
 
-    pub fn execute_mapped_ordered_with_processes_trace<E, D, C, X, T>(
+    pub fn execute_mapped_ordered_with_processes_trace<E, D, C, X, G, T>(
         &self,
         message: MappedMessageInput<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut T,
         deliver: &mut D,
-        external_condition: &mut C,
-        external: &mut X,
+        executors: (&mut C, &mut X, &mut G),
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
         D: FnMut(
@@ -2629,15 +2688,20 @@ impl ExecutionPlan {
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
+        G: FnMut(&str, &mut RuntimeVariables) -> Result<(), E>,
         T: TraceSink,
     {
+        let (external_condition, external, global_lock) = executors;
         self.execute_mapped_ordered_inner(
             message,
             runtime,
             trace,
             deliver,
-            Some(external),
-            Some(external_condition),
+            OptionalOrderedExecutors {
+                external: Some(external),
+                external_condition: Some(external_condition),
+                global_lock: Some(global_lock),
+            },
         )
     }
 
@@ -2647,8 +2711,7 @@ impl ExecutionPlan {
         runtime: &'a mut RuntimeVariables,
         trace: &'a mut T,
         deliver: &'a mut D,
-        external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
-        external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
+        executors: OptionalOrderedExecutors<'a, E, T>,
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
         D: FnMut(
@@ -2699,8 +2762,9 @@ impl ExecutionPlan {
             published: 0,
             original_delivered: false,
             pending_error: None,
-            external,
-            external_condition,
+            external: executors.external,
+            external_condition: executors.external_condition,
+            global_lock: executors.global_lock,
             rc: self.rc_context(),
         };
         self.root.execute_ordered(&mut context)?;
@@ -4271,15 +4335,18 @@ mod tests {
                     delivered.push(destination.path().to_owned());
                     Ok::<_, DeliveryAttemptError<&str>>(())
                 },
-                &mut |command, input, _, _| {
-                    condition_calls += 1;
-                    assert_eq!(command, "test ! -e $LISTDIR");
-                    assert_eq!(input, b"Subject: program\n condition\n\n");
-                    Ok::<_, DeliveryAttemptError<&str>>(true)
-                },
-                &mut |_, _, _, _, _, _| {
-                    panic!("recipe contains no pipe action");
-                },
+                (
+                    &mut |command, input, _, _| {
+                        condition_calls += 1;
+                        assert_eq!(command, "test ! -e $LISTDIR");
+                        assert_eq!(input, b"Subject: program\n condition\n\n");
+                        Ok::<_, DeliveryAttemptError<&str>>(true)
+                    },
+                    &mut |_, _, _, _, _, _| {
+                        panic!("recipe contains no pipe action");
+                    },
+                    &mut |_, _| Ok::<_, &str>(()),
+                ),
             )
             .unwrap();
 

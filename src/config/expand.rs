@@ -55,12 +55,25 @@ impl Assignment {
         };
         let limit = assignment_value_limit(self.target);
         let value = evaluate_expression(expression, self.line, limit, &mut lookup, 0)?.text;
-        if self.target != AssignmentTarget::Maildir {
+        match self.target {
+            AssignmentTarget::LockMethod => super::validate_lock_method(&value),
+            AssignmentTarget::LockTimeout => super::parse_lock_timeout_seconds(&value).map(drop),
+            _ => Ok(()),
+        }
+        .map_err(|message| ExpansionError::new(self.line, message))?;
+        if !matches!(
+            self.target,
+            AssignmentTarget::Maildir | AssignmentTarget::LockFile
+        ) {
             return Ok(value);
         }
         let base = lookup("MAILDIR");
         let value = resolve_relative_path(&value, base.as_deref(), self.line)?;
-        validate_filesystem_path(&value, self.line, "MAILDIR", true)?;
+        if self.target == AssignmentTarget::Maildir {
+            validate_filesystem_path(&value, self.line, "MAILDIR", true)?;
+        } else if !value.is_empty() {
+            validate_filesystem_path(&value, self.line, "LOCKFILE", false)?;
+        }
         Ok(value)
     }
 }
@@ -310,15 +323,27 @@ fn expand_config(
                     )?;
                     validate_filesystem_path(&assignment.value, assignment.line, "MAILDIR", true)?;
                     maildir = Some(assignment.value.clone());
-                } else if assignment.target == AssignmentTarget::LogFile
-                    && !assignment.value.is_empty()
+                } else if matches!(
+                    assignment.target,
+                    AssignmentTarget::LogFile | AssignmentTarget::LockFile
+                ) && !assignment.value.is_empty()
                 {
                     assignment.value = resolve_relative_path(
                         &assignment.value,
                         maildir.as_deref(),
                         assignment.line,
                     )?;
-                    validate_filesystem_path(&assignment.value, assignment.line, "LOGFILE", false)?;
+                    let description = if assignment.target == AssignmentTarget::LogFile {
+                        "LOGFILE"
+                    } else {
+                        "LOCKFILE"
+                    };
+                    validate_filesystem_path(
+                        &assignment.value,
+                        assignment.line,
+                        description,
+                        false,
+                    )?;
                 }
                 variables.insert(
                     assignment.name.clone(),
@@ -420,6 +445,8 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::ExitCode
                         | AssignmentTarget::Host
                         | AssignmentTarget::LockMethod
+                        | AssignmentTarget::LockFile
+                        | AssignmentTarget::LockTimeout
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,

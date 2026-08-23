@@ -7,8 +7,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{
@@ -17,6 +16,7 @@ use rustix::fs::{
 
 use crate::config::OutputEnding;
 
+use super::local_lock::acquire_flock_fd;
 use super::maildir::Durability;
 use super::maildir::open_directory_path;
 use super::{DeliveryFailureClass, PublishedDelivery};
@@ -158,37 +158,22 @@ impl MboxFile {
         self.lock_with_policy(LOCK_TIMEOUT, LOCK_RETRY_INTERVAL)
     }
 
+    pub fn lock_with_timeout(self, timeout: Duration) -> io::Result<LockedMbox> {
+        self.lock_with_policy(timeout, LOCK_RETRY_INTERVAL)
+    }
+
     fn lock_with_policy(self, timeout: Duration, retry: Duration) -> io::Result<LockedMbox> {
-        let started = Instant::now();
-        loop {
-            match flock(&self.file, FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => {
-                    return Ok(LockedMbox {
-                        file: self.file,
-                        parent: self.parent,
-                        path: self.path,
-                    });
-                }
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(rustix::io::Errno::AGAIN) => {
-                    let elapsed = started.elapsed();
-                    let Some(remaining) = timeout.checked_sub(elapsed) else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "timed out waiting for mbox lock",
-                        ));
-                    };
-                    if remaining.is_zero() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "timed out waiting for mbox lock",
-                        ));
-                    }
-                    thread::sleep(retry.min(remaining));
-                }
-                Err(error) => return Err(io_error(error)),
-            }
-        }
+        acquire_flock_fd(
+            &self.file,
+            timeout,
+            retry,
+            "timed out waiting for mbox lock",
+        )?;
+        Ok(LockedMbox {
+            file: self.file,
+            parent: self.parent,
+            path: self.path,
+        })
     }
 }
 

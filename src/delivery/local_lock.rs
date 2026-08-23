@@ -33,10 +33,11 @@ pub enum LockMethod {
 
 impl LockMethod {
     pub fn parse(value: &str) -> Result<Self, String> {
+        crate::config::validate_lock_method(value)?;
         match value {
             "flock" => Ok(Self::Flock),
             "dotlock" => Ok(Self::Dotlock),
-            _ => Err("LOCKMETHOD must be 'flock' or 'dotlock'".to_owned()),
+            _ => unreachable!(),
         }
     }
 
@@ -56,6 +57,25 @@ impl LockMethod {
     }
 }
 
+pub fn parse_lock_timeout(value: &str) -> Result<Duration, String> {
+    crate::config::parse_lock_timeout_seconds(value).map(Duration::from_secs)
+}
+
+pub fn lock_timeout_from_config(config: &crate::config::Config) -> Result<Duration, String> {
+    let mut timeout = DEFAULT_LOCK_TIMEOUT;
+    for statement in &config.statements {
+        let crate::config::Statement::Assignment(assignment) = statement else {
+            continue;
+        };
+        if assignment.target != crate::config::AssignmentTarget::LockTimeout {
+            continue;
+        }
+        timeout = parse_lock_timeout(&assignment.value)
+            .map_err(|error| format!("line {}: {error}", assignment.line))?;
+    }
+    Ok(timeout)
+}
+
 #[derive(Debug)]
 pub struct LocalLock {
     state: LockState,
@@ -68,12 +88,17 @@ enum LockState {
 }
 
 impl LocalLock {
-    pub fn acquire(path: &Path, method: LockMethod, expected_uid: u32) -> io::Result<Self> {
+    pub fn acquire(
+        path: &Path,
+        method: LockMethod,
+        expected_uid: u32,
+        timeout: Duration,
+    ) -> io::Result<Self> {
         let retry = match method {
             LockMethod::Flock => FLOCK_RETRY,
             LockMethod::Dotlock => DOTLOCK_RETRY,
         };
-        Self::acquire_with_policy(path, method, expected_uid, DEFAULT_LOCK_TIMEOUT, retry)
+        Self::acquire_with_policy(path, method, expected_uid, timeout, retry)
     }
 
     fn acquire_with_policy(
@@ -126,19 +151,31 @@ fn acquire_flock(
         ));
     }
 
-    acquire_kernel_lock(&file, timeout, retry)?;
+    acquire_flock_fd(
+        &file,
+        timeout,
+        retry,
+        "timed out waiting for local lockfile",
+    )?;
     Ok(LocalLock {
         state: LockState::Flock(file),
     })
 }
 
-fn acquire_kernel_lock(file: &OwnedFd, timeout: Duration, retry: Duration) -> io::Result<()> {
+pub(super) fn acquire_flock_fd(
+    file: &OwnedFd,
+    timeout: Duration,
+    retry: Duration,
+    timeout_message: &'static str,
+) -> io::Result<()> {
     let started = Instant::now();
     loop {
         match flock(file, FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => return Ok(()),
             Err(rustix::io::Errno::INTR) => continue,
-            Err(rustix::io::Errno::AGAIN) => wait_for_retry(started, timeout, retry)?,
+            Err(rustix::io::Errno::AGAIN) => {
+                wait_for_retry(started, timeout, retry, timeout_message)?
+            }
             Err(error) => return Err(io_error(error)),
         }
     }
@@ -175,7 +212,12 @@ fn acquire_dotlock(
                     unlinkat(&parent, name.as_bytes(), AtFlags::empty()).map_err(io_error)?;
                     continue;
                 }
-                wait_for_retry(started, timeout, retry)?;
+                wait_for_retry(
+                    started,
+                    timeout,
+                    retry,
+                    "timed out waiting for local lockfile",
+                )?;
             }
             Err(error) => return Err(io_error(error)),
         }
@@ -201,19 +243,18 @@ fn stale_dotlock(parent: &OwnedFd, name: &OsStr, timeout: Duration) -> io::Resul
     Ok(now.saturating_sub(modified) > timeout.as_secs())
 }
 
-fn wait_for_retry(started: Instant, timeout: Duration, retry: Duration) -> io::Result<()> {
+fn wait_for_retry(
+    started: Instant,
+    timeout: Duration,
+    retry: Duration,
+    timeout_message: &'static str,
+) -> io::Result<()> {
     let elapsed = started.elapsed();
     let Some(remaining) = timeout.checked_sub(elapsed) else {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "timed out waiting for local lockfile",
-        ));
+        return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
     };
     if remaining.is_zero() {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "timed out waiting for local lockfile",
-        ));
+        return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
     }
     thread::sleep(retry.min(remaining));
     Ok(())
@@ -293,6 +334,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_lock_timeout_at_supported_boundaries() {
+        assert_eq!(parse_lock_timeout("1").unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            parse_lock_timeout(&crate::config::MAX_LOCK_TIMEOUT_SECONDS.to_string()).unwrap(),
+            Duration::from_secs(crate::config::MAX_LOCK_TIMEOUT_SECONDS)
+        );
+        for value in ["", "0", "1s", "86401", "18446744073709551616"] {
+            assert!(parse_lock_timeout(value).is_err(), "accepted {value:?}");
+        }
+
+        let default = crate::config::parse("").unwrap().expand().unwrap();
+        assert_eq!(
+            lock_timeout_from_config(&default).unwrap(),
+            DEFAULT_LOCK_TIMEOUT
+        );
+        let repeated = crate::config::parse("LOCKTIMEOUT=1\nLOCKTIMEOUT=2\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        assert_eq!(
+            lock_timeout_from_config(&repeated).unwrap(),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[test]
     fn flock_file_persists_and_serializes_holders() {
         let directory = temporary_directory("flock");
         let path = directory.join("recipe.lock");
@@ -363,12 +430,13 @@ mod tests {
         fs::write(&target, b"").unwrap();
         let link = directory.join("link");
         symlink(&target, &link).unwrap();
-        assert!(LocalLock::acquire(&link, LockMethod::Flock, uid).is_err());
+        assert!(LocalLock::acquire(&link, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT).is_err());
 
         let broad = directory.join("broad");
         fs::write(&broad, b"").unwrap();
         fs::set_permissions(&broad, fs::Permissions::from_mode(0o666)).unwrap();
-        let error = LocalLock::acquire(&broad, LockMethod::Flock, uid).unwrap_err();
+        let error =
+            LocalLock::acquire(&broad, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         fs::remove_dir_all(directory).unwrap();
     }

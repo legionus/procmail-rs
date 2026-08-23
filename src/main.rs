@@ -16,7 +16,9 @@ use std::process::{ExitCode, Stdio};
 use procmail_rs::config::{
     self, ActionMode, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable,
 };
-use procmail_rs::delivery::local_lock::{LocalLock, LockMethod};
+use procmail_rs::delivery::local_lock::{
+    LocalLock, LockMethod, lock_timeout_from_config, parse_lock_timeout,
+};
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
 use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
@@ -163,6 +165,8 @@ fn run() -> Result<u8, OperationalError> {
     let durability = Durability::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let _lock_method = LockMethod::from_config(&config)
+        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
+    let _lock_timeout = lock_timeout_from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let _trace_config = TraceConfig::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
@@ -430,6 +434,7 @@ fn deliver_staged(
         .map(|header| MatchingMessage::new(header, matching_raw));
 
     if execution.requires_ordered_delivery() {
+        let mut global_lock = None;
         let outcome = execution
             .execute_mapped_ordered_with_processes_trace(
                 MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
@@ -465,20 +470,43 @@ fn deliver_staged(
                         }
                     })
                 },
-                &mut |command, input, runtime, _| {
-                    execute_external_condition(command, input, runtime)
-                },
-                &mut |action, recipe_options, lock, input, runtime, _| {
-                    let _local_lock = acquire_recipe_lock(lock, None, runtime, staging_options.uid)
-                        .map_err(DeliveryAttemptError::Recoverable)?;
-                    execute_external_action(
-                        staging_options.limits,
-                        action.command.as_str(),
-                        recipe_options,
-                        input,
-                        runtime,
-                    )
-                },
+                (
+                    &mut |command, input, runtime, _| {
+                        execute_external_condition(command, input, runtime)
+                    },
+                    &mut |action, recipe_options, lock, input, runtime, _| {
+                        let _local_lock =
+                            acquire_recipe_lock(lock, None, runtime, staging_options.uid)
+                                .map_err(DeliveryAttemptError::Recoverable)?;
+                        execute_external_action(
+                            staging_options.limits,
+                            action.command.as_str(),
+                            recipe_options,
+                            input,
+                            runtime,
+                        )
+                    },
+                    &mut |path, runtime| {
+                        // Replacing LOCKFILE first releases the preceding
+                        // global lock. If replacement fails, clear the visible
+                        // value so later statements cannot mistake an unheld
+                        // path for an active semaphore.
+                        global_lock = None;
+                        if path.is_empty() {
+                            return Ok(());
+                        }
+                        match acquire_configured_lock(path, runtime, staging_options.uid) {
+                            Ok(lock) => {
+                                global_lock = Some(lock);
+                                Ok(())
+                            }
+                            Err(error) => {
+                                runtime.set("LOCKFILE".to_owned(), String::new());
+                                Err(error)
+                            }
+                        }
+                    },
+                ),
             )
             .map_err(|error| match error {
                 OrderedExecutionError::Evaluation(error) => OperationalError::PermanentDestination(
@@ -546,16 +574,24 @@ fn acquire_recipe_lock(
     } else {
         lock.to_owned()
     };
+    acquire_configured_lock(&path, runtime, uid).map(Some)
+}
+
+fn acquire_configured_lock(
+    path: &str,
+    runtime: &RuntimeVariables,
+    uid: u32,
+) -> Result<LocalLock, OperationalError> {
     let method = LockMethod::parse(runtime.get("LOCKMETHOD").unwrap_or("flock"))
         .map_err(OperationalError::PermanentDestination)?;
-    LocalLock::acquire(Path::new(&path), method, uid)
-        .map(Some)
-        .map_err(|error| {
-            OperationalError::delivery(
-                DeliveryFailureClass::from_io_error(&error),
-                format!("cannot acquire local lockfile: {error}"),
-            )
-        })
+    let timeout = parse_lock_timeout(runtime.get("LOCKTIMEOUT").unwrap_or("1024"))
+        .map_err(OperationalError::PermanentDestination)?;
+    LocalLock::acquire(Path::new(path), method, uid, timeout).map_err(|error| {
+        OperationalError::delivery(
+            DeliveryFailureClass::from_io_error(&error),
+            format!("cannot acquire local lockfile: {error}"),
+        )
+    })
 }
 
 fn execute_external_condition(
@@ -889,8 +925,11 @@ fn deliver_mbox(
         ));
     };
     let path = Path::new(expression.source());
+    let lock_timeout = parse_lock_timeout(runtime.get("LOCKTIMEOUT").unwrap_or("1024"))
+        .map_err(OperationalError::PermanentDestination)
+        .map_err(OrderedStepError::before_publication)?;
     let locked = MboxFile::open(path)
-        .and_then(MboxFile::lock)
+        .and_then(|mbox| mbox.lock_with_timeout(lock_timeout))
         .map_err(|error| {
             let class = DeliveryFailureClass::from_io_error(&error);
             record_delivery(

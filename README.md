@@ -199,3 +199,14 @@ statement order.
 
 Local lockfiles on recipe blocks remain unsupported and are rejected before
 message input.
+
+`LOCKFILE=PATH` holds a global lock from that assignment until another
+`LOCKFILE` assignment replaces it, an empty assignment releases it, or the
+process exits. The path uses the same bounded expansion and `MAILDIR`-relative
+resolution as recipe lockfiles. Global locks use the active `LOCKMETHOD`.
+
+`LOCKTIMEOUT` controls global locks, recipe locks, and the kernel lock taken
+while appending to an mbox. It defaults to 1024 seconds and accepts decimal
+values from 1 through 86400. Unlike original procmail, zero is rejected
+because it requests an unbounded wait. Changes apply only to following lock
+attempts; they do not shorten a wait that has already begun.

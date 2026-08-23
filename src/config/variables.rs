@@ -6,6 +6,26 @@ use std::fmt;
 use super::{MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING_LEN};
 
 pub const MAX_COMMAND_LINE_VARIABLES: usize = 256;
+pub const MAX_LOCK_TIMEOUT_SECONDS: u64 = 86_400;
+
+pub fn validate_lock_method(value: &str) -> Result<(), String> {
+    match value {
+        "flock" | "dotlock" => Ok(()),
+        _ => Err("LOCKMETHOD must be 'flock' or 'dotlock'".to_owned()),
+    }
+}
+
+pub fn parse_lock_timeout_seconds(value: &str) -> Result<u64, String> {
+    let seconds = value.parse::<u64>().map_err(|_| {
+        format!("LOCKTIMEOUT must be an integer from 1 to {MAX_LOCK_TIMEOUT_SECONDS}")
+    })?;
+    if !(1..=MAX_LOCK_TIMEOUT_SECONDS).contains(&seconds) {
+        return Err(format!(
+            "LOCKTIMEOUT must be an integer from 1 to {MAX_LOCK_TIMEOUT_SECONDS}"
+        ));
+    }
+    Ok(seconds)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageLimitVariable {
@@ -35,6 +55,8 @@ pub enum AssignmentTarget {
     Verbose,
     Durability,
     LockMethod,
+    LockFile,
+    LockTimeout,
     Shell,
     ShellFlags,
     Path,
@@ -180,6 +202,8 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "VERBOSE" => VariablePolicy::RcOnly(AssignmentTarget::Verbose),
         "DURABILITY" => VariablePolicy::RcOnly(AssignmentTarget::Durability),
         "LOCKMETHOD" => VariablePolicy::RcOnly(AssignmentTarget::LockMethod),
+        "LOCKFILE" => VariablePolicy::RcOnly(AssignmentTarget::LockFile),
+        "LOCKTIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::LockTimeout),
         "SHELL" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Shell),
         "SHELLFLAGS" => VariablePolicy::RcOrCommandLine(AssignmentTarget::ShellFlags),
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
@@ -234,7 +258,9 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
 
 pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
     match target {
-        AssignmentTarget::Maildir | AssignmentTarget::LogFile => super::MAX_PATH_EXPRESSION_LEN,
+        AssignmentTarget::Maildir | AssignmentTarget::LogFile | AssignmentTarget::LockFile => {
+            super::MAX_PATH_EXPRESSION_LEN
+        }
         AssignmentTarget::Shell | AssignmentTarget::ShellFlags | AssignmentTarget::Path => {
             MAX_SHELL_SETTING_LEN
         }
@@ -242,6 +268,7 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
         | AssignmentTarget::Verbose
         | AssignmentTarget::Durability
         | AssignmentTarget::LockMethod
+        | AssignmentTarget::LockTimeout
         | AssignmentTarget::ExitCode
         | AssignmentTarget::Host
         | AssignmentTarget::MessageLimit(_)
