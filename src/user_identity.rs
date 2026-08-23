@@ -10,6 +10,7 @@ const MAX_IDENTITY_FIELD_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserIdentity {
+    uid: u32,
     logname: String,
     home: String,
 }
@@ -75,12 +76,16 @@ impl UserIdentity {
             let passwd = unsafe { passwd.assume_init() };
             let logname = copy_field(&buffer, passwd.pw_name.cast(), "LOGNAME")?;
             let home = copy_field(&buffer, passwd.pw_dir.cast(), "HOME")?;
-            return Ok(Self { logname, home });
+            return Ok(Self { uid, logname, home });
         }
     }
 
     pub fn logname(&self) -> &str {
         &self.logname
+    }
+
+    pub fn uid(&self) -> u32 {
+        self.uid
     }
 
     pub fn home(&self) -> &str {

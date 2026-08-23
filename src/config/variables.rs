@@ -34,6 +34,7 @@ pub enum AssignmentTarget {
     LogDetail,
     Verbose,
     Durability,
+    LockMethod,
     Shell,
     ShellFlags,
     Path,
@@ -178,6 +179,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LOGDETAIL" => VariablePolicy::RcOnly(AssignmentTarget::LogDetail),
         "VERBOSE" => VariablePolicy::RcOnly(AssignmentTarget::Verbose),
         "DURABILITY" => VariablePolicy::RcOnly(AssignmentTarget::Durability),
+        "LOCKMETHOD" => VariablePolicy::RcOnly(AssignmentTarget::LockMethod),
         "SHELL" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Shell),
         "SHELLFLAGS" => VariablePolicy::RcOrCommandLine(AssignmentTarget::ShellFlags),
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
@@ -239,6 +241,7 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
         AssignmentTarget::LogDetail
         | AssignmentTarget::Verbose
         | AssignmentTarget::Durability
+        | AssignmentTarget::LockMethod
         | AssignmentTarget::ExitCode
         | AssignmentTarget::Host
         | AssignmentTarget::MessageLimit(_)

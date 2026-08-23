@@ -490,7 +490,7 @@ fn parse_recipe(
         line: start + 1,
         action_line: index + 1,
         options,
-        lock,
+        lock: lock.map(PathExpression::from),
         conditions,
         action,
     };
@@ -1064,7 +1064,7 @@ mod tests {
                     write_errors: WriteErrorMode::Fail,
                     output_ending: OutputEnding::Normalize,
                 },
-                lock: Some(String::new()),
+                lock: Some(String::new().into()),
                 conditions: vec![Condition {
                     line: 4,
                     negated: true,
@@ -1977,7 +1977,7 @@ mod tests {
                 let Statement::Recipe(recipe) = &config.statements[0] else {
                     panic!("expected recipe");
                 };
-                assert_eq!(recipe.lock.as_ref().unwrap().len(), length);
+                assert_eq!(recipe.lock.as_ref().unwrap().source().len(), length);
             } else {
                 assert_path_limit_error(result.unwrap_err(), 1, "lockfile path");
             }

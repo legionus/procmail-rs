@@ -229,7 +229,7 @@ pub struct Recipe {
     pub line: usize,
     pub action_line: usize,
     pub options: RecipeOptions,
-    pub lock: Option<String>,
+    pub lock: Option<PathExpression>,
     pub conditions: Vec<Condition>,
     pub action: RecipeAction,
 }

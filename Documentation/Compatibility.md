@@ -28,7 +28,9 @@ files are checked when their `INCLUDERC` or `SWITCHRC` statement executes.
 | `r` on Maildir | Maildir delivery already preserves the message ending, so `r` has no additional effect. | Preserves the message bytes with or without `r`. |
 | `r` on mbox | Raw file delivery suppresses the usual mailbox delimiter handling as well as final-newline normalization. | Retains the generated postmark and mboxrd quoting. It omits the normal blank record separator but adds one LF when needed so a following postmark starts on a new line. |
 | `r` on a recipe block | Ignored with a warning. | Rejected as unsupported instead of silently discarding the flag. |
-| Local recipe lockfiles | Creates and later removes a named dotlock, or derives its name from the destination. | Rejected before message input. A race-resistant locking and cleanup policy has not yet been selected. |
+| Local recipe lockfiles | Creates and later removes a named dotlock, or derives its name from the destination. | Defaults to a persistent, ownership-checked file held with `flock`. `LOCKMETHOD=dotlock` selects compatible creation, stale removal, and cleanup with the original pathname-replacement risk. |
+| Implicit pipe lockfile | Attempts to derive a name from redirection found in the command. | Rejected before message input; shell command text is not reinterpreted to guess a lock path. |
+| Lockfile on a recipe block | Holds the lock while the block executes. | Rejected before message input; local locks currently cover delivery and pipe actions only. |
 
 ## Updating this document
 

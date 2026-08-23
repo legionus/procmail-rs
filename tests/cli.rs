@@ -1435,6 +1435,7 @@ fn invalid_configuration_does_not_consume_stdin() {
         ":0\nmaildir:../escape\n",
         ":0\nmaildir:one//two\n",
         "MAILDIR=\n:0\nmaildir:inbox\n",
+        "LOCKMETHOD=other\n:0\nmaildir:inbox\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
@@ -1458,11 +1459,9 @@ fn invalid_configuration_does_not_consume_stdin() {
 }
 
 #[test]
-fn local_recipe_lockfiles_are_rejected_before_stdin() {
-    for rules in [
-        ":0 :selected.lock\nmaildir:selected\n",
-        ":0 :\nmaildir:selected\n",
-    ] {
+fn implicit_pipe_lockfile_is_rejected_before_stdin() {
+    {
+        let rules = ":0 :\n| command\n";
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
         fs::write(&input_path, b"Subject: must remain unread\n\nbody").unwrap();
@@ -1478,12 +1477,162 @@ fn local_recipe_lockfiles_are_rejected_before_stdin() {
         assert_eq!(output.status.code(), Some(78));
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(
-            stderr.contains("rules.rc:line 1: local recipe lockfiles are not supported yet"),
+            stderr.contains(
+                "rules.rc:line 1: an implicit local lockfile requires a filesystem destination"
+            ),
             "{stderr}"
         );
         assert_eq!(input.stream_position().unwrap(), 0);
         fs::remove_dir_all(config.parent().unwrap()).unwrap();
     }
+}
+
+#[test]
+fn lockmethod_applies_in_statement_order_to_filesystem_recipes() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let first = base.join("first");
+    let second = base.join("second");
+    create_maildir(&first);
+    create_maildir(&second);
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKMETHOD=dotlock\n:0 c:first.lock\nfirst/\nLOCKMETHOD=flock\n:0 :second.lock\nsecond/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: locked\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(input)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&first), [input.to_vec()]);
+    assert_eq!(delivered_messages(&second), [input.to_vec()]);
+    assert!(!base.join("first.lock").exists());
+    assert!(base.join("second.lock").is_file());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn implicit_flock_name_is_derived_from_the_destination() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let selected = base.join("selected");
+    create_maildir(&selected);
+    fs::write(
+        &config,
+        format!("MAILDIR={}\n:0 :\nselected/\n", base.display()),
+    )
+    .unwrap();
+    let input = b"Subject: implicit lock\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(input)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [input.to_vec()]);
+    assert!(selected.join(".lock").is_file());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn named_dotlock_is_held_while_a_pipe_action_runs() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let lock = base.join("pipe.lock");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKMETHOD=dotlock\nLOCKPATH={}\n:0 w:$LOCKPATH\n| test -f \"$LOCKPATH\"\n",
+            base.display(),
+            lock.display()
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: pipe lock\n\nbody")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(!lock.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn flock_serializes_external_actions_across_processes() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let lock = base.join("shared.lock");
+    let events = base.join("events");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKPATH={}\nEVENTS={}\n:0 w:$LOCKPATH\n| printf 'start\\n' >> \"$EVENTS\"; sleep 0.2; printf 'end\\n' >> \"$EVENTS\"\n",
+            base.display(),
+            lock.display(),
+            events.display()
+        ),
+    )
+    .unwrap();
+
+    let spawn = || {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Subject: concurrent\n\nbody")
+            .unwrap();
+        child
+    };
+    let mut first = spawn();
+    for _ in 0..100 {
+        if fs::read(&events).is_ok_and(|bytes| bytes == b"start\n") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(fs::read(&events).unwrap(), b"start\n");
+    let mut second = spawn();
+    assert!(first.wait().unwrap().success());
+    assert!(second.wait().unwrap().success());
+
+    assert_eq!(fs::read(&events).unwrap(), b"start\nend\nstart\nend\n");
+    assert!(lock.is_file());
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

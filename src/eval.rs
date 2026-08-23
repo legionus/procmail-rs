@@ -92,6 +92,7 @@ struct CompiledSequence {
 struct CompiledNode {
     line: usize,
     preceding_statements: Vec<CompiledStatement>,
+    lock: Option<crate::config::PathExpression>,
     control: ControlFlow,
     conditions: Vec<CompiledCondition>,
     action: CompiledAction,
@@ -207,6 +208,7 @@ struct OrderedTreeExecution<'a, E, D, T> {
 type ExternalActionExecutor<'a, E, T> = dyn FnMut(
         &PipeAction,
         RecipeOptions,
+        Option<&str>,
         ExternalActionInput<'_>,
         &mut RuntimeVariables,
         &mut T,
@@ -435,6 +437,7 @@ pub struct PlannedDelivery {
     destination: Destination,
     continuation: DeliveryContinuation,
     output_ending: OutputEnding,
+    lock: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -482,6 +485,10 @@ impl PlannedDelivery {
 
     pub fn output_ending(&self) -> OutputEnding {
         self.output_ending
+    }
+
+    pub fn lock(&self) -> Option<&str> {
+        self.lock.as_deref()
     }
 }
 
@@ -868,6 +875,7 @@ impl CompiledSequence {
             &Destination,
             &[u8],
             OutputEnding,
+            Option<&str>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -1380,6 +1388,7 @@ impl CompiledNode {
         Self {
             line: recipe.line,
             preceding_statements,
+            lock: recipe.lock.clone(),
             control: recipe.options.control,
             conditions,
             action,
@@ -1404,9 +1413,11 @@ impl CompiledNode {
     }
 
     fn requires_ordered_delivery(&self) -> bool {
-        self.conditions
-            .iter()
-            .any(|condition| matches!(condition.kind, CompiledConditionKind::Program { .. }))
+        self.lock.is_some()
+            || self
+                .conditions
+                .iter()
+                .any(|condition| matches!(condition.kind, CompiledConditionKind::Program { .. }))
             || match &self.action {
                 CompiledAction::Pipe { .. } => true,
                 CompiledAction::Deliver {
@@ -1457,6 +1468,7 @@ impl CompiledNode {
             &Destination,
             &[u8],
             OutputEnding,
+            Option<&str>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -1685,6 +1697,7 @@ impl CompiledNode {
             &Destination,
             &[u8],
             OutputEnding,
+            Option<&str>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -1716,9 +1729,19 @@ impl CompiledNode {
                         .ok_or(EvalError::BodyWasNotBuffered)
                         .map_err(OrderedExecutionError::Evaluation)?,
                 };
+                let lock = self
+                    .lock
+                    .as_ref()
+                    .map(|expression| {
+                        expression.resolve_with(|name| context.runtime.get(name).map(str::to_owned))
+                    })
+                    .transpose()
+                    .map_err(EvalError::Expansion)
+                    .map_err(OrderedExecutionError::Evaluation)?;
                 match external(
                     action,
                     *options,
+                    lock.as_deref(),
                     action_input,
                     context.runtime,
                     context.trace,
@@ -1773,10 +1796,20 @@ impl CompiledNode {
                         .raw()
                         .ok_or(EvalError::BodyWasNotBuffered)
                         .map_err(OrderedExecutionError::Evaluation)?;
+                let lock = self
+                    .lock
+                    .as_ref()
+                    .map(|expression| {
+                        expression.resolve_with(|name| context.runtime.get(name).map(str::to_owned))
+                    })
+                    .transpose()
+                    .map_err(EvalError::Expansion)
+                    .map_err(OrderedExecutionError::Evaluation)?;
                 match (context.deliver)(
                     &destination,
                     message,
                     *output_ending,
+                    lock.as_deref(),
                     context.runtime,
                     context.trace,
                 ) {
@@ -1848,6 +1881,12 @@ impl CompiledNode {
         let destination = destination
             .bind_with(|name| runtime.get(name).map(str::to_owned))
             .map_err(EvalError::Expansion)?;
+        let lock = self
+            .lock
+            .as_ref()
+            .map(|expression| expression.resolve_with(|name| runtime.get(name).map(str::to_owned)))
+            .transpose()
+            .map_err(EvalError::Expansion)?;
         let copy = *continuation == ContinuationMode::Continue;
         execution.deliveries.push(PlannedDelivery {
             destination,
@@ -1857,6 +1896,7 @@ impl CompiledNode {
                 DeliveryContinuation::Stop
             },
             output_ending: *output_ending,
+            lock,
         });
         execution.original_delivered |= !copy;
         if copy || has_error_handler {
@@ -1994,6 +2034,7 @@ where
         &Destination,
         &[u8],
         OutputEnding,
+        Option<&str>,
         &mut RuntimeVariables,
         &mut T,
     ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2485,6 +2526,7 @@ impl ExecutionPlan {
             &Destination,
             &[u8],
             OutputEnding,
+            Option<&str>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2509,6 +2551,7 @@ impl ExecutionPlan {
             &Destination,
             &[u8],
             OutputEnding,
+            Option<&str>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2537,12 +2580,14 @@ impl ExecutionPlan {
             &Destination,
             &[u8],
             OutputEnding,
+            Option<&str>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
         X: FnMut(
             &PipeAction,
             RecipeOptions,
+            Option<&str>,
             ExternalActionInput<'_>,
             &mut RuntimeVariables,
             &mut T,
@@ -2566,6 +2611,7 @@ impl ExecutionPlan {
             &Destination,
             &[u8],
             OutputEnding,
+            Option<&str>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -2578,6 +2624,7 @@ impl ExecutionPlan {
         X: FnMut(
             &PipeAction,
             RecipeOptions,
+            Option<&str>,
             ExternalActionInput<'_>,
             &mut RuntimeVariables,
             &mut T,
@@ -2608,6 +2655,7 @@ impl ExecutionPlan {
             &Destination,
             &[u8],
             OutputEnding,
+            Option<&str>,
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<(), DeliveryAttemptError<E>>,
@@ -4084,7 +4132,7 @@ mod tests {
                 b"Subject: test\n\n".len(),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, runtime, _| {
+                &mut |destination, _, _, _, runtime, _| {
                     let destination = destination
                         .resolve_with(|name| runtime.get(name).map(str::to_owned))
                         .unwrap();
@@ -4115,7 +4163,7 @@ mod tests {
                 b"Subject: test\n\n".len(),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, _, _| {
+                &mut |destination, _, _, _, _, _| {
                     attempted.push(destination.path().to_owned());
                     if destination.path() == "primary" {
                         Err(DeliveryAttemptError::Recoverable("primary failed"))
@@ -4147,7 +4195,7 @@ mod tests {
                 b"Subject: test\n\n".len(),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, _, _| {
+                &mut |destination, _, _, _, _, _| {
                     attempted.push(destination.path().to_owned());
                     if destination.path() == "primary" {
                         Err(DeliveryAttemptError::Recoverable("primary failed"))
@@ -4178,11 +4226,11 @@ mod tests {
                 MappedMessageInput::new(original, b"X-State: old\n\n".len(), None),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, message, _, _, _| {
+                &mut |destination, message, _, _, _, _| {
                     delivered.push((destination.path().to_owned(), message.to_vec()));
                     Ok::<_, DeliveryAttemptError<&str>>(())
                 },
-                &mut |action, options, input, _, _| {
+                &mut |action, options, _, input, _, _| {
                     external_calls += 1;
                     assert_eq!(action.command, "rewrite");
                     assert_eq!(options.action_mode, crate::config::ActionMode::Filter);
@@ -4219,7 +4267,7 @@ mod tests {
                 ),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, _, _| {
+                &mut |destination, _, _, _, _, _| {
                     delivered.push(destination.path().to_owned());
                     Ok::<_, DeliveryAttemptError<&str>>(())
                 },
@@ -4229,7 +4277,7 @@ mod tests {
                     assert_eq!(input, b"Subject: program\n condition\n\n");
                     Ok::<_, DeliveryAttemptError<&str>>(true)
                 },
-                &mut |_, _, _, _, _| {
+                &mut |_, _, _, _, _, _| {
                     panic!("recipe contains no pipe action");
                 },
             )
@@ -4254,11 +4302,11 @@ mod tests {
                 MappedMessageInput::new(original, b"Subject: original\n\n".len(), None),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, message, _, _, _| {
+                &mut |destination, message, _, _, _, _| {
                     delivered.push((destination.path().to_owned(), message.to_vec()));
                     Ok::<_, DeliveryAttemptError<&str>>(())
                 },
-                &mut |_, _, input, _, _| {
+                &mut |_, _, _, input, _, _| {
                     assert_eq!(input.selected(), original);
                     Err(DeliveryAttemptError::Recoverable("filter failed"))
                 },
@@ -4287,8 +4335,8 @@ mod tests {
                     MappedMessageInput::new(original, b"Subject: original\n\n".len(), None),
                     &mut runtime,
                     &mut trace,
-                    &mut |_, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
-                    &mut |_, _, input, _, _| {
+                    &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+                    &mut |_, _, _, input, _, _| {
                         assert_eq!(input.selected(), expected, "flags {flags}");
                         Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(
                             original.to_vec(),
@@ -4314,7 +4362,7 @@ mod tests {
                 b"Subject: test\n\n".len(),
                 &mut runtime,
                 &mut trace,
-                &mut |destination, _, _, _, _| {
+                &mut |destination, _, _, _, _, _| {
                     attempted.push(destination.path().to_owned());
                     Err(DeliveryAttemptError::Fatal("durability failed"))
                 },

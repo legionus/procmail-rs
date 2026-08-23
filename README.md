@@ -180,3 +180,22 @@ performs the selected `DURABILITY` operations. A write or sync failure attempts
 to truncate the mailbox back to its original length before unlocking. Failure
 of that recovery is reported as an internal error. `LASTFOLDER` changes only
 after a successful append.
+
+Local lockfiles on delivery and pipe recipes use `LOCKMETHOD=flock` by default. The lock path is
+opened without following symlinks, must be a regular file owned by the current
+uid with one link and no group or other permissions, and remains present after
+the recipe; closing its descriptor releases the kernel lock. A bare trailing
+recipe colon derives the name by appending `.lock` to the resolved filesystem
+destination. An implicit lock is rejected for pipe actions.
+
+`LOCKMETHOD=dotlock` selects procmail-compatible named-file locking. The
+read-only file exists only while the selected action runs, retries every eight
+seconds, and is treated as stale after 1024 seconds. This mode intentionally
+inherits procmail's pathname race: another process can replace the entry
+between inspection and removal. Use it only when coordination with software
+that observes dotlock creation and deletion is more important than protection
+against hostile same-directory changes. `LOCKMETHOD` takes effect in rc
+statement order.
+
+Local lockfiles on recipe blocks remain unsupported and are rejected before
+message input.

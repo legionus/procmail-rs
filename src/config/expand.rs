@@ -183,6 +183,31 @@ impl Destination {
     }
 }
 
+impl PathExpression {
+    pub(crate) fn resolve_with(
+        &self,
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<String, ExpansionError> {
+        let parsed;
+        let compiled = if let Some(compiled) = self.expansion.as_ref() {
+            compiled
+        } else {
+            parsed = parse_expression(&self.source, self.line)?;
+            &parsed
+        };
+        let source =
+            evaluate_expression(compiled, self.line, MAX_PATH_EXPRESSION_LEN, &mut lookup, 0)?.text;
+        if source.is_empty() {
+            return Ok(source);
+        }
+        let runtime_base = self.runtime_base.then(|| lookup("MAILDIR")).flatten();
+        let base = runtime_base.as_deref().or(self.base.as_deref());
+        let path = resolve_relative_path(&source, base, self.line)?;
+        validate_filesystem_path(&path, self.line, "lockfile", false)?;
+        Ok(path)
+    }
+}
+
 pub(super) fn expand(
     config: Config,
     supplied: &[SuppliedVariable],
@@ -327,11 +352,20 @@ fn expand_recipe(
     variables: &BTreeMap<String, ExpandedValue>,
     maildir: Option<&str>,
 ) -> Result<(), ExpansionError> {
-    if recipe.lock.is_some() {
-        return Err(ExpansionError::new(
+    if let Some(expression) = &mut recipe.lock {
+        prepare_lock_expression(
+            expression,
             recipe.line,
-            "local recipe lockfiles are not supported yet",
-        ));
+            variables,
+            &BTreeSet::new(),
+            maildir,
+        )?;
+        if expression.source.is_empty() && matches!(recipe.action, RecipeAction::Pipe(_)) {
+            return Err(ExpansionError::new(
+                recipe.line,
+                "an implicit local lockfile requires a filesystem destination",
+            ));
+        }
     }
 
     match &mut recipe.action {
@@ -385,6 +419,7 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::Path
                         | AssignmentTarget::ExitCode
                         | AssignmentTarget::Host
+                        | AssignmentTarget::LockMethod
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,
@@ -423,11 +458,14 @@ fn prepare_runtime_recipe(
     dynamic: &BTreeSet<String>,
     maildir: Option<&str>,
 ) -> Result<(), ExpansionError> {
-    if recipe.lock.is_some() {
-        return Err(ExpansionError::new(
-            recipe.line,
-            "local recipe lockfiles are not supported yet",
-        ));
+    if let Some(expression) = &mut recipe.lock {
+        prepare_lock_expression(expression, recipe.line, known, dynamic, maildir)?;
+        if expression.source.is_empty() && matches!(recipe.action, RecipeAction::Pipe(_)) {
+            return Err(ExpansionError::new(
+                recipe.line,
+                "an implicit local lockfile requires a filesystem destination",
+            ));
+        }
     }
 
     match &mut recipe.action {
@@ -448,6 +486,27 @@ fn prepare_runtime_recipe(
             let mut child_dynamic = dynamic.clone();
             prepare_runtime_statements(children, known, &mut child_dynamic, maildir)?;
         }
+    }
+    Ok(())
+}
+
+fn prepare_lock_expression(
+    expression: &mut PathExpression,
+    line: usize,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+    maildir: Option<&str>,
+) -> Result<(), ExpansionError> {
+    let parsed = parse_expression(&expression.source, line)?;
+    validate_runtime_references(&parsed, line, known, dynamic)?;
+    expression.base = maildir.map(str::to_owned);
+    expression.line = line;
+    expression.runtime_dependent =
+        expression_needs_runtime(&parsed, known) || expression_references_any(&parsed, dynamic);
+    expression.runtime_base = expression.runtime_dependent;
+    expression.expansion = Some(parsed);
+    if !expression.runtime_dependent && !expression.source.is_empty() {
+        expression.resolve_with(|name| known.get(name).map(|value| value.text.clone()))?;
     }
     Ok(())
 }
@@ -665,6 +724,18 @@ fn expression_needs_runtime(
                     .as_ref()
                     .is_some_and(|value| expression_needs_runtime(value, variables))
             }
+        }
+    })
+}
+
+fn expression_references_any(expression: &ExpansionExpression, names: &BTreeSet<String>) -> bool {
+    expression.parts.iter().any(|part| match part {
+        ExpansionPart::Literal(_) => false,
+        ExpansionPart::Variable { name, default } => {
+            names.contains(name)
+                || default
+                    .as_ref()
+                    .is_some_and(|value| expression_references_any(value, names))
         }
     })
 }
@@ -987,15 +1058,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_named_and_implicit_local_recipe_lockfiles() {
-        for source in [":0 :named.lock\nmaildir:inbox\n", ":0 :\nmaildir:inbox\n"] {
-            let error = parse(source).unwrap().expand().unwrap_err();
-            assert_eq!(error.line, 1);
-            assert_eq!(
-                error.message,
-                "local recipe lockfiles are not supported yet"
-            );
-        }
+    fn prepares_named_and_implicit_delivery_lockfiles() {
+        let config = parse(
+            "MAILDIR=/srv/mail\nNAME=selected\n:0 c:named-$NAME.lock\nmaildir:one\n:0 :\nmaildir:two\n",
+        )
+        .unwrap()
+        .expand()
+        .unwrap();
+        let Statement::Recipe(named) = &config.statements[2] else {
+            panic!("expected named-lock recipe");
+        };
+        assert_eq!(
+            named
+                .lock
+                .as_ref()
+                .unwrap()
+                .resolve_with(|name| (name == "NAME").then(|| "selected".to_owned()))
+                .unwrap(),
+            "/srv/mail/named-selected.lock"
+        );
+        let Statement::Recipe(implicit) = &config.statements[3] else {
+            panic!("expected implicit-lock recipe");
+        };
+        assert_eq!(implicit.lock.as_ref().unwrap().source(), "");
+
+        let error = parse(":0 :\n| command\n").unwrap().expand().unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(
+            error.message,
+            "an implicit local lockfile requires a filesystem destination"
+        );
     }
 
     #[test]

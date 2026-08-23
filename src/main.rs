@@ -16,6 +16,7 @@ use std::process::{ExitCode, Stdio};
 use procmail_rs::config::{
     self, ActionMode, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable,
 };
+use procmail_rs::delivery::local_lock::{LocalLock, LockMethod};
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
 use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
@@ -56,6 +57,7 @@ struct StagingOptions<'a> {
     directory: &'a Path,
     durability: Durability,
     limits: MessageLimits,
+    uid: u32,
 }
 
 #[derive(Debug)]
@@ -160,6 +162,8 @@ fn run() -> Result<u8, OperationalError> {
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let durability = Durability::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
+    let _lock_method = LockMethod::from_config(&config)
+        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let _trace_config = TraceConfig::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
 
@@ -246,6 +250,7 @@ fn run() -> Result<u8, OperationalError> {
                                 directory: staging_directory,
                                 durability,
                                 limits,
+                                uid: identity.uid(),
                             },
                             &mut runtime,
                             &mut trace,
@@ -430,7 +435,10 @@ fn deliver_staged(
                 MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                 runtime,
                 trace,
-                &mut |destination, message, output_ending, runtime, trace| {
+                &mut |destination, message, output_ending, lock, runtime, trace| {
+                    let _local_lock =
+                        acquire_recipe_lock(lock, Some(destination), runtime, staging_options.uid)
+                            .map_err(DeliveryAttemptError::Recoverable)?;
                     let result = if matches!(destination, Destination::Mbox(_)) {
                         deliver_mbox(
                             destination,
@@ -460,7 +468,9 @@ fn deliver_staged(
                 &mut |command, input, runtime, _| {
                     execute_external_condition(command, input, runtime)
                 },
-                &mut |action, recipe_options, input, runtime, _| {
+                &mut |action, recipe_options, lock, input, runtime, _| {
+                    let _local_lock = acquire_recipe_lock(lock, None, runtime, staging_options.uid)
+                        .map_err(DeliveryAttemptError::Recoverable)?;
                     execute_external_action(
                         staging_options.limits,
                         action.command.as_str(),
@@ -504,6 +514,48 @@ fn deliver_staged(
     commit_delivery(validated, plan.deliveries(), runtime, trace)?;
 
     delivery_outcome(&plan)
+}
+
+fn acquire_recipe_lock(
+    lock: Option<&str>,
+    destination: Option<&Destination>,
+    runtime: &RuntimeVariables,
+    uid: u32,
+) -> Result<Option<LocalLock>, OperationalError> {
+    let Some(lock) = lock else {
+        return Ok(None);
+    };
+    let path = if lock.is_empty() {
+        let destination = destination.ok_or_else(|| {
+            OperationalError::PermanentDestination(
+                "an implicit local lockfile requires a filesystem destination".to_owned(),
+            )
+        })?;
+        let destination = destination
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
+        let mut path = destination.path().to_owned();
+        path.push_str(".lock");
+        if path.len() > config::MAX_PATH_EXPRESSION_LEN {
+            return Err(OperationalError::PermanentDestination(format!(
+                "implicit lockfile path exceeds the hard limit of {} bytes",
+                config::MAX_PATH_EXPRESSION_LEN
+            )));
+        }
+        path
+    } else {
+        lock.to_owned()
+    };
+    let method = LockMethod::parse(runtime.get("LOCKMETHOD").unwrap_or("flock"))
+        .map_err(OperationalError::PermanentDestination)?;
+    LocalLock::acquire(Path::new(&path), method, uid)
+        .map(Some)
+        .map_err(|error| {
+            OperationalError::delivery(
+                DeliveryFailureClass::from_io_error(&error),
+                format!("cannot acquire local lockfile: {error}"),
+            )
+        })
 }
 
 fn execute_external_condition(
