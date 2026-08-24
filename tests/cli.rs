@@ -3,7 +3,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -2967,6 +2967,121 @@ fn filter_streams_header_decided_message_to_maildir() {
     assert_eq!(files.len(), 1);
     assert_eq!(fs::read(&files[0]).unwrap(), input);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_streams_edited_headers_with_binary_and_empty_bodies() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+
+    for (case, input, expected) in [
+        (
+            "binary",
+            &b"X-State: old\nKeep: exact\n\nbinary:\xff\0body"[..],
+            &b"X-State: new\nKeep: exact\n\nbinary:\xff\0body"[..],
+        ),
+        (
+            "empty",
+            &b"X-State: old\nKeep: exact\n\n"[..],
+            &b"X-State: new\nKeep: exact\n\n"[..],
+        ),
+    ] {
+        let maildir = base.join(case);
+        create_maildir(&maildir);
+        fs::write(
+            &path,
+            format!(
+                ":0\nheaders {{\n set X-State: new\n}}\n:0\nmaildir:{}\n",
+                maildir.display()
+            ),
+        )
+        .unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        assert_eq!(delivered_messages(&maildir), [expected.to_vec()]);
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn filter_streams_edited_message_larger_than_its_address_space_limit() {
+    const BODY_LEN: usize = 80 * 1024 * 1024;
+
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let maildir = base.join("large");
+    create_maildir(&maildir);
+    fs::write(
+        &path,
+        format!(
+            "LIMIT_MSG_SIZE=96M\nLIMIT_MSG_BODY=96M\n:0\nheaders {{\n set X-State: new\n}}\n:0\nmaildir:{}\n",
+            maildir.display()
+        ),
+    )
+    .unwrap();
+
+    // The shell applies RLIMIT_AS before exec without adding unsafe code to
+    // the test binary. Feed the body in fixed chunks so neither side needs an
+    // allocation proportional to the complete message.
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "ulimit -v 49152; exec \"$@\"",
+            "procmail-rs-test-shell",
+            env!("CARGO_BIN_EXE_procmail-rs"),
+            "filter",
+            "--config",
+        ])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"X-State: old\n\n").unwrap();
+    let chunk = [b'x'; 8192];
+    for _ in 0..BODY_LEN / chunk.len() {
+        stdin.write_all(&chunk).unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    let entries = fs::read_dir(maildir.join("new"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let [entry] = entries.as_slice() else {
+        panic!("expected exactly one delivered message");
+    };
+    let mut delivered = fs::File::open(entry.path()).unwrap();
+    assert_eq!(
+        delivered.metadata().unwrap().len(),
+        (b"X-State: new\n\n".len() + BODY_LEN) as u64
+    );
+    let mut header = [0u8; 14];
+    delivered.read_exact(&mut header).unwrap();
+    assert_eq!(&header, b"X-State: new\n\n");
+    delivered.seek(SeekFrom::End(-16)).unwrap();
+    let mut tail = [0u8; 16];
+    delivered.read_exact(&mut tail).unwrap();
+    assert_eq!(tail, [b'x'; 16]);
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

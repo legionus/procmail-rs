@@ -335,7 +335,7 @@ fn header_separator_start(header: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufReader, Cursor, Seek};
+    use std::io::{self, BufReader, Cursor, Read, Seek};
 
     use super::*;
     use crate::config::HeaderValue;
@@ -430,6 +430,21 @@ mod tests {
     }
 
     #[test]
+    fn edit_preserves_unrecognized_binary_header_fields() {
+        let header = b"\xffBroken\0field\n continuation\nGood: old\n\n";
+        let action = action(vec![HeaderOperation::Set {
+            line: 1,
+            name: "Good".into(),
+            value: value("new"),
+        }]);
+
+        assert_eq!(
+            apply(header, 0, &action).as_bytes(),
+            b"\xffBroken\0field\n continuation\nGood: new\n\n"
+        );
+    }
+
+    #[test]
     fn header_phase_edit_does_not_consume_body() {
         let input = b"A: old\n\nbody remains unread";
         let mut reader = BufReader::with_capacity(1, Cursor::new(input));
@@ -449,6 +464,35 @@ mod tests {
         let message = head.read_body(&mut reader).unwrap();
         assert_eq!(message.header(), b"A: new\n\n");
         assert_eq!(message.body(), b"body remains unread");
+    }
+
+    #[test]
+    fn edited_header_streams_a_large_synthetic_body_without_retaining_it() {
+        const BODY_LEN: usize = 64 * 1024 * 1024;
+
+        let limits = MessageLimits {
+            message_size: BODY_LEN + 64,
+            body_size: BODY_LEN,
+            ..MessageLimits::default()
+        };
+        let mut header_reader = Cursor::new(b"A: old\n\n");
+        let mut head = Message::read_headers(&mut header_reader, limits).unwrap();
+        let action = action(vec![HeaderOperation::Set {
+            line: 1,
+            name: "A".into(),
+            value: value("new"),
+        }]);
+        let edited = apply_header_action(head.as_bytes(), 0, &action, limits).unwrap();
+        head.replace_edited_header(edited);
+
+        // Generate the body on demand so the fixture itself does not allocate
+        // in proportion to the input and the returned streaming summary has
+        // no place to retain body bytes.
+        let mut body = BufReader::with_capacity(8192, io::repeat(b'x').take(BODY_LEN as u64));
+        let streamed = head.stream_to(&mut body, &mut io::sink()).unwrap();
+
+        assert_eq!(streamed.header(), b"A: new\n\n");
+        assert_eq!(streamed.len(), BODY_LEN + b"A: new\n\n".len());
     }
 
     #[test]
