@@ -1424,6 +1424,51 @@ fn validates_header_names_and_rejects_folding_syntax() {
 }
 
 #[test]
+fn header_actions_accept_condition_and_control_flags_and_always_continue() {
+    let config = parse(":0 HBDcA\nheaders {\n remove X-Test\n}\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+
+    assert_eq!(recipe.options.condition_input, ConditionInput::Message);
+    assert_eq!(recipe.options.case_mode, CaseMode::Sensitive);
+    assert_eq!(recipe.options.control, ControlFlow::AfterChainMatch);
+    assert_eq!(recipe.options.continuation, ContinuationMode::Continue);
+
+    for flag in ["", "c", "a", "E", "e"] {
+        let source = format!(":0 {flag}\nheaders {{\n remove X-Test\n}}\n");
+        let config = parse(&source).unwrap();
+        let Statement::Recipe(recipe) = &config.statements[0] else {
+            panic!("expected recipe");
+        };
+        assert_eq!(recipe.options.continuation, ContinuationMode::Continue);
+    }
+}
+
+#[test]
+fn header_actions_reject_action_flags_and_lockfiles() {
+    for flag in ['h', 'b', 'f', 'w', 'W', 'i', 'r'] {
+        let source = format!(":0 {flag}\nheaders {{\n remove X-Test\n}}\n");
+        let error = parse(&source).unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(
+            error.message,
+            format!("recipe flag '{flag}' is not supported for headers actions")
+        );
+    }
+
+    for header in [":0:", ":0:header.lock"] {
+        let source = format!("{header}\nheaders {{\n remove X-Test\n}}\n");
+        let error = parse(&source).unwrap_err();
+        assert_eq!(error.line, 1);
+        assert_eq!(
+            error.message,
+            "headers actions do not support local lockfiles"
+        );
+    }
+}
+
+#[test]
 fn rejects_unclosed_header_action() {
     let error = parse(":0\nheaders {\n remove X-Test\n").unwrap_err();
 

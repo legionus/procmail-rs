@@ -348,7 +348,7 @@ fn parse_recipe(
     let rest = header
         .strip_prefix(":0")
         .ok_or_else(|| ParseError::new(start + 1, "only ':0' recipes are supported"))?;
-    let (options, lock) = parse_recipe_header(rest, start + 1)?;
+    let (mut options, lock, recipe_flags) = parse_recipe_header(rest, start + 1)?;
     let mut conditions = Vec::new();
     let mut regex_count = 0usize;
     let mut index = start + 1;
@@ -428,6 +428,14 @@ fn parse_recipe(
 
     let is_pipe = action.starts_with('|');
     let is_headers = action == "headers {";
+    if is_headers {
+        // Header edits are internal transformations rather than deliveries or
+        // child processes. Reject options whose meaning depends on either,
+        // and encode their mandatory fall-through here so every evaluator
+        // receives the same behavior without consulting the original text.
+        validate_header_action_recipe(&recipe_flags, lock.as_deref(), start + 1)?;
+        options.continuation = ContinuationMode::Continue;
+    }
     let has_program_condition = conditions
         .iter()
         .any(|condition| matches!(condition.kind, ConditionKind::Program(_)));
@@ -582,6 +590,29 @@ fn parse_header_action(
         opening + 1,
         "headers action has no closing '}'",
     ))
+}
+
+fn validate_header_action_recipe(
+    flags: &str,
+    lock: Option<&str>,
+    line: usize,
+) -> Result<(), ParseError> {
+    if lock.is_some() {
+        return Err(ParseError::new(
+            line,
+            "headers actions do not support local lockfiles",
+        ));
+    }
+    if let Some(flag) = flags
+        .chars()
+        .find(|flag| matches!(flag, 'h' | 'b' | 'f' | 'w' | 'W' | 'i' | 'r'))
+    {
+        return Err(ParseError::new(
+            line,
+            format!("recipe flag '{flag}' is not supported for headers actions"),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, ParseError> {
@@ -761,7 +792,7 @@ fn check_condition_limits(
 fn parse_recipe_header(
     rest: &str,
     line: usize,
-) -> Result<(RecipeOptions, Option<String>), ParseError> {
+) -> Result<(RecipeOptions, Option<String>, String), ParseError> {
     let rest = strip_comment(rest).trim();
     let (flag_text, lock) = match rest.split_once(':') {
         Some((flags, lock)) => {
@@ -866,6 +897,7 @@ fn parse_recipe_header(
             },
         },
         lock,
+        flag_text.to_owned(),
     ))
 }
 
