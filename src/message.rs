@@ -6,6 +6,7 @@ use std::io::{BufRead, Read, Write};
 use std::ops::Range;
 
 use crate::config::ActionInput;
+use crate::header_edit::{EditedHeader, HeaderEditError};
 use crate::limits::MessageLimits;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,31 @@ pub struct StreamedMessage {
 }
 
 impl Message {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_edited_header(&self, edited: EditedHeader) -> Result<Self, HeaderEditError> {
+        let header = edited.into_bytes();
+        let body = self.body();
+        let total = header
+            .len()
+            .checked_add(body.len())
+            .ok_or(HeaderEditError::SizeOverflow)?;
+        let body_start = header.len();
+        let matching_header = normalize_folded_header(&header);
+
+        // Build the complete replacement before returning it so callers keep
+        // the preceding message when size arithmetic fails. Only the header
+        // is changed; the existing body bytes are copied without parsing.
+        let mut raw = Vec::with_capacity(total);
+        raw.extend_from_slice(&header);
+        raw.extend_from_slice(body);
+        Ok(Self {
+            raw,
+            header: 0..body_start,
+            body: body_start..total,
+            matching_header,
+        })
+    }
+
     pub fn from_filter_output(
         header: &[u8],
         body: &[u8],
@@ -160,6 +186,13 @@ impl Message {
 }
 
 impl MessageHead {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_edited_header(mut self, edited: EditedHeader) -> Self {
+        self.raw = edited.into_bytes();
+        self.matching_header = normalize_folded_header(&self.raw);
+        self
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
     }

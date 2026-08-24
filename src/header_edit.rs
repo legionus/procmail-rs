@@ -6,6 +6,23 @@ use std::fmt;
 use crate::config::{HeaderAction, HeaderOperation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EditedHeader {
+    bytes: Vec<u8>,
+}
+
+impl EditedHeader {
+    #[cfg(test)]
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HeaderEditError {
     SizeOverflow,
 }
@@ -62,7 +79,7 @@ impl EditedField<'_> {
 pub(crate) fn apply_header_action(
     header: &[u8],
     action: &HeaderAction,
-) -> Result<Vec<u8>, HeaderEditError> {
+) -> Result<EditedHeader, HeaderEditError> {
     let (fields, separator, line_ending) = split_fields(header);
     let mut edited: Vec<EditedField<'_>> = fields.into_iter().map(EditedField::Borrowed).collect();
 
@@ -121,7 +138,7 @@ pub(crate) fn apply_header_action(
         result.extend_from_slice(field.bytes());
     }
     result.extend_from_slice(separator);
-    Ok(result)
+    Ok(EditedHeader { bytes: result })
 }
 
 fn make_field(name: &str, value: &str, line_ending: &[u8]) -> Result<Vec<u8>, HeaderEditError> {
@@ -210,8 +227,12 @@ fn header_separator_start(header: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufReader, Cursor, Seek};
+
     use super::*;
     use crate::config::HeaderValue;
+    use crate::limits::MessageLimits;
+    use crate::message::Message;
 
     fn value(source: &str) -> HeaderValue {
         HeaderValue {
@@ -246,7 +267,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            apply_header_action(header, &action).unwrap(),
+            apply_header_action(header, &action).unwrap().as_bytes(),
             b"First: yes\nA: one\nx-test: new\nZ: last\nX-Test: added\n\n"
         );
     }
@@ -260,7 +281,7 @@ mod tests {
         }]);
 
         assert_eq!(
-            apply_header_action(header, &action).unwrap(),
+            apply_header_action(header, &action).unwrap().as_bytes(),
             b"Keep: one\r\nkeep: two\r\n\r\n"
         );
     }
@@ -275,8 +296,48 @@ mod tests {
         }]);
 
         assert_eq!(
-            apply_header_action(header, &action).unwrap(),
+            apply_header_action(header, &action).unwrap().as_bytes(),
             b"A: one\nB: two\n\n"
         );
+    }
+
+    #[test]
+    fn buffered_edit_preserves_body_and_preceding_message() {
+        let original = Message::from_bytes(b"A: old\nKeep: exact\n\nbinary:\xff\0body".to_vec());
+        let action = action(vec![HeaderOperation::Set {
+            line: 1,
+            name: "A".into(),
+            value: value("new"),
+        }]);
+        let edited = apply_header_action(original.header(), &action).unwrap();
+        let replacement = original.with_edited_header(edited).unwrap();
+
+        assert_eq!(replacement.header(), b"A: new\nKeep: exact\n\n");
+        assert_eq!(replacement.body(), b"binary:\xff\0body");
+        assert_eq!(
+            original.as_bytes(),
+            b"A: old\nKeep: exact\n\nbinary:\xff\0body"
+        );
+    }
+
+    #[test]
+    fn header_phase_edit_does_not_consume_body() {
+        let input = b"A: old\n\nbody remains unread";
+        let mut reader = BufReader::with_capacity(1, Cursor::new(input));
+        let head = Message::read_headers(&mut reader, MessageLimits::default()).unwrap();
+        let body_position = reader.stream_position().unwrap();
+        let action = action(vec![HeaderOperation::Set {
+            line: 1,
+            name: "A".into(),
+            value: value("new"),
+        }]);
+
+        let edited = apply_header_action(head.as_bytes(), &action).unwrap();
+        let head = head.with_edited_header(edited);
+        assert_eq!(reader.stream_position().unwrap(), body_position);
+
+        let message = head.read_body(&mut reader).unwrap();
+        assert_eq!(message.header(), b"A: new\n\n");
+        assert_eq!(message.body(), b"body remains unread");
     }
 }
