@@ -327,9 +327,54 @@ fn check_and_explain_accept_pipe_actions_without_executing_them() {
         .unwrap();
     assert_eq!(explain.status.code(), Some(0), "{:?}", explain.stderr);
     let stdout = String::from_utf8(explain.stdout).unwrap();
-    assert!(stdout.contains("destination=external-program"), "{stdout}");
+    assert!(stdout.contains("action=external-program"), "{stdout}");
     assert!(!stdout.contains("private-command"), "{stdout}");
     assert!(!stdout.contains("secret"), "{stdout}");
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn check_and_explain_accept_header_actions_without_reading_stdin() {
+    let path = config_file(
+        ":0\nheaders {\n remove X-Private-Remove\n set X-Private-Set: private-set-value\n add X-Private-Add: private-add-value\n prepend X-Private-Prepend: private-prepend-value\n}\n",
+    );
+    let input_path = path.parent().unwrap().join("message.eml");
+    fs::write(&input_path, b"Subject: stdin-secret\n\nbody").unwrap();
+
+    for command in ["check", "explain"] {
+        let mut input = fs::File::open(&input_path).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args([command, "--config"])
+            .arg(&path)
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_eq!(input.stream_position().unwrap(), 0);
+        let mut rendered = output.stdout;
+        rendered.extend_from_slice(&output.stderr);
+        let rendered = String::from_utf8(rendered).unwrap();
+        for private in [
+            "X-Private-Remove",
+            "X-Private-Set",
+            "X-Private-Add",
+            "X-Private-Prepend",
+            "private-set-value",
+            "private-add-value",
+            "private-prepend-value",
+            "stdin-secret",
+        ] {
+            assert!(!rendered.contains(private), "leaked {private:?}");
+        }
+        if command == "explain" {
+            assert!(rendered.contains("action=headers"), "{rendered}");
+            assert!(
+                rendered.contains("header-operations remove=1 set=1 add=1 prepend=1"),
+                "{rendered}"
+            );
+        }
+    }
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 

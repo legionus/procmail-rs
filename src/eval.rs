@@ -26,8 +26,8 @@ mod tree;
 
 use condition::PartialMatch;
 pub use explanation::{
-    ConditionExplanation, ConditionKindExplanation, DestinationKind, PlanExplanation,
-    RecipeExplanation,
+    ActionKindExplanation, ConditionExplanation, ConditionKindExplanation,
+    HeaderOperationExplanation, PlanExplanation, RecipeExplanation,
 };
 use header::FanoutPlanState;
 use message::{CompleteMessage, OwnedCompleteMessage, current_ordered_message};

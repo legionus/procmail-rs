@@ -28,9 +28,10 @@ use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{
-    CompletionState, ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind,
-    ExecutionPlan, ExternalActionInput, FinalMessage, HeaderEvaluation, MappedMessageInput,
-    MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery, RecipeLockGuard,
+    ActionKindExplanation, CompletionState, ConditionKindExplanation, DeliveryAttemptError,
+    DeliveryPlan, ExecutionPlan, ExternalActionInput, FinalMessage, HeaderEvaluation,
+    MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery,
+    RecipeLockGuard,
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
 use procmail_rs::external_process::{
@@ -383,20 +384,31 @@ fn write_plan_explanation(
     // print regex text, assignment values, or destination paths because they
     // can contain credentials or other private configuration data.
     for recipe in explanation.recipes() {
-        let destination = match recipe.destination() {
-            DestinationKind::Maildir => "maildir",
-            DestinationKind::Mbox => "mbox",
-            DestinationKind::ExternalProgram => "external-program",
+        let action = match recipe.action() {
+            ActionKindExplanation::Maildir => "maildir",
+            ActionKindExplanation::Mbox => "mbox",
+            ActionKindExplanation::ExternalProgram => "external-program",
+            ActionKindExplanation::Headers => "headers",
         };
         writeln!(
             writer,
-            "recipe line={} copy={} assignments={} destination={} deferred={}",
+            "recipe line={} copy={} assignments={} action={} deferred={}",
             recipe.line(),
             yes_no(recipe.is_copy()),
             recipe.assignment_count(),
-            destination,
+            action,
             yes_no(recipe.defers_destination())
         )?;
+        if let Some(operations) = recipe.header_operations() {
+            writeln!(
+                writer,
+                "  header-operations remove={} set={} add={} prepend={}",
+                operations.remove_count(),
+                operations.set_count(),
+                operations.add_count(),
+                operations.prepend_count()
+            )?;
+        }
         for condition in recipe.conditions() {
             let kind = match condition.kind() {
                 ConditionKindExplanation::HeaderRegex => "header-regex",

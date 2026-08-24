@@ -3,7 +3,9 @@
 
 use super::InputRequirements;
 use super::condition::{CompiledCondition, compile_conditions};
-use super::explanation::{ConditionExplanation, DestinationKind, RecipeExplanation};
+use super::explanation::{
+    ActionKindExplanation, ConditionExplanation, HeaderOperationExplanation, RecipeExplanation,
+};
 use super::runtime_rc::{CompiledInclude, CompiledSwitch};
 use crate::config::{
     Assignment, AssignmentTarget, ContinuationMode, ControlFlow, Destination, HeaderAction,
@@ -220,7 +222,8 @@ impl CompiledSequence {
                     line: recipe.line,
                     assignment_count,
                     conditions,
-                    destination: DestinationKind::ExternalProgram,
+                    action: ActionKindExplanation::ExternalProgram,
+                    header_operations: None,
                     copy: false,
                     defers_destination: true,
                 }),
@@ -229,15 +232,16 @@ impl CompiledSequence {
                     continuation,
                     ..
                 } => {
-                    let destination_kind = match destination {
-                        Destination::Maildir(_) => DestinationKind::Maildir,
-                        Destination::Mbox(_) => DestinationKind::Mbox,
+                    let action = match destination {
+                        Destination::Maildir(_) => ActionKindExplanation::Maildir,
+                        Destination::Mbox(_) => ActionKindExplanation::Mbox,
                     };
                     explanations.push(RecipeExplanation {
                         line: recipe.line,
                         assignment_count,
                         conditions,
-                        destination: destination_kind,
+                        action,
+                        header_operations: None,
                         copy: *continuation == ContinuationMode::Continue,
                         defers_destination: destination.needs_runtime_variables(),
                     });
@@ -245,7 +249,30 @@ impl CompiledSequence {
                 CompiledAction::Block(children) => {
                     children.collect_explanations(&conditions, assignment_count, explanations);
                 }
-                CompiledAction::Headers(_) => {}
+                CompiledAction::Headers(action) => {
+                    let mut operations = HeaderOperationExplanation::default();
+                    for operation in &action.operations {
+                        match operation {
+                            crate::config::HeaderOperation::Remove { .. } => {
+                                operations.remove += 1;
+                            }
+                            crate::config::HeaderOperation::Set { .. } => operations.set += 1,
+                            crate::config::HeaderOperation::Add { .. } => operations.add += 1,
+                            crate::config::HeaderOperation::Prepend { .. } => {
+                                operations.prepend += 1;
+                            }
+                        }
+                    }
+                    explanations.push(RecipeExplanation {
+                        line: recipe.line,
+                        assignment_count,
+                        conditions,
+                        action: ActionKindExplanation::Headers,
+                        header_operations: Some(operations),
+                        copy: false,
+                        defers_destination: false,
+                    });
+                }
             }
         }
     }

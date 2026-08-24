@@ -436,7 +436,7 @@ fn explains_plan_shape_without_private_configuration_values() {
     };
     assert_eq!(recipe.line(), 2);
     assert_eq!(recipe.assignment_count(), 1);
-    assert_eq!(recipe.destination(), DestinationKind::Maildir);
+    assert_eq!(recipe.action(), ActionKindExplanation::Maildir);
     assert!(recipe.is_copy());
     assert!(recipe.defers_destination());
     assert_eq!(
@@ -453,6 +453,41 @@ fn explains_plan_shape_without_private_configuration_values() {
         "do-not-print",
         "private-pattern",
         "private-path",
+    ] {
+        assert!(!rendered.contains(private), "leaked {private:?}");
+    }
+}
+
+#[test]
+fn explains_header_operation_kinds_without_private_fields() {
+    let config = config::parse(
+        ":0\nheaders {\n remove X-Secret-Remove\n set X-Secret-Set: secret-set-value\n add X-Secret-Add: secret-add-value\n add X-Other-Add: other-add-value\n prepend X-Secret-Prepend: secret-prepend-value\n}\n",
+    )
+    .unwrap()
+    .expand()
+    .unwrap();
+    let explanation = ExecutionPlan::compile(&config).explain();
+    let [recipe] = explanation.recipes() else {
+        panic!("expected one recipe");
+    };
+
+    assert_eq!(recipe.action(), ActionKindExplanation::Headers);
+    let operations = recipe.header_operations().unwrap();
+    assert_eq!(operations.remove_count(), 1);
+    assert_eq!(operations.set_count(), 1);
+    assert_eq!(operations.add_count(), 2);
+    assert_eq!(operations.prepend_count(), 1);
+    let rendered = format!("{explanation:?}");
+    for private in [
+        "X-Secret-Remove",
+        "X-Secret-Set",
+        "X-Secret-Add",
+        "X-Other-Add",
+        "X-Secret-Prepend",
+        "secret-set-value",
+        "secret-add-value",
+        "other-add-value",
+        "secret-prepend-value",
     ] {
         assert!(!rendered.contains(private), "leaked {private:?}");
     }
