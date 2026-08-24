@@ -435,6 +435,12 @@ fn expand_config(
                     },
                 );
             }
+            Statement::CommandAssignment(assignment) => {
+                return Err(ExpansionError::new(
+                    assignment.line,
+                    "backquoted command assignments are not executable yet",
+                ));
+            }
             Statement::Recipe(recipe) => {
                 expand_recipe(recipe, &variables, maildir.as_deref())?;
             }
@@ -550,6 +556,12 @@ fn expand_recipe(
             }
         }
         RecipeAction::Pipe(_) => {}
+        RecipeAction::Capture(action) => {
+            return Err(ExpansionError::new(
+                action.line,
+                "command capture actions are not executable yet",
+            ));
+        }
         RecipeAction::Headers(action) => {
             prepare_header_action(action, variables, &BTreeSet::new())?;
         }
@@ -648,6 +660,12 @@ fn prepare_runtime_statements(
                 // the same selected sequence.
                 dynamic.insert(assignment.name.clone());
             }
+            Statement::CommandAssignment(assignment) => {
+                return Err(ExpansionError::new(
+                    assignment.line,
+                    "backquoted command assignments are not executable yet",
+                ));
+            }
             Statement::Recipe(recipe) => {
                 prepare_runtime_recipe(recipe, known, dynamic, maildir)?;
             }
@@ -691,6 +709,12 @@ fn prepare_runtime_recipe(
             expression.expansion = Some(parsed);
         }
         RecipeAction::Pipe(_) => {}
+        RecipeAction::Capture(action) => {
+            return Err(ExpansionError::new(
+                action.line,
+                "command capture actions are not executable yet",
+            ));
+        }
         RecipeAction::Headers(action) => {
             prepare_header_action(action, known, dynamic)?;
         }

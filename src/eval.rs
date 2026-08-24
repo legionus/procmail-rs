@@ -140,6 +140,11 @@ fn execute_statements(
 ) -> Result<SequenceControl, EvalError> {
     for statement in statements {
         match statement {
+            CompiledStatement::CommandAssignment(assignment) => {
+                return Err(EvalError::ExternalActionUnsupported {
+                    line: assignment.line,
+                });
+            }
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, runtime, trace)?;
             }

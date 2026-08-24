@@ -604,6 +604,98 @@ fn rejects_unterminated_quoted_assignment() {
 }
 
 #[test]
+fn separates_backquoted_assignments_from_literal_assignments() {
+    let config = parse(
+        "PLAIN=value\nCOMPUTED=pre`printf '#one'`mid`printf two`post # comment\nESCAPED=\\`literal\\`\n",
+    )
+    .unwrap();
+
+    assert!(matches!(config.statements[0], Statement::Assignment(_)));
+    let Statement::CommandAssignment(assignment) = &config.statements[1] else {
+        panic!("expected command assignment");
+    };
+    assert_eq!(assignment.line, 2);
+    assert_eq!(assignment.name, "COMPUTED");
+    assert_eq!(assignment.source, "pre`printf '#one'`mid`printf two`post");
+    assert_eq!(
+        assignment.parts,
+        [
+            CommandAssignmentPart::Literal("pre".into()),
+            CommandAssignmentPart::Command("printf '#one'".into()),
+            CommandAssignmentPart::Literal("mid".into()),
+            CommandAssignmentPart::Command("printf two".into()),
+            CommandAssignmentPart::Literal("post".into()),
+        ]
+    );
+    assert!(matches!(config.statements[2], Statement::Assignment(_)));
+}
+
+#[test]
+fn backquoted_assignment_quotes_do_not_hide_command_quotes() {
+    let config = parse("VALUE=\"before `printf \"inside\"` after\"\n").unwrap();
+    let Statement::CommandAssignment(assignment) = &config.statements[0] else {
+        panic!("expected command assignment");
+    };
+
+    assert_eq!(assignment.source, "before `printf \"inside\"` after");
+    assert_eq!(
+        assignment.parts,
+        [
+            CommandAssignmentPart::Literal("before ".into()),
+            CommandAssignmentPart::Command("printf \"inside\"".into()),
+            CommandAssignmentPart::Literal(" after".into()),
+        ]
+    );
+}
+
+#[test]
+fn rejects_unterminated_backquoted_assignment_at_its_source_line() {
+    let error = parse("FIRST=value\nSECOND=before `printf value\n").unwrap_err();
+
+    assert_eq!(error.line, 2);
+    assert_eq!(
+        error.message,
+        "unterminated backquoted command in assignment value"
+    );
+}
+
+#[test]
+fn parses_command_capture_as_a_distinct_recipe_action() {
+    let source = concat!(
+        ":0 hW\n",
+        "CAPTURED=| printf value \\\n",
+        "  && printf more\n",
+    );
+    let config = parse(source).unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let RecipeAction::Capture(action) = &recipe.action else {
+        panic!("expected capture action");
+    };
+
+    assert_eq!(recipe.options.action_input, ActionInput::Headers);
+    assert_eq!(action.line, 2);
+    assert_eq!(action.name, "CAPTURED");
+    assert_eq!(action.target, AssignmentTarget::User);
+    assert_eq!(action.command, "printf value \\\n  && printf more");
+}
+
+#[test]
+fn rejects_empty_and_unterminated_capture_commands() {
+    let empty = parse(":0\nVALUE=|\n").unwrap_err();
+    assert_eq!(empty.line, 2);
+    assert_eq!(empty.message, "capture action command is empty");
+
+    let continued = parse(concat!(":0\n", "VALUE=| printf value \\\n")).unwrap_err();
+    assert_eq!(continued.line, 2);
+    assert_eq!(
+        continued.message,
+        "capture action command continuation is incomplete"
+    );
+}
+
+#[test]
 fn bounds_and_validates_program_condition_text() {
     for length in [MAX_PIPE_COMMAND_LEN - 1, MAX_PIPE_COMMAND_LEN] {
         let source = format!(":0\n* ? {}\nmaildir:selected\n", "x".repeat(length));

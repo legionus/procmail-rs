@@ -283,6 +283,9 @@ impl RcFileLoader {
     ) -> Result<(), RcFileError> {
         for statement in statements {
             match statement {
+                Statement::CommandAssignment(assignment) => {
+                    runtime.remove(&assignment.name);
+                }
                 Statement::Assignment(assignment) => {
                     match assignment.resolve_with(|name| runtime.get(name).map(str::to_owned)) {
                         Ok(value) => runtime.set(assignment.name.clone(), value),
@@ -459,7 +462,10 @@ fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &st
                     validate_runtime_settings(children)?;
                 }
             }
-            Statement::Assignment(_) | Statement::Include(_) | Statement::Switch(_) => {}
+            Statement::Assignment(_)
+            | Statement::CommandAssignment(_)
+            | Statement::Include(_)
+            | Statement::Switch(_) => {}
         }
     }
     Ok(())

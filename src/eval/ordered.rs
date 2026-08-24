@@ -199,6 +199,9 @@ impl CompiledNode {
         T: TraceSink,
     {
         match &self.action {
+            CompiledAction::Capture => Err(OrderedExecutionError::Evaluation(
+                EvalError::ExternalActionUnsupported { line: self.line },
+            )),
             CompiledAction::Headers(action) => {
                 let message =
                     current_ordered_message(context.message, context.replacement.as_ref());
@@ -405,6 +408,13 @@ where
 {
     for statement in statements {
         match statement {
+            CompiledStatement::CommandAssignment(assignment) => {
+                return Err(OrderedExecutionError::Evaluation(
+                    EvalError::ExternalActionUnsupported {
+                        line: assignment.line,
+                    },
+                ));
+            }
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, context.runtime, context.trace)
                     .map_err(OrderedExecutionError::Evaluation)?;

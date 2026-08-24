@@ -462,7 +462,7 @@ impl CompiledSequence {
                     decision: RecipeDecision::Selected,
                 });
                 match &recipe.action {
-                    CompiledAction::Pipe { .. } => {
+                    CompiledAction::Pipe { .. } | CompiledAction::Capture => {
                         return Err(EvalError::ExternalActionUnsupported { line: recipe.line });
                     }
                     CompiledAction::Headers(action) => {
@@ -719,7 +719,7 @@ impl CompiledNode {
 
     fn delivery_defers_header(&self) -> bool {
         match &self.action {
-            CompiledAction::Pipe { .. } => true,
+            CompiledAction::Pipe { .. } | CompiledAction::Capture => true,
             CompiledAction::Deliver { destination, .. } => {
                 destination.needs_runtime_variables()
                     || matches!(destination, Destination::Mbox(_))
@@ -743,7 +743,7 @@ impl CompiledNode {
         context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         match &self.action {
-            CompiledAction::Pipe { .. } => {
+            CompiledAction::Pipe { .. } | CompiledAction::Capture => {
                 Err(EvalError::ExternalActionUnsupported { line: self.line })
             }
             CompiledAction::Deliver { .. } => {
@@ -810,6 +810,11 @@ fn plan_statements_complete(
 ) -> Result<SequenceControl, EvalError> {
     for statement in statements {
         match statement {
+            CompiledStatement::CommandAssignment(assignment) => {
+                return Err(EvalError::ExternalActionUnsupported {
+                    line: assignment.line,
+                });
+            }
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, runtime, trace)?;
             }
@@ -875,6 +880,11 @@ fn plan_statements_headers(
 ) -> Result<HeaderControl, EvalError> {
     for statement in statements {
         match statement {
+            CompiledStatement::CommandAssignment(assignment) => {
+                return Err(EvalError::ExternalActionUnsupported {
+                    line: assignment.line,
+                });
+            }
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, runtime, trace)?;
             }

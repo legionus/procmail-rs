@@ -227,11 +227,12 @@ impl Config {
 fn statements_have_pipe_actions(statements: &[Statement]) -> bool {
     statements.iter().any(|statement| match statement {
         Statement::Recipe(recipe) => match &recipe.action {
-            RecipeAction::Pipe(_) => true,
+            RecipeAction::Pipe(_) | RecipeAction::Capture(_) => true,
             RecipeAction::Block(children) => statements_have_pipe_actions(children),
             RecipeAction::Deliver(_) | RecipeAction::Headers(_) => false,
         },
         Statement::Assignment(_) | Statement::Include(_) | Statement::Switch(_) => false,
+        Statement::CommandAssignment(_) => false,
     })
 }
 
@@ -243,12 +244,13 @@ fn statements_have_external_commands(statements: &[Statement]) -> bool {
                 .iter()
                 .any(|condition| matches!(condition.kind, ConditionKind::Program(_)))
                 || match &recipe.action {
-                    RecipeAction::Pipe(_) => true,
+                    RecipeAction::Pipe(_) | RecipeAction::Capture(_) => true,
                     RecipeAction::Block(children) => statements_have_external_commands(children),
                     RecipeAction::Deliver(_) | RecipeAction::Headers(_) => false,
                 }
         }
         Statement::Assignment(assignment) => assignment.target == AssignmentTarget::Trap,
+        Statement::CommandAssignment(_) => true,
         Statement::Include(_) | Statement::Switch(_) => false,
     })
 }
@@ -256,9 +258,25 @@ fn statements_have_external_commands(statements: &[Statement]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     Assignment(Assignment),
+    CommandAssignment(CommandAssignment),
     Include(RcFileExpression),
     Switch(RcFileExpression),
     Recipe(Recipe),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandAssignment {
+    pub line: usize,
+    pub name: String,
+    pub source: String,
+    pub target: AssignmentTarget,
+    pub parts: Vec<CommandAssignmentPart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandAssignmentPart {
+    Literal(String),
+    Command(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,8 +383,17 @@ pub enum OutputEnding {
 pub enum RecipeAction {
     Deliver(Destination),
     Pipe(PipeAction),
+    Capture(CaptureAction),
     Block(Vec<Statement>),
     Headers(HeaderAction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureAction {
+    pub line: usize,
+    pub name: String,
+    pub target: AssignmentTarget,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

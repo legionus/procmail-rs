@@ -8,8 +8,8 @@ use super::explanation::{
 };
 use super::runtime_rc::{CompiledInclude, CompiledSwitch};
 use crate::config::{
-    Assignment, AssignmentTarget, ContinuationMode, ControlFlow, Destination, HeaderAction,
-    OutputEnding, PipeAction, Recipe, RecipeAction, RecipeOptions, Statement,
+    Assignment, AssignmentTarget, CommandAssignment, ContinuationMode, ControlFlow, Destination,
+    HeaderAction, OutputEnding, PipeAction, Recipe, RecipeAction, RecipeOptions, Statement,
 };
 use crate::trace::VariableSource as TraceVariableSource;
 
@@ -40,6 +40,7 @@ pub(super) enum CompiledAction {
         action: PipeAction,
         options: RecipeOptions,
     },
+    Capture,
     Block(CompiledSequence),
     Headers(HeaderAction),
 }
@@ -54,6 +55,7 @@ pub(super) struct CompiledAssignment {
 #[derive(Debug)]
 pub(super) enum CompiledStatement {
     Assignment(CompiledAssignment),
+    CommandAssignment(CommandAssignment),
     Host(CompiledAssignment),
     Include(CompiledInclude),
     Switch(CompiledSwitch),
@@ -108,6 +110,9 @@ impl CompiledSequence {
                     } else {
                         preceding.push(CompiledStatement::Assignment(compiled));
                     }
+                }
+                Statement::CommandAssignment(assignment) => {
+                    preceding.push(CompiledStatement::CommandAssignment(assignment.clone()))
                 }
                 Statement::Recipe(recipe) => {
                     recipes.push(CompiledNode::compile(recipe, std::mem::take(preceding)));
@@ -218,15 +223,17 @@ impl CompiledSequence {
             conditions.extend(recipe.conditions.iter().map(CompiledCondition::explain));
             let assignment_count = inherited_assignments + recipe.preceding_statements.len();
             match &recipe.action {
-                CompiledAction::Pipe { .. } => explanations.push(RecipeExplanation {
-                    line: recipe.line,
-                    assignment_count,
-                    conditions,
-                    action: ActionKindExplanation::ExternalProgram,
-                    header_operations: None,
-                    copy: false,
-                    defers_destination: true,
-                }),
+                CompiledAction::Pipe { .. } | CompiledAction::Capture => {
+                    explanations.push(RecipeExplanation {
+                        line: recipe.line,
+                        assignment_count,
+                        conditions,
+                        action: ActionKindExplanation::ExternalProgram,
+                        header_operations: None,
+                        copy: false,
+                        defers_destination: true,
+                    })
+                }
                 CompiledAction::Deliver {
                     destination,
                     continuation,
@@ -286,6 +293,7 @@ impl CompiledNode {
                 action: action.clone(),
                 options: recipe.options,
             },
+            RecipeAction::Capture(_) => CompiledAction::Capture,
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
                 destination: destination.clone(),
                 continuation: recipe.options.continuation,
@@ -308,7 +316,7 @@ impl CompiledNode {
 
     fn requirements(&self) -> InputRequirements {
         let action = match &self.action {
-            CompiledAction::Pipe { .. } => InputRequirements {
+            CompiledAction::Pipe { .. } | CompiledAction::Capture => InputRequirements {
                 needs_headers: true,
                 needs_body_contents: true,
                 needs_end_of_message: true,
@@ -334,7 +342,7 @@ impl CompiledNode {
                 .iter()
                 .any(CompiledCondition::requires_ordered_execution)
             || match &self.action {
-                CompiledAction::Pipe { .. } => true,
+                CompiledAction::Pipe { .. } | CompiledAction::Capture => true,
                 CompiledAction::Deliver { destination, .. } => {
                     destination.needs_runtime_variables()
                         || matches!(destination, Destination::Mbox(_))
@@ -351,7 +359,7 @@ impl CompiledNode {
                 .iter()
                 .any(CompiledCondition::requires_ordered_execution)
             || match &self.action {
-                CompiledAction::Pipe { .. } => true,
+                CompiledAction::Pipe { .. } | CompiledAction::Capture => true,
                 CompiledAction::Deliver { destination, .. } => {
                     destination.needs_runtime_variables()
                         || matches!(destination, Destination::Mbox(_))
@@ -366,7 +374,7 @@ impl CompiledNode {
             .iter()
             .any(CompiledCondition::needs_message_contents)
             || match &self.action {
-                CompiledAction::Pipe { .. } => true,
+                CompiledAction::Pipe { .. } | CompiledAction::Capture => true,
                 CompiledAction::Deliver { .. } => false,
                 CompiledAction::Block(sequence) => sequence.needs_message_contents(),
                 CompiledAction::Headers(_) => false,

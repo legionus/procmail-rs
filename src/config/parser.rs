@@ -4,9 +4,10 @@
 use regex::bytes::RegexBuilder;
 
 use super::{
-    ActionInput, ActionMode, Assignment, AssignmentTarget, CaseMode, ChildStatusMode, Condition,
-    ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination,
-    HeaderAction, HeaderOperation, HeaderValue, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN,
+    ActionInput, ActionMode, Assignment, AssignmentTarget, CaptureAction, CaseMode,
+    ChildStatusMode, CommandAssignment, CommandAssignmentPart, Condition, ConditionInput,
+    ConditionKind, Config, ContinuationMode, ControlFlow, Destination, HeaderAction,
+    HeaderOperation, HeaderValue, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN,
     MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE,
     MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError,
     PathExpression, PipeAction, RcFileExpression, RcLimits, RcParseCounts, RcParseState, Recipe,
@@ -156,18 +157,41 @@ fn parse_statements(
                     ),
                 ));
             }
-            let statement = match assignment.name.as_str() {
-                "INCLUDERC" => Statement::Include(RcFileExpression {
-                    line: assignment.line,
-                    value: assignment.value,
-                    expansion: None,
-                }),
-                "SWITCHRC" => Statement::Switch(RcFileExpression {
-                    line: assignment.line,
-                    value: assignment.value,
-                    expansion: None,
-                }),
-                _ => Statement::Assignment(assignment),
+            let statement = match parse_command_substitutions(&assignment.value, assignment.line)? {
+                Some(parts) => {
+                    if matches!(
+                        assignment.target,
+                        AssignmentTarget::RcLimit(_) | AssignmentTarget::LineBuf
+                    ) {
+                        return Err(ParseError::new(
+                            assignment.line,
+                            format!(
+                                "variable {} cannot be set from command output because it controls rc parsing",
+                                assignment.name
+                            ),
+                        ));
+                    }
+                    Statement::CommandAssignment(CommandAssignment {
+                        line: assignment.line,
+                        name: assignment.name,
+                        source: assignment.value,
+                        target: assignment.target,
+                        parts,
+                    })
+                }
+                None => match assignment.name.as_str() {
+                    "INCLUDERC" => Statement::Include(RcFileExpression {
+                        line: assignment.line,
+                        value: assignment.value,
+                        expansion: None,
+                    }),
+                    "SWITCHRC" => Statement::Switch(RcFileExpression {
+                        line: assignment.line,
+                        value: assignment.value,
+                        expansion: None,
+                    }),
+                    _ => Statement::Assignment(assignment),
+                },
             };
             state.counts.assignments = state
                 .counts
@@ -426,7 +450,9 @@ fn parse_recipe(
         return Err(ParseError::new(index + 1, "recipe action is empty"));
     }
 
+    let capture = parse_capture_action_prefix(action, index + 1)?;
     let is_pipe = action.starts_with('|');
+    let is_command_action = is_pipe || capture.is_some();
     let is_headers = action == "headers {";
     if is_headers {
         // Header edits are internal transformations rather than deliveries or
@@ -439,13 +465,17 @@ fn parse_recipe(
     let has_program_condition = conditions
         .iter()
         .any(|condition| matches!(condition.kind, ConditionKind::Program(_)));
-    if !is_pipe && !is_headers && action != "{" && options.write_errors == WriteErrorMode::Ignore {
+    if !is_command_action
+        && !is_headers
+        && action != "{"
+        && options.write_errors == WriteErrorMode::Ignore
+    {
         return Err(ParseError::new(
             start + 1,
             "recipe flag 'i' is not supported for filesystem delivery because it may publish an incomplete message",
         ));
     }
-    if !is_pipe
+    if !is_command_action
         && !is_headers
         && (options.action_input != ActionInput::Message
             || options.action_mode != ActionMode::Deliver
@@ -459,7 +489,40 @@ fn parse_recipe(
         ));
     }
 
-    let (action, next) = if is_pipe {
+    let (action, next) = if let Some((name, target)) = capture {
+        check_count_limit(
+            state.counts.assignments,
+            state.limits.assignments,
+            index + 1,
+            "assignment",
+        )?;
+        state.counts.assignments = state
+            .counts
+            .assignments
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(index + 1, "rc assignment count overflows"))?;
+        let command_text = action
+            .split_once("=|")
+            .map(|(_, command)| command)
+            .ok_or_else(|| ParseError::new(index + 1, "capture action is malformed"))?
+            .trim_start();
+        let (command, next) = parse_command_continuation(
+            lines,
+            index,
+            command_text,
+            state.limits.linebuf,
+            "capture action command",
+        )?;
+        (
+            RecipeAction::Capture(CaptureAction {
+                line: index + 1,
+                name,
+                target,
+                command,
+            }),
+            next,
+        )
+    } else if is_pipe {
         let (command, next) = parse_pipe_command(lines, index, state.limits.linebuf)?;
         (RecipeAction::Pipe(PipeAction { command }), next)
     } else if is_headers {
@@ -550,6 +613,96 @@ fn parse_recipe(
         action,
     };
     Ok((recipe, next))
+}
+
+fn parse_capture_action_prefix(
+    action: &str,
+    line: usize,
+) -> Result<Option<(String, AssignmentTarget)>, ParseError> {
+    let Some((name, _)) = action.split_once("=|") else {
+        return Ok(None);
+    };
+    let name = name.trim();
+    if name.is_empty()
+        || !name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphanumeric() && (index > 0 || !byte.is_ascii_digit())
+        })
+    {
+        return Ok(None);
+    }
+    if name.len() > MAX_ASSIGNMENT_NAME_LEN {
+        return Err(ParseError::new(
+            line,
+            format!("assignment name exceeds the hard limit of {MAX_ASSIGNMENT_NAME_LEN} bytes"),
+        ));
+    }
+    let policy = variable_policy(name);
+    if policy == VariablePolicy::Unsupported {
+        return Err(ParseError::new(
+            line,
+            format!("procmail variable {name} is not supported"),
+        ));
+    }
+    let target = policy
+        .assignment_target(VariableSource::RcFile)
+        .ok_or_else(|| ParseError::new(line, format!("variable {name} cannot be assigned")))?;
+    Ok(Some((name.to_owned(), target)))
+}
+
+fn parse_command_substitutions(
+    value: &str,
+    line: usize,
+) -> Result<Option<Vec<CommandAssignmentPart>>, ParseError> {
+    let mut parts = Vec::new();
+    let mut opening = None;
+    let mut literal_start = 0usize;
+    let mut escaped = false;
+
+    // Locate substitutions without interpreting their shell language. The rc
+    // parser only establishes bounded, paired regions; the configured shell
+    // remains responsible for the trusted command text during evaluation.
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character != '`' {
+            continue;
+        }
+        if let Some(start) = opening.take() {
+            let opening_index = start - 1;
+            if literal_start < opening_index {
+                parts.push(CommandAssignmentPart::Literal(
+                    value[literal_start..opening_index].to_owned(),
+                ));
+            }
+            parts.push(CommandAssignmentPart::Command(
+                value[start..index].to_owned(),
+            ));
+            literal_start = index + character.len_utf8();
+        } else {
+            opening = Some(index + character.len_utf8());
+        }
+    }
+    if opening.is_some() {
+        return Err(ParseError::new(
+            line,
+            "unterminated backquoted command in assignment value",
+        ));
+    }
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    if literal_start < value.len() {
+        parts.push(CommandAssignmentPart::Literal(
+            value[literal_start..].to_owned(),
+        ));
+    }
+    Ok(Some(parts))
 }
 
 fn parse_header_action(
@@ -704,10 +857,21 @@ fn parse_pipe_command(
     linebuf: usize,
 ) -> Result<(String, usize), ParseError> {
     let first = lines[start].trim_start();
-    let mut physical = first
+    let physical = first
         .strip_prefix('|')
         .expect("pipe command starts with '|'")
         .trim_start();
+    parse_command_continuation(lines, start, physical, linebuf, "pipe command")
+}
+
+fn parse_command_continuation(
+    lines: &[&str],
+    start: usize,
+    first: &str,
+    linebuf: usize,
+    description: &str,
+) -> Result<(String, usize), ParseError> {
+    let mut physical = first;
     let mut command = String::new();
     let mut index = start;
 
@@ -719,11 +883,11 @@ fn parse_pipe_command(
         let added = physical
             .len()
             .checked_add(usize::from(physical.ends_with('\\')))
-            .ok_or_else(|| ParseError::new(start + 1, "pipe command size overflows"))?;
+            .ok_or_else(|| ParseError::new(start + 1, format!("{description} size overflows")))?;
         let new_len = command
             .len()
             .checked_add(added)
-            .ok_or_else(|| ParseError::new(start + 1, "pipe command size overflows"))?;
+            .ok_or_else(|| ParseError::new(start + 1, format!("{description} size overflows")))?;
         if new_len > linebuf {
             return Err(ParseError::limit(
                 start + 1,
@@ -733,7 +897,7 @@ fn parse_pipe_command(
         if new_len > MAX_PIPE_COMMAND_LEN {
             return Err(ParseError::limit(
                 start + 1,
-                format!("pipe command exceeds the hard limit of {MAX_PIPE_COMMAND_LEN} bytes"),
+                format!("{description} exceeds the hard limit of {MAX_PIPE_COMMAND_LEN} bytes"),
             ));
         }
         command.push_str(physical);
@@ -744,13 +908,18 @@ fn parse_pipe_command(
         index = index
             .checked_add(1)
             .ok_or_else(|| ParseError::new(start + 1, "rc line index overflows"))?;
-        physical = lines
-            .get(index)
-            .copied()
-            .ok_or_else(|| ParseError::new(start + 1, "pipe command continuation is incomplete"))?;
+        physical = lines.get(index).copied().ok_or_else(|| {
+            ParseError::new(
+                start + 1,
+                format!("{description} continuation is incomplete"),
+            )
+        })?;
     }
     if command.is_empty() {
-        return Err(ParseError::new(start + 1, "pipe command is empty"));
+        return Err(ParseError::new(
+            start + 1,
+            format!("{description} is empty"),
+        ));
     }
     if command.as_bytes().contains(&0) {
         return Err(ParseError::new(start + 1, "pipe command contains NUL"));
@@ -1264,14 +1433,14 @@ fn strip_comment(value: &str) -> &str {
 
 fn parse_assignment_value(value: &str, line: usize) -> Result<String, ParseError> {
     if !value.starts_with('"') {
-        return Ok(strip_comment(value).trim().to_owned());
+        return Ok(strip_assignment_comment(value).trim().to_owned());
     }
 
     // An outer double-quoted value is a single rc value, so a '#' within it
     // is data rather than a comment. Quote escapes and trailing shell syntax
     // stay rejected until their exact procmail behavior is implemented.
     let quoted = &value[1..];
-    let Some(closing) = quoted.find('"') else {
+    let Some(closing) = find_outer_assignment_quote(quoted) else {
         return Err(ParseError::new(
             line,
             "unterminated double-quoted assignment value",
@@ -1286,6 +1455,48 @@ fn parse_assignment_value(value: &str, line: usize) -> Result<String, ParseError
         ));
     }
     Ok(inner.to_owned())
+}
+
+fn strip_assignment_comment(value: &str) -> &str {
+    let mut in_command = false;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '`' {
+            in_command = !in_command;
+        } else if character == '#' && !in_command {
+            return &value[..index];
+        }
+    }
+    value
+}
+
+fn find_outer_assignment_quote(value: &str) -> Option<usize> {
+    let mut in_command = false;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '`' {
+            in_command = !in_command;
+        } else if character == '"' && !in_command {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn validate_program_condition(command: &str, line: usize) -> Result<(), ParseError> {
