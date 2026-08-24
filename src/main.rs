@@ -61,6 +61,26 @@ struct Command {
     supplied: Vec<SuppliedVariable>,
 }
 
+enum Invocation {
+    Run(Command),
+    Help,
+    Version,
+}
+
+const HELP: &str = "procmail-rs - bounded procmail-compatible mail filtering\n\n\
+usage: procmail-rs <check|explain|filter> --config PATH [--set NAME=VALUE]...\n\
+       procmail-rs --help\n\
+       procmail-rs --version\n\n\
+commands:\n\
+  check    validate the statically reachable configuration without reading stdin\n\
+  explain  describe the bounded execution plan without reading stdin\n\
+  filter   read one message from stdin and deliver it to explicit destinations\n\n\
+options:\n\
+  --config PATH     select the root rc file\n\
+  --set NAME=VALUE  provide one policy-checked external value (maximum 256)\n\
+  -h, --help        print this help text\n\
+  -V, --version     print the program version\n";
+
 #[derive(Clone, Copy)]
 struct StagingOptions<'a> {
     directory: &'a Path,
@@ -140,7 +160,18 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<u8, OperationalError> {
-    let command = parse_args().map_err(OperationalError::Configuration)?;
+    let invocation = parse_args().map_err(OperationalError::Configuration)?;
+    let command = match invocation {
+        Invocation::Run(command) => command,
+        Invocation::Help => {
+            print_stdout(HELP)?;
+            return Ok(ExitStatus::Success as u8);
+        }
+        Invocation::Version => {
+            print_stdout(concat!("procmail-rs ", env!("CARGO_PKG_VERSION"), "\n"))?;
+            return Ok(ExitStatus::Success as u8);
+        }
+    };
     let identity = UserIdentity::current().map_err(|error| {
         OperationalError::Configuration(format!("cannot determine current user identity: {error}"))
     })?;
@@ -1340,13 +1371,34 @@ fn delivery_outcome_counts(
     }
 }
 
-fn parse_args() -> Result<Command, String> {
+fn print_stdout(value: &str) -> Result<(), OperationalError> {
+    io::stdout()
+        .lock()
+        .write_all(value.as_bytes())
+        .map_err(|error| OperationalError::Internal(format!("cannot write stdout: {error}")))
+}
+
+fn parse_args() -> Result<Invocation, String> {
     let mut args = env::args_os().skip(1);
     let action = args
         .next()
         .and_then(|arg| arg.into_string().ok())
         .ok_or_else(usage)?;
     let action = match action.as_str() {
+        "-h" | "--help" => {
+            return if args.next().is_none() {
+                Ok(Invocation::Help)
+            } else {
+                Err(usage())
+            };
+        }
+        "-V" | "--version" => {
+            return if args.next().is_none() {
+                Ok(Invocation::Version)
+            } else {
+                Err(usage())
+            };
+        }
         "check" => Action::Check,
         "explain" => Action::Explain,
         "filter" => Action::Filter,
@@ -1360,6 +1412,8 @@ fn parse_args() -> Result<Command, String> {
     // consuming any part of a message.
     while let Some(option) = args.next() {
         match option.to_str() {
+            Some("-h" | "--help") => return Ok(Invocation::Help),
+            Some("-V" | "--version") => return Ok(Invocation::Version),
             Some("--config") => {
                 if config.is_some() {
                     return Err("--config may only be specified once".into());
@@ -1383,11 +1437,11 @@ fn parse_args() -> Result<Command, String> {
         }
     }
 
-    Ok(Command {
+    Ok(Invocation::Run(Command {
         action,
         config: config.ok_or_else(usage)?,
         supplied,
-    })
+    }))
 }
 
 fn usage() -> String {

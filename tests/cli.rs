@@ -46,6 +46,35 @@ fn assert_message_contents_absent(stderr: &[u8], secrets: &[&str]) {
 }
 
 #[test]
+fn help_is_available_without_user_or_configuration_lookup() {
+    for arguments in [&["--help"][..], &["filter", "--help"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("usage: procmail-rs"), "{stdout}");
+        assert!(stdout.contains("--set NAME=VALUE"), "{stdout}");
+        assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    }
+}
+
+#[test]
+fn version_comes_from_the_package_metadata() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("procmail-rs {}\n", env!("CARGO_PKG_VERSION")).as_bytes()
+    );
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+}
+
+#[test]
 fn bare_host_stops_processing_as_a_successful_fake_delivery() {
     let path = config_file("HOST\n:0\nmaildir:unreachable\n");
     let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
