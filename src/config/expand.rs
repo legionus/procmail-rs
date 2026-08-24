@@ -7,9 +7,9 @@ use std::path::Path;
 
 use super::{
     Assignment, AssignmentTarget, Config, Destination, ExpansionExpression, ExpansionPart,
-    MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression,
-    RcFileExpression, Recipe, RecipeAction, Statement, SuppliedVariable, VariablePolicy,
-    VariableSource, assignment_value_limit, variable_policy,
+    HeaderAction, HeaderOperation, HeaderValue, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
+    MAX_PATH_EXPRESSION_LEN, PathExpression, RcFileExpression, Recipe, RecipeAction, Statement,
+    SuppliedVariable, VariablePolicy, VariableSource, assignment_value_limit, variable_policy,
 };
 
 #[derive(Debug, Clone)]
@@ -117,6 +117,27 @@ impl RcFileExpression {
         let base = lookup("MAILDIR");
         let value = resolve_relative_path(&value, base.as_deref(), self.line)?;
         validate_filesystem_path(&value, self.line, "rc file", false)?;
+        Ok(value)
+    }
+}
+
+impl HeaderValue {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn resolve_with(
+        &self,
+        line: usize,
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<String, ExpansionError> {
+        let parsed;
+        let expression = if let Some(expression) = self.expansion.as_ref() {
+            expression
+        } else {
+            parsed = parse_expression(&self.source, line)?;
+            &parsed
+        };
+        let value =
+            evaluate_with_linebuf(expression, line, MAX_ASSIGNMENT_VALUE_LEN, &mut lookup)?.text;
+        validate_header_value(&value, line)?;
         Ok(value)
     }
 }
@@ -510,7 +531,8 @@ fn expand_recipe(
             }
         }
         RecipeAction::Pipe(_) => {}
-        RecipeAction::Headers(_) => {
+        RecipeAction::Headers(action) => {
+            prepare_header_action(action, variables, &BTreeSet::new())?;
             return Err(ExpansionError::new(
                 recipe.action_line,
                 "headers actions are parsed but not executable yet",
@@ -654,7 +676,8 @@ fn prepare_runtime_recipe(
             expression.expansion = Some(parsed);
         }
         RecipeAction::Pipe(_) => {}
-        RecipeAction::Headers(_) => {
+        RecipeAction::Headers(action) => {
+            prepare_header_action(action, known, dynamic)?;
             return Err(ExpansionError::new(
                 recipe.action_line,
                 "headers actions are parsed but not executable yet",
@@ -664,6 +687,49 @@ fn prepare_runtime_recipe(
             let mut child_dynamic = dynamic.clone();
             prepare_runtime_statements(children, known, &mut child_dynamic, maildir)?;
         }
+    }
+    Ok(())
+}
+
+fn prepare_header_action(
+    action: &mut HeaderAction,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+) -> Result<(), ExpansionError> {
+    for operation in &mut action.operations {
+        let (line, value) = match operation {
+            HeaderOperation::Remove { .. } => continue,
+            HeaderOperation::Set { line, value, .. }
+            | HeaderOperation::Add { line, value, .. }
+            | HeaderOperation::Prepend { line, value, .. } => (*line, value),
+        };
+        let expression = parse_expression(&value.source, line)?;
+        validate_runtime_references(&expression, line, known, dynamic)?;
+        let needs_runtime = expression_needs_runtime(&expression, known)
+            || expression_references_any(&expression, dynamic);
+
+        // Resolve expressions whose inputs are already fixed so malformed or
+        // oversized generated values fail during configuration preparation.
+        // Runtime-produced names remain structured for the selected recipe.
+        if !needs_runtime {
+            let expanded =
+                evaluate_with_linebuf(&expression, line, MAX_ASSIGNMENT_VALUE_LEN, &mut |name| {
+                    known.get(name).map(|item| item.text.clone())
+                })?
+                .text;
+            validate_header_value(&expanded, line)?;
+        }
+        value.expansion = Some(expression);
+    }
+    Ok(())
+}
+
+fn validate_header_value(value: &str, line: usize) -> Result<(), ExpansionError> {
+    if value.bytes().any(|byte| matches!(byte, 0 | b'\r' | b'\n')) {
+        return Err(ExpansionError::new(
+            line,
+            "expanded header value contains NUL, CR, or LF",
+        ));
     }
     Ok(())
 }

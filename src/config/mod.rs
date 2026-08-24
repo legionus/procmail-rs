@@ -383,18 +383,24 @@ pub enum HeaderOperation {
     Set {
         line: usize,
         name: String,
-        value: String,
+        value: HeaderValue,
     },
     Add {
         line: usize,
         name: String,
-        value: String,
+        value: HeaderValue,
     },
     Prepend {
         line: usize,
         name: String,
-        value: String,
+        value: HeaderValue,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderValue {
+    pub source: String,
+    pub(crate) expansion: Option<ExpansionExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

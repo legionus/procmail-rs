@@ -75,7 +75,7 @@ pub(crate) fn apply_header_action(
                 edited.retain(|field| !field.matches(name.as_bytes()));
             }
             HeaderOperation::Set { name, value, .. } => {
-                let replacement = make_field(name, value, line_ending)?;
+                let replacement = make_field(name, &value.source, line_ending)?;
                 if let Some(first) = edited
                     .iter()
                     .position(|field| field.matches(name.as_bytes()))
@@ -98,10 +98,17 @@ pub(crate) fn apply_header_action(
                 }
             }
             HeaderOperation::Add { name, value, .. } => {
-                edited.push(EditedField::Added(make_field(name, value, line_ending)?));
+                edited.push(EditedField::Added(make_field(
+                    name,
+                    &value.source,
+                    line_ending,
+                )?));
             }
             HeaderOperation::Prepend { name, value, .. } => {
-                edited.insert(0, EditedField::Added(make_field(name, value, line_ending)?));
+                edited.insert(
+                    0,
+                    EditedField::Added(make_field(name, &value.source, line_ending)?),
+                );
             }
         }
     }
@@ -204,6 +211,14 @@ fn header_separator_start(header: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::HeaderValue;
+
+    fn value(source: &str) -> HeaderValue {
+        HeaderValue {
+            source: source.into(),
+            expansion: None,
+        }
+    }
 
     fn action(operations: Vec<HeaderOperation>) -> HeaderAction {
         HeaderAction { operations }
@@ -216,17 +231,17 @@ mod tests {
             HeaderOperation::Set {
                 line: 1,
                 name: "x-test".into(),
-                value: "new".into(),
+                value: value("new"),
             },
             HeaderOperation::Add {
                 line: 2,
                 name: "X-Test".into(),
-                value: "added".into(),
+                value: value("added"),
             },
             HeaderOperation::Prepend {
                 line: 3,
                 name: "First".into(),
-                value: "yes".into(),
+                value: value("yes"),
             },
         ]);
 
@@ -256,7 +271,7 @@ mod tests {
         let action = action(vec![HeaderOperation::Set {
             line: 1,
             name: "B".into(),
-            value: "two".into(),
+            value: value("two"),
         }]);
 
         assert_eq!(

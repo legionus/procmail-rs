@@ -8,7 +8,99 @@ fn parse_wide(input: &str) -> Result<Config, super::super::ParseError> {
     state.limits.linebuf = super::super::MAX_LINEBUF;
     super::super::parse_with_state(input, &mut state)
 }
-use crate::config::{ConditionKind, MAX_SHELL_SETTING_LEN, parse};
+use crate::config::{ConditionKind, DEFAULT_LINEBUF, MAX_SHELL_SETTING_LEN, parse};
+
+fn prepared_header_value(source: &str, known_value: &str) -> Result<String, ExpansionError> {
+    let mut action = HeaderAction {
+        operations: vec![HeaderOperation::Set {
+            line: 9,
+            name: "X-Test".into(),
+            value: HeaderValue {
+                source: source.into(),
+                expansion: None,
+            },
+        }],
+    };
+    let known = BTreeMap::from([(
+        "VALUE".to_owned(),
+        ExpandedValue {
+            text: known_value.to_owned(),
+            depth: 0,
+        },
+    )]);
+    prepare_header_action(&mut action, &known, &BTreeSet::new())?;
+    let HeaderOperation::Set { value, .. } = &action.operations[0] else {
+        panic!("expected set operation");
+    };
+    value.resolve_with(9, |name| known.get(name).map(|item| item.text.clone()))
+}
+
+#[test]
+fn prepares_header_values_with_existing_expansion_syntax() {
+    assert_eq!(
+        prepared_header_value("prefix:${VALUE:-missing}:tail", "selected").unwrap(),
+        "prefix:selected:tail"
+    );
+    assert_eq!(
+        prepared_header_value("${VALUE:-fallback}", "").unwrap(),
+        "fallback"
+    );
+}
+
+#[test]
+fn rejects_invalid_or_unsafe_expanded_header_values() {
+    let error = prepared_header_value("${VALUE", "text").unwrap_err();
+    assert_eq!(error.line, 9);
+
+    let error = prepared_header_value("$VALUE", "before\0after").unwrap_err();
+    assert_eq!(error.line, 9);
+    assert_eq!(
+        error.message,
+        "expanded header value contains NUL, CR, or LF"
+    );
+}
+
+#[test]
+fn bounds_expanded_header_values_at_linebuf() {
+    for size in [DEFAULT_LINEBUF - 1, DEFAULT_LINEBUF, DEFAULT_LINEBUF + 1] {
+        let result = prepared_header_value("$VALUE", &"x".repeat(size));
+        if size <= DEFAULT_LINEBUF {
+            assert_eq!(result.unwrap().len(), size);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.line, 9);
+            assert_eq!(
+                error.message,
+                format!(
+                    "expanded value exceeds the active LINEBUF limit of {DEFAULT_LINEBUF} bytes"
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn keeps_runtime_header_references_structured() {
+    let mut action = HeaderAction {
+        operations: vec![HeaderOperation::Add {
+            line: 7,
+            name: "X-Match".into(),
+            value: HeaderValue {
+                source: "${MATCH:-fallback}".into(),
+                expansion: None,
+            },
+        }],
+    };
+
+    prepare_header_action(&mut action, &BTreeMap::new(), &BTreeSet::new()).unwrap();
+    let HeaderOperation::Add { value, .. } = &action.operations[0] else {
+        panic!("expected add operation");
+    };
+    assert_eq!(
+        value.resolve_with(7, |name| (name == "MATCH").then(|| "selected".into())),
+        Ok("selected".into())
+    );
+}
 
 fn resolved_destination(config: &Config, statement_index: usize) -> Destination {
     let mut variables = config

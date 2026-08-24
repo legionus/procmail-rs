@@ -6,7 +6,7 @@ use regex::bytes::RegexBuilder;
 use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaseMode, ChildStatusMode, Condition,
     ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination,
-    HeaderAction, HeaderOperation, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN,
+    HeaderAction, HeaderOperation, HeaderValue, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN,
     MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE,
     MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError,
     PathExpression, PipeAction, RcFileExpression, RcLimits, RcParseCounts, RcParseState, Recipe,
@@ -614,13 +614,26 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
     let name = name.trim();
     validate_header_name(name, line)?;
     let value = value.trim_start();
+    if value.ends_with('\\') {
+        return Err(ParseError::new(
+            line,
+            "folded header values are not supported",
+        ));
+    }
     if value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
         return Err(ParseError::new(
             line,
             "header value contains a forbidden byte",
         ));
     }
-    let fields = (line, name.to_owned(), value.to_owned());
+    let fields = (
+        line,
+        name.to_owned(),
+        HeaderValue {
+            source: value.to_owned(),
+            expansion: None,
+        },
+    );
     match operation {
         "set" => Ok(HeaderOperation::Set {
             line: fields.0,
@@ -645,14 +658,10 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
 }
 
 fn validate_header_name(name: &str, line: usize) -> Result<(), ParseError> {
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
+    if name.is_empty() || !name.bytes().all(|byte| matches!(byte, 33..=57 | 59..=126)) {
         return Err(ParseError::new(
             line,
-            "header name must contain only ASCII letters, digits, and '-'",
+            "header name must contain only printable ASCII except ':'",
         ));
     }
     Ok(())

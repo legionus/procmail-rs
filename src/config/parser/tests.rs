@@ -1348,17 +1348,26 @@ fn parses_typed_header_action_operations() {
                 HeaderOperation::Set {
                     line: 4,
                     name: "X-State".into(),
-                    value: "ready".into(),
+                    value: HeaderValue {
+                        source: "ready".into(),
+                        expansion: None,
+                    },
                 },
                 HeaderOperation::Add {
                     line: 5,
                     name: "X-State".into(),
-                    value: "later".into(),
+                    value: HeaderValue {
+                        source: "later".into(),
+                        expansion: None,
+                    },
                 },
                 HeaderOperation::Prepend {
                     line: 6,
                     name: "X-First".into(),
-                    value: "yes".into(),
+                    value: HeaderValue {
+                        source: "yes".into(),
+                        expansion: None,
+                    },
                 },
             ],
         })
@@ -1371,6 +1380,47 @@ fn reports_unknown_header_operation_at_its_source_line() {
 
     assert_eq!(error.line, 3);
     assert_eq!(error.message, "unknown headers operation 'replace'");
+}
+
+#[test]
+fn header_value_uses_only_the_first_colon_as_a_separator() {
+    let config = parse(":0\nheaders {\n add X-URI: scheme:value:part\n}\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let RecipeAction::Headers(action) = &recipe.action else {
+        panic!("expected headers action");
+    };
+    let HeaderOperation::Add { name, value, .. } = &action.operations[0] else {
+        panic!("expected add operation");
+    };
+
+    assert_eq!(name, "X-URI");
+    assert_eq!(value.source, "scheme:value:part");
+}
+
+#[test]
+fn validates_header_names_and_rejects_folding_syntax() {
+    assert!(parse(":0\nheaders {\n add X_Test!#$%&'*+.^`|~: value\n}\n").is_ok());
+
+    for (source, message) in [
+        (
+            ":0\nheaders {\n add Bad Name: value\n}\n",
+            "header name must contain only printable ASCII except ':'",
+        ),
+        (
+            ":0\nheaders {\n add X-Test: value\\\n}\n",
+            "folded header values are not supported",
+        ),
+        (
+            ":0\nheaders {\n add X-Test: value\0tail\n}\n",
+            "header value contains a forbidden byte",
+        ),
+    ] {
+        let error = parse(source).unwrap_err();
+        assert_eq!(error.line, 3);
+        assert_eq!(error.message, message);
+    }
 }
 
 #[test]
