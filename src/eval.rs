@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use std::fmt;
-
 use crate::config::{
     Assignment, AssignmentTarget, ConditionInput, Config, ContinuationMode, ControlFlow,
     Destination, OutputEnding, PipeAction, Recipe, RecipeAction, RecipeOptions, Statement,
@@ -16,14 +14,25 @@ use crate::trace::{
 };
 
 mod condition;
+mod explanation;
 mod message;
+mod result;
 mod runtime_rc;
 
 use condition::{CompiledCondition, PartialMatch, compile_conditions};
+pub use explanation::{
+    ConditionExplanation, ConditionKindExplanation, DestinationKind, PlanExplanation,
+    RecipeExplanation,
+};
 use message::{
     CompleteMessage, OwnedCompleteMessage, current_ordered_message, matching_views_are_valid,
 };
 pub use message::{ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage};
+pub use result::{
+    CompletionState, Continuation, DeliveryAttemptError, DeliveryOutcome, DeliveryPlan, EvalError,
+    HeaderEvaluation, OrderedExecutionError, Outcome, PlannedDelivery,
+};
+use result::{ContinuationFrame, DeliveryContinuation};
 pub use runtime_rc::MAX_RUNTIME_RC_WARNINGS;
 use runtime_rc::{
     CompiledInclude, CompiledSwitch, LoadedRuntimeRc, RcExecutionContext, RuntimeRcState,
@@ -246,327 +255,6 @@ enum HeaderControl {
     EndRcFile,
     Deferred,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanExplanation {
-    requirements: InputRequirements,
-    requires_ordered_delivery: bool,
-    recipes: Vec<RecipeExplanation>,
-}
-
-impl PlanExplanation {
-    pub fn requirements(&self) -> InputRequirements {
-        self.requirements
-    }
-
-    pub fn requires_ordered_delivery(&self) -> bool {
-        self.requires_ordered_delivery
-    }
-
-    pub fn recipes(&self) -> &[RecipeExplanation] {
-        &self.recipes
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecipeExplanation {
-    line: usize,
-    assignment_count: usize,
-    conditions: Vec<ConditionExplanation>,
-    destination: DestinationKind,
-    copy: bool,
-    defers_destination: bool,
-}
-
-impl RecipeExplanation {
-    pub fn line(&self) -> usize {
-        self.line
-    }
-
-    pub fn assignment_count(&self) -> usize {
-        self.assignment_count
-    }
-
-    pub fn conditions(&self) -> &[ConditionExplanation] {
-        &self.conditions
-    }
-
-    pub fn destination(&self) -> DestinationKind {
-        self.destination
-    }
-
-    pub fn is_copy(&self) -> bool {
-        self.copy
-    }
-
-    pub fn defers_destination(&self) -> bool {
-        self.defers_destination
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConditionExplanation {
-    negated: bool,
-    kind: ConditionKindExplanation,
-}
-
-impl ConditionExplanation {
-    pub fn is_negated(self) -> bool {
-        self.negated
-    }
-
-    pub fn kind(self) -> ConditionKindExplanation {
-        self.kind
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConditionKindExplanation {
-    HeaderRegex,
-    BodyRegex,
-    MessageRegex,
-    VariableRegex,
-    Program,
-    SmallerThan,
-    LargerThan,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DestinationKind {
-    Maildir,
-    Mbox,
-    ExternalProgram,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryPlan {
-    deliveries: Vec<PlannedDelivery>,
-    original_delivered: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedDelivery {
-    destination: Destination,
-    continuation: DeliveryContinuation,
-    output_ending: OutputEnding,
-    lock: Option<String>,
-    umask: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeliveryAttemptError<E> {
-    Recoverable(E),
-    Fatal(E),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OrderedExecutionError<E> {
-    Evaluation(EvalError),
-    Delivery(E),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum CompletionState<'a, E> {
-    Completed(DeliveryOutcome),
-    Failed(&'a OrderedExecutionError<E>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeliveryOutcome {
-    published: usize,
-    original_delivered: bool,
-}
-
-impl DeliveryOutcome {
-    pub fn published(self) -> usize {
-        self.published
-    }
-
-    pub fn original_delivered(self) -> bool {
-        self.original_delivered
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeliveryContinuation {
-    Stop,
-    Continue,
-}
-
-impl PlannedDelivery {
-    pub fn destination(&self) -> &Destination {
-        &self.destination
-    }
-
-    pub fn is_copy(&self) -> bool {
-        self.continuation == DeliveryContinuation::Continue
-    }
-
-    pub fn output_ending(&self) -> OutputEnding {
-        self.output_ending
-    }
-
-    pub fn lock(&self) -> Option<&str> {
-        self.lock.as_deref()
-    }
-
-    pub fn umask(&self) -> &str {
-        &self.umask
-    }
-}
-
-impl DeliveryPlan {
-    pub fn deliveries(&self) -> &[PlannedDelivery] {
-        &self.deliveries
-    }
-
-    pub fn original_delivered(&self) -> bool {
-        self.original_delivered
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeaderEvaluation {
-    Decided(DeliveryPlan),
-    NeedsMessage(Continuation),
-    Error(EvalError),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Continuation {
-    frames: Vec<ContinuationFrame>,
-    execution: FanoutPlanState,
-    runtime: RuntimeVariables,
-    requirements: InputRequirements,
-    restart: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ContinuationFrame {
-    recipe_index: usize,
-    state: SequenceState,
-    condition_results: Vec<Option<bool>>,
-    assignments_applied: bool,
-}
-
-impl Continuation {
-    pub fn requirements(&self) -> InputRequirements {
-        self.requirements
-    }
-
-    pub fn pending_deliveries(&self) -> &[PlannedDelivery] {
-        &self.execution.deliveries
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    Delivered { deliveries: usize },
-    Undelivered { copies: usize },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvalError {
-    BodyWasNotBuffered,
-    VariableValueTooLarge {
-        name: String,
-        size: usize,
-    },
-    MatchValueIsNotUtf8,
-    MatchValuesTooLarge {
-        size: usize,
-    },
-    Expansion(crate::config::ExpansionError),
-    RuntimeRcLoaderUnavailable {
-        line: usize,
-        statement: &'static str,
-    },
-    RuntimeSettingUnavailable {
-        line: usize,
-        name: &'static str,
-    },
-    LocalLockExecutorUnavailable {
-        line: usize,
-    },
-    RuntimeRc(String),
-    ExternalActionUnsupported {
-        line: usize,
-    },
-    ExternalConditionUnsupported {
-        line: usize,
-    },
-    InvalidExternalActionResult {
-        line: usize,
-        reason: &'static str,
-    },
-    Delivery {
-        destination: String,
-        message: String,
-    },
-}
-
-impl fmt::Display for EvalError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::BodyWasNotBuffered => {
-                formatter.write_str("execution plan requires body contents that were not buffered")
-            }
-            Self::VariableValueTooLarge { name, size } => write!(
-                formatter,
-                "variable {name} has {size} bytes, exceeding the hard limit of {} bytes",
-                crate::config::MAX_ASSIGNMENT_VALUE_LEN
-            ),
-            Self::MatchValueIsNotUtf8 => {
-                formatter.write_str("regular expression capture is not valid UTF-8")
-            }
-            Self::MatchValuesTooLarge { size } => write!(
-                formatter,
-                "regular expression captures require {size} bytes, exceeding the hard limit of {} bytes",
-                crate::config::MAX_MATCH_BYTES
-            ),
-            Self::Expansion(error) => {
-                write!(formatter, "cannot expand configuration value: {error}")
-            }
-            Self::RuntimeRcLoaderUnavailable { line, statement } => write!(
-                formatter,
-                "line {line}: {statement} requires the runtime rc loader"
-            ),
-            Self::RuntimeSettingUnavailable { line, name } => write!(
-                formatter,
-                "line {line}: {name} requires runtime setting support"
-            ),
-            Self::LocalLockExecutorUnavailable { line } => {
-                write!(
-                    formatter,
-                    "line {line}: recipe block requires local lock support"
-                )
-            }
-            Self::RuntimeRc(message) => formatter.write_str(message),
-            Self::ExternalActionUnsupported { line } => {
-                write!(
-                    formatter,
-                    "line {line}: external action is not executable yet"
-                )
-            }
-            Self::ExternalConditionUnsupported { line } => {
-                write!(
-                    formatter,
-                    "line {line}: program condition is not executable in this evaluation mode"
-                )
-            }
-            Self::InvalidExternalActionResult { line, reason } => write!(
-                formatter,
-                "line {line}: invalid external action result: {reason}"
-            ),
-            Self::Delivery {
-                destination,
-                message,
-            } => write!(formatter, "cannot deliver to {destination}: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for EvalError {}
 
 impl CompiledSequence {
     fn compile(statements: &[Statement], preceding: &mut Vec<CompiledStatement>) -> Self {
