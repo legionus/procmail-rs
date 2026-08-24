@@ -297,3 +297,677 @@ impl ExecutionPlan {
         })
     }
 }
+
+impl CompiledSequence {
+    fn plan_complete(
+        &self,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut FanoutPlanState,
+        context: RcExecutionContext<'_>,
+    ) -> Result<SequenceControl, EvalError> {
+        self.plan_complete_with_context(message, runtime, trace, execution, context)
+    }
+
+    fn plan_complete_with_context(
+        &self,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut FanoutPlanState,
+        context: RcExecutionContext<'_>,
+    ) -> Result<SequenceControl, EvalError> {
+        self.plan_complete_from(
+            SequenceCursor::default(),
+            message,
+            runtime,
+            trace,
+            execution,
+            context,
+        )
+    }
+
+    fn plan_complete_from(
+        &self,
+        cursor: SequenceCursor,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut FanoutPlanState,
+        context: RcExecutionContext<'_>,
+    ) -> Result<SequenceControl, EvalError> {
+        let mut state = cursor.state;
+        for (index, recipe) in self.recipes.iter().enumerate().skip(cursor.index) {
+            let statement_control = plan_statements_complete(
+                &recipe.preceding_statements,
+                message,
+                runtime,
+                trace,
+                execution,
+                context,
+            )?;
+            if statement_control != SequenceControl::Continue {
+                return Ok(statement_control);
+            }
+            let conditions_matched =
+                recipe.planning_gate(state) && recipe.matches_complete(message, runtime, trace)?;
+            let else_handled = recipe.else_handled(state, conditions_matched);
+            let has_error_handler = self.has_error_handler(index);
+
+            let control = if conditions_matched {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Selected,
+                });
+                recipe.plan_action(
+                    message,
+                    runtime,
+                    trace,
+                    execution,
+                    has_error_handler,
+                    context,
+                )?
+            } else {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
+                SequenceControl::Continue
+            };
+            state.record(
+                recipe.control,
+                conditions_matched,
+                if conditions_matched {
+                    ActionExecution::Succeeded
+                } else {
+                    ActionExecution::NotAttempted
+                },
+                else_handled,
+            );
+            if control != SequenceControl::Continue {
+                return Ok(control);
+            }
+        }
+
+        let statement_control = plan_statements_complete(
+            &self.trailing_statements,
+            message,
+            runtime,
+            trace,
+            execution,
+            context,
+        )?;
+        if statement_control != SequenceControl::Continue {
+            return Ok(statement_control);
+        }
+        Ok(SequenceControl::Continue)
+    }
+
+    fn plan_headers(
+        &self,
+        head: &MessageHead,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        planning: &mut HeaderPlanState,
+        following: InputRequirements,
+        context: RcExecutionContext<'_>,
+    ) -> Result<HeaderControl, EvalError> {
+        let mut state = SequenceState::default();
+
+        for (index, recipe) in self.recipes.iter().enumerate() {
+            let statement_following = self.requirements_from(index).union(following);
+            let statement_control = plan_statements_headers(
+                &recipe.preceding_statements,
+                head,
+                runtime,
+                trace,
+                planning,
+                statement_following,
+                context,
+            )?;
+            if statement_control != HeaderControl::Continue {
+                return Ok(statement_control);
+            }
+            let gate = recipe.planning_gate(state);
+            let (matched, condition_results) = if gate {
+                recipe.matches_headers(head, runtime, trace)?
+            } else {
+                (PartialMatch::False, Vec::new())
+            };
+            if matched == PartialMatch::Deferred {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Deferred,
+                });
+                planning.frames.push(ContinuationFrame {
+                    recipe_index: index,
+                    state,
+                    condition_results,
+                    assignments_applied: true,
+                });
+                planning.requirements = self.requirements_from(index).union(following);
+                return Ok(HeaderControl::Deferred);
+            }
+
+            let conditions_matched = matched == PartialMatch::True;
+            let else_handled = recipe.else_handled(state, conditions_matched);
+            let has_error_handler = self.has_error_handler(index);
+            if conditions_matched && recipe.delivery_defers_header() {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Deferred,
+                });
+                planning.frames.push(ContinuationFrame {
+                    recipe_index: index,
+                    state,
+                    condition_results,
+                    assignments_applied: true,
+                });
+                planning.requirements = self.requirements_from(index).union(following);
+                return Ok(HeaderControl::Deferred);
+            }
+            let control = if conditions_matched {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Selected,
+                });
+                match &recipe.action {
+                    CompiledAction::Pipe { .. } => {
+                        return Err(EvalError::ExternalActionUnsupported { line: recipe.line });
+                    }
+                    CompiledAction::Deliver { .. } => {
+                        let control = recipe.plan_delivery(
+                            runtime,
+                            &mut planning.execution,
+                            has_error_handler,
+                        )?;
+                        HeaderControl::from(control)
+                    }
+                    CompiledAction::Block(children) => {
+                        // Store the parent before descending so the path is
+                        // ordered from the root and never exceeds the parser's
+                        // recipe nesting limit.
+                        planning.frames.push(ContinuationFrame {
+                            recipe_index: index,
+                            state,
+                            condition_results: Vec::new(),
+                            assignments_applied: true,
+                        });
+                        let child_following = self.requirements_from(index + 1).union(following);
+                        let child = children.plan_headers(
+                            head,
+                            runtime,
+                            trace,
+                            planning,
+                            child_following,
+                            context,
+                        )?;
+                        if child != HeaderControl::Deferred {
+                            planning.frames.pop();
+                        }
+                        child
+                    }
+                }
+            } else {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
+                HeaderControl::Continue
+            };
+            if control == HeaderControl::Deferred {
+                return Ok(control);
+            }
+            state.record(
+                recipe.control,
+                conditions_matched,
+                ActionExecution::Succeeded,
+                else_handled,
+            );
+            if control != HeaderControl::Continue {
+                return Ok(control);
+            }
+        }
+
+        let statement_control = plan_statements_headers(
+            &self.trailing_statements,
+            head,
+            runtime,
+            trace,
+            planning,
+            following,
+            context,
+        )?;
+        if statement_control != HeaderControl::Continue {
+            return Ok(statement_control);
+        }
+        Ok(HeaderControl::Continue)
+    }
+
+    fn resume_from_frames(
+        &self,
+        cursor: ResumeCursor<'_>,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut FanoutPlanState,
+        context: RcExecutionContext<'_>,
+    ) -> Result<SequenceControl, EvalError> {
+        let frame = cursor
+            .frames
+            .get(cursor.depth)
+            .ok_or(EvalError::BodyWasNotBuffered)?;
+        let recipe = self
+            .recipes
+            .get(frame.recipe_index)
+            .ok_or(EvalError::BodyWasNotBuffered)?;
+        let mut state = frame.state;
+        if !frame.assignments_applied {
+            let control = execute_statements(&recipe.preceding_statements, runtime, trace)?;
+            if control != SequenceControl::Continue {
+                return Ok(control);
+            }
+        }
+
+        let (conditions_matched, control) = if cursor.depth + 1 < cursor.frames.len() {
+            let CompiledAction::Block(children) = &recipe.action else {
+                return Err(EvalError::BodyWasNotBuffered);
+            };
+            let control = children.resume_from_frames(
+                ResumeCursor {
+                    frames: cursor.frames,
+                    depth: cursor.depth + 1,
+                },
+                message,
+                runtime,
+                trace,
+                execution,
+                context,
+            )?;
+            (true, control)
+        } else {
+            let conditions_matched = recipe.planning_gate(state)
+                && recipe.matches_resumed(message, &frame.condition_results, runtime, trace)?;
+            let control = if conditions_matched {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Selected,
+                });
+                recipe.plan_action(
+                    message,
+                    runtime,
+                    trace,
+                    execution,
+                    self.has_error_handler(frame.recipe_index),
+                    context,
+                )?
+            } else {
+                trace.record(TraceEvent::RecipeEvaluated {
+                    line: recipe.line,
+                    decision: RecipeDecision::Skipped,
+                });
+                SequenceControl::Continue
+            };
+            (conditions_matched, control)
+        };
+
+        if control != SequenceControl::Continue {
+            return Ok(control);
+        }
+        state.record(
+            recipe.control,
+            conditions_matched,
+            if conditions_matched {
+                ActionExecution::Succeeded
+            } else {
+                ActionExecution::NotAttempted
+            },
+            recipe.else_handled(state, conditions_matched),
+        );
+        self.plan_complete_from(
+            SequenceCursor {
+                index: frame.recipe_index + 1,
+                state,
+            },
+            message,
+            runtime,
+            trace,
+            execution,
+            context,
+        )
+    }
+}
+
+impl CompiledNode {
+    fn matches_headers(
+        &self,
+        head: &MessageHead,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+    ) -> Result<(PartialMatch, Vec<Option<bool>>), EvalError> {
+        let mut result = PartialMatch::True;
+        let mut condition_results = Vec::with_capacity(self.conditions.len());
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let matched = condition.matches_headers(head, runtime)?;
+            if matched != PartialMatch::Deferred {
+                condition.trace_result(self.line, index, matched, trace);
+            }
+            match matched {
+                PartialMatch::False => {
+                    condition_results.push(Some(false));
+                    return Ok((PartialMatch::False, condition_results));
+                }
+                PartialMatch::Deferred => {
+                    condition_results.push(None);
+                    result = PartialMatch::Deferred;
+                }
+                PartialMatch::True => condition_results.push(Some(true)),
+            }
+        }
+        Ok((result, condition_results))
+    }
+
+    fn matches_resumed(
+        &self,
+        message: CompleteMessage<'_>,
+        header_results: &[Option<bool>],
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+    ) -> Result<bool, EvalError> {
+        for (index, condition) in self.conditions.iter().enumerate() {
+            let matched = match header_results.get(index).copied().flatten() {
+                Some(matched) => matched,
+                None => {
+                    let matched = condition.matches_complete(message, runtime)?;
+                    condition.trace_result(
+                        self.line,
+                        index,
+                        PartialMatch::from_bool(matched),
+                        trace,
+                    );
+                    matched
+                }
+            };
+            if !matched {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn planning_gate(&self, state: SequenceState) -> bool {
+        // Fan-out planning never observes a publication result. Treat a/e as
+        // reachable after a matching predecessor so header analysis can
+        // defer before either branch is discarded; ordered execution later
+        // selects the branch from the real action result.
+        match self.control {
+            ControlFlow::Independent => true,
+            ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
+            ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError => state
+                .previous
+                .is_some_and(|result| result.conditions_matched),
+            ControlFlow::Else => state.previous.is_none_or(|result| !result.else_handled),
+        }
+    }
+
+    fn delivery_defers_header(&self) -> bool {
+        match &self.action {
+            CompiledAction::Pipe { .. } => true,
+            CompiledAction::Deliver { destination, .. } => {
+                destination.needs_runtime_variables()
+                    || matches!(destination, Destination::Mbox(_))
+                    || matches!(
+                        self.control,
+                        ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
+                    )
+            }
+            CompiledAction::Block(_) => false,
+        }
+    }
+
+    fn plan_action(
+        &self,
+        message: CompleteMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+        execution: &mut FanoutPlanState,
+        has_error_handler: bool,
+        context: RcExecutionContext<'_>,
+    ) -> Result<SequenceControl, EvalError> {
+        match &self.action {
+            CompiledAction::Pipe { .. } => {
+                Err(EvalError::ExternalActionUnsupported { line: self.line })
+            }
+            CompiledAction::Deliver { .. } => {
+                self.plan_delivery(runtime, execution, has_error_handler)
+            }
+            CompiledAction::Block(children) => {
+                if self.lock.is_some() {
+                    return Err(EvalError::LocalLockExecutorUnavailable { line: self.line });
+                }
+                children.plan_complete(message, runtime, trace, execution, context)
+            }
+        }
+    }
+
+    fn plan_delivery(
+        &self,
+        runtime: &mut RuntimeVariables,
+        execution: &mut FanoutPlanState,
+        has_error_handler: bool,
+    ) -> Result<SequenceControl, EvalError> {
+        let CompiledAction::Deliver {
+            destination,
+            continuation,
+            output_ending,
+        } = &self.action
+        else {
+            return Ok(SequenceControl::Continue);
+        };
+        let destination = destination
+            .bind_with(|name| runtime.get(name).map(str::to_owned))
+            .map_err(EvalError::Expansion)?;
+        let lock = self
+            .lock
+            .as_ref()
+            .map(|expression| expression.resolve_with(|name| runtime.get(name).map(str::to_owned)))
+            .transpose()
+            .map_err(EvalError::Expansion)?;
+        let copy = *continuation == ContinuationMode::Continue;
+        execution.deliveries.push(PlannedDelivery {
+            destination,
+            continuation: if copy {
+                DeliveryContinuation::Continue
+            } else {
+                DeliveryContinuation::Stop
+            },
+            output_ending: *output_ending,
+            lock,
+            umask: runtime.get("UMASK").unwrap_or("077").to_owned(),
+        });
+        execution.original_delivered |= !copy;
+        if copy || has_error_handler {
+            Ok(SequenceControl::Continue)
+        } else {
+            Ok(SequenceControl::Stop)
+        }
+    }
+}
+
+fn plan_statements_complete(
+    statements: &[CompiledStatement],
+    message: CompleteMessage<'_>,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+    execution: &mut FanoutPlanState,
+    context: RcExecutionContext<'_>,
+) -> Result<SequenceControl, EvalError> {
+    for statement in statements {
+        match statement {
+            CompiledStatement::Assignment(assignment) => {
+                execute_assignment(assignment, runtime, trace)?;
+            }
+            CompiledStatement::Host(assignment) => {
+                if !execute_host_assignment(assignment, runtime, trace)? {
+                    execution.original_delivered = true;
+                    return Ok(SequenceControl::EndRcFile);
+                }
+            }
+            CompiledStatement::Include(include) => {
+                include.ensure_loaded(runtime, context)?;
+                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded()
+                    && sequence.plan_complete_with_context(
+                        message,
+                        runtime,
+                        trace,
+                        execution,
+                        context.descend()?,
+                    )? == SequenceControl::Stop
+                {
+                    return Ok(SequenceControl::Stop);
+                }
+            }
+            CompiledStatement::Switch(switch) => {
+                // Run the replacement as a separate rc-file scope, then use
+                // EndRcFile to unwind every enclosing recipe block. An
+                // INCLUDERC boundary consumes that result and resumes its
+                // caller, while the root treats it as end of processing.
+                switch.ensure_loaded(runtime, context)?;
+                match &*switch.loaded() {
+                    LoadedRuntimeRc::Unloaded => unreachable!(),
+                    LoadedRuntimeRc::Failed => {}
+                    LoadedRuntimeRc::Empty => return Ok(SequenceControl::EndRcFile),
+                    LoadedRuntimeRc::Sequence(sequence) => {
+                        let control = sequence.plan_complete_with_context(
+                            message,
+                            runtime,
+                            trace,
+                            execution,
+                            context.descend()?,
+                        )?;
+                        return Ok(if control == SequenceControl::Stop {
+                            SequenceControl::Stop
+                        } else {
+                            SequenceControl::EndRcFile
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(SequenceControl::Continue)
+}
+
+fn plan_statements_headers(
+    statements: &[CompiledStatement],
+    head: &MessageHead,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+    planning: &mut HeaderPlanState,
+    following: InputRequirements,
+    context: RcExecutionContext<'_>,
+) -> Result<HeaderControl, EvalError> {
+    for statement in statements {
+        match statement {
+            CompiledStatement::Assignment(assignment) => {
+                execute_assignment(assignment, runtime, trace)?;
+            }
+            CompiledStatement::Host(assignment) => {
+                if !execute_host_assignment(assignment, runtime, trace)? {
+                    planning.execution.original_delivered = true;
+                    return Ok(HeaderControl::EndRcFile);
+                }
+            }
+            CompiledStatement::Include(include) => {
+                include.ensure_loaded(runtime, context)?;
+                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded() {
+                    if sequence.requires_ordered_delivery() {
+                        planning.frames.clear();
+                        planning.restart = true;
+                        planning.requirements =
+                            sequence
+                                .requirements()
+                                .union(following)
+                                .union(InputRequirements {
+                                    needs_end_of_message: true,
+                                    ..InputRequirements::default()
+                                });
+                        return Ok(HeaderControl::Deferred);
+                    }
+                    let child = sequence.plan_headers(
+                        head,
+                        runtime,
+                        trace,
+                        planning,
+                        following,
+                        context.descend()?,
+                    )?;
+                    if child == HeaderControl::Deferred {
+                        // Continuation frames point into the static root tree.
+                        // A dynamically loaded child cannot be represented by
+                        // that path, so replay the still-private plan once the
+                        // selected message sections have been staged.
+                        planning.frames.clear();
+                        planning.restart = true;
+                        planning.requirements = planning
+                            .requirements
+                            .union(sequence.requirements())
+                            .union(following);
+                        return Ok(HeaderControl::Deferred);
+                    }
+                    if child == HeaderControl::Stop {
+                        return Ok(HeaderControl::Stop);
+                    }
+                }
+            }
+            CompiledStatement::Switch(switch) => {
+                // Requirements after this statement are unreachable after a
+                // successful switch. If the dynamic target needs the body,
+                // restart from the private root plan after staging it.
+                switch.ensure_loaded(runtime, context)?;
+                match &*switch.loaded() {
+                    LoadedRuntimeRc::Unloaded => unreachable!(),
+                    LoadedRuntimeRc::Failed => {}
+                    LoadedRuntimeRc::Empty => return Ok(HeaderControl::EndRcFile),
+                    LoadedRuntimeRc::Sequence(sequence) => {
+                        if sequence.requires_ordered_delivery() {
+                            planning.frames.clear();
+                            planning.restart = true;
+                            planning.requirements =
+                                sequence.requirements().union(InputRequirements {
+                                    needs_end_of_message: true,
+                                    ..InputRequirements::default()
+                                });
+                            return Ok(HeaderControl::Deferred);
+                        }
+                        let child = sequence.plan_headers(
+                            head,
+                            runtime,
+                            trace,
+                            planning,
+                            InputRequirements::default(),
+                            context.descend()?,
+                        )?;
+                        if child == HeaderControl::Deferred {
+                            // Replaying from the root reconstructs the dynamic
+                            // target without retaining pointers into its tree.
+                            // Nothing after SWITCHRC remains reachable.
+                            planning.frames.clear();
+                            planning.restart = true;
+                            planning.requirements =
+                                planning.requirements.union(sequence.requirements());
+                            return Ok(HeaderControl::Deferred);
+                        }
+                        return Ok(if child == HeaderControl::Stop {
+                            HeaderControl::Stop
+                        } else {
+                            HeaderControl::EndRcFile
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(HeaderControl::Continue)
+}
