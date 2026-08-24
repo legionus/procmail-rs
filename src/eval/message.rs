@@ -35,6 +35,37 @@ impl<'a> MappedMessageInput<'a> {
             matching,
         }
     }
+
+    // Build borrowed views only after checking every related length. Later
+    // matching code can then slice the raw message without repeating checks,
+    // while a normalized header cannot be paired with an unrelated full view.
+    pub(super) fn complete_message(self, needs_matching_raw: bool) -> Option<CompleteMessage<'a>> {
+        if self.header_len > self.raw.len() {
+            return None;
+        }
+        let (matching_header, matching_raw) = self
+            .matching
+            .map(|message| {
+                let (header, full) = message.into_parts();
+                (Some(header), full)
+            })
+            .unwrap_or((None, None));
+        if !matching_views_are_valid(
+            self.raw.len(),
+            self.header_len,
+            matching_header,
+            matching_raw,
+            needs_matching_raw,
+        ) {
+            return None;
+        }
+        Some(CompleteMessage::Mapped {
+            raw: self.raw,
+            header_len: self.header_len,
+            matching_header,
+            matching_raw,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,7 +138,7 @@ pub(super) fn current_ordered_message<'a>(
     }
 }
 
-pub(super) fn matching_views_are_valid(
+fn matching_views_are_valid(
     raw_len: usize,
     header_len: usize,
     matching_header: Option<&[u8]>,

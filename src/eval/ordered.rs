@@ -224,12 +224,7 @@ impl CompiledNode {
                         .map_err(OrderedExecutionError::Evaluation)?,
                 };
                 let lock = self
-                    .lock
-                    .as_ref()
-                    .map(|expression| {
-                        expression.resolve_with(|name| context.runtime.get(name).map(str::to_owned))
-                    })
-                    .transpose()
+                    .resolve_lock(context.runtime)
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
                 match external(
@@ -291,12 +286,7 @@ impl CompiledNode {
                         .ok_or(EvalError::BodyWasNotBuffered)
                         .map_err(OrderedExecutionError::Evaluation)?;
                 let lock = self
-                    .lock
-                    .as_ref()
-                    .map(|expression| {
-                        expression.resolve_with(|name| context.runtime.get(name).map(str::to_owned))
-                    })
-                    .transpose()
+                    .resolve_lock(context.runtime)
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
                 match (context.deliver)(
@@ -332,12 +322,7 @@ impl CompiledNode {
                 // the context or clear it by completing successfully.
                 context.pending_error = None;
                 let lock = self
-                    .lock
-                    .as_ref()
-                    .map(|expression| {
-                        expression.resolve_with(|name| context.runtime.get(name).map(str::to_owned))
-                    })
-                    .transpose()
+                    .resolve_lock(context.runtime)
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
                 let _guard = if let Some(path) = lock.as_deref() {
@@ -696,40 +681,13 @@ impl ExecutionPlan {
         ) -> Result<(), DeliveryAttemptError<E>>,
         T: TraceSink,
     {
-        let MappedMessageInput {
-            raw,
-            header_len,
-            matching,
-        } = message;
-        if header_len > raw.len() {
-            return Err(OrderedExecutionError::Evaluation(
+        let message = message
+            .complete_message(self.needs_message_contents())
+            .ok_or(OrderedExecutionError::Evaluation(
                 EvalError::BodyWasNotBuffered,
-            ));
-        }
-        let (matching_header, matching_raw) = matching
-            .map(|message| {
-                let (header, full) = message.into_parts();
-                (Some(header), full)
-            })
-            .unwrap_or((None, None));
-        if !matching_views_are_valid(
-            raw.len(),
-            header_len,
-            matching_header,
-            matching_raw,
-            self.needs_message_contents(),
-        ) {
-            return Err(OrderedExecutionError::Evaluation(
-                EvalError::BodyWasNotBuffered,
-            ));
-        }
+            ))?;
         let mut context = OrderedTreeExecution {
-            message: CompleteMessage::Mapped {
-                raw,
-                header_len,
-                matching_header,
-                matching_raw,
-            },
+            message,
             replacement: None,
             runtime,
             trace,

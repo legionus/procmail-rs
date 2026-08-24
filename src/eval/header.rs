@@ -201,35 +201,10 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
-        if header_len > raw.len() {
-            return Err(EvalError::BodyWasNotBuffered);
-        }
-        let (matching_header, matching_raw) = matching
-            .map(|message| {
-                let (header, full) = message.into_parts();
-                (Some(header), full)
-            })
-            .unwrap_or((None, None));
-        if !matching_views_are_valid(
-            raw.len(),
-            header_len,
-            matching_header,
-            matching_raw,
-            self.needs_message_contents(),
-        ) {
-            return Err(EvalError::BodyWasNotBuffered);
-        }
-        self.resume_tree(
-            continuation,
-            CompleteMessage::Mapped {
-                raw,
-                header_len,
-                matching_header,
-                matching_raw,
-            },
-            runtime,
-            trace,
-        )
+        let message = MappedMessageInput::new(raw, header_len, matching)
+            .complete_message(self.needs_message_contents())
+            .ok_or(EvalError::BodyWasNotBuffered)?;
+        self.resume_tree(continuation, message, runtime, trace)
     }
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
@@ -768,12 +743,7 @@ impl CompiledNode {
         let destination = destination
             .bind_with(|name| runtime.get(name).map(str::to_owned))
             .map_err(EvalError::Expansion)?;
-        let lock = self
-            .lock
-            .as_ref()
-            .map(|expression| expression.resolve_with(|name| runtime.get(name).map(str::to_owned)))
-            .transpose()
-            .map_err(EvalError::Expansion)?;
+        let lock = self.resolve_lock(runtime).map_err(EvalError::Expansion)?;
         let copy = *continuation == ContinuationMode::Continue;
         execution.deliveries.push(PlannedDelivery {
             destination,

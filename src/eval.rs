@@ -29,9 +29,7 @@ pub use explanation::{
     RecipeExplanation,
 };
 use header::FanoutPlanState;
-use message::{
-    CompleteMessage, OwnedCompleteMessage, current_ordered_message, matching_views_are_valid,
-};
+use message::{CompleteMessage, OwnedCompleteMessage, current_ordered_message};
 pub use message::{ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage};
 pub use ordered::RecipeLockGuard;
 pub use result::{
@@ -83,6 +81,16 @@ enum SequenceControl {
 }
 
 impl CompiledNode {
+    fn resolve_lock(
+        &self,
+        runtime: &RuntimeVariables,
+    ) -> Result<Option<String>, crate::config::ExpansionError> {
+        self.lock
+            .as_ref()
+            .map(|expression| expression.resolve_with(|name| runtime.get(name).map(str::to_owned)))
+            .transpose()
+    }
+
     fn matches_complete(
         &self,
         message: CompleteMessage<'_>,
