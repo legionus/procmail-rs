@@ -435,18 +435,10 @@ fn parse_recipe(
     let has_program_condition = conditions
         .iter()
         .any(|condition| matches!(condition.kind, ConditionKind::Program(_)));
-    if !is_pipe && options.write_errors == WriteErrorMode::Ignore {
-        let message = if action == "{" {
-            "recipe flag 'i' is not supported on blocks; original procmail ignores it"
-        } else {
-            "recipe flag 'i' is not supported for filesystem delivery because it may publish an incomplete message"
-        };
-        return Err(ParseError::new(start + 1, message));
-    }
-    if action == "{" && options.output_ending == OutputEnding::Preserve {
+    if !is_pipe && action != "{" && options.write_errors == WriteErrorMode::Ignore {
         return Err(ParseError::new(
             start + 1,
-            "recipe flag 'r' is not supported on blocks; original procmail ignores it",
+            "recipe flag 'i' is not supported for filesystem delivery because it may publish an incomplete message",
         ));
     }
     if !is_pipe
@@ -454,7 +446,7 @@ fn parse_recipe(
             || options.action_mode != ActionMode::Deliver
             || (!has_program_condition
                 && (options.child_status != ChildStatusMode::Ignore
-                    || options.write_errors != WriteErrorMode::Fail)))
+                    || (action != "{" && options.write_errors != WriteErrorMode::Fail))))
     {
         return Err(ParseError::new(
             start + 1,

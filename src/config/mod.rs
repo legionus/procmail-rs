@@ -186,6 +186,33 @@ impl Config {
         self.parse_counts
     }
 
+    pub fn for_each_compatibility_warning(&self, mut report: impl FnMut(usize, char)) {
+        fn visit(statements: &[Statement], report: &mut impl FnMut(usize, char)) {
+            for statement in statements {
+                let Statement::Recipe(recipe) = statement else {
+                    continue;
+                };
+                let RecipeAction::Block(children) = &recipe.action else {
+                    continue;
+                };
+
+                // Original procmail accepts these action-specific flags on a
+                // block but cannot apply their pipe behavior there. Report
+                // that compatibility choice before visiting nested recipes so
+                // diagnostics retain source order without another collection.
+                if recipe.options.write_errors == WriteErrorMode::Ignore {
+                    report(recipe.line, 'i');
+                }
+                if recipe.options.output_ending == OutputEnding::Preserve {
+                    report(recipe.line, 'r');
+                }
+                visit(children, report);
+            }
+        }
+
+        visit(&self.statements, &mut report);
+    }
+
     pub fn has_pipe_actions(&self) -> bool {
         statements_have_pipe_actions(&self.statements)
     }

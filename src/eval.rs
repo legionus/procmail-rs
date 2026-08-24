@@ -20,6 +20,7 @@ use crate::trace::{
 };
 
 const MAX_RC_DIAGNOSTIC_LEN: usize = 1024;
+pub const MAX_RUNTIME_RC_WARNINGS: usize = 128;
 
 pub trait Delivery {
     fn deliver(&mut self, destination: &Destination, message: &Message) -> Result<(), String>;
@@ -80,6 +81,8 @@ pub struct ExecutionPlan {
     dynamic_ordered_delivery: Cell<bool>,
     dynamic_message_contents: Cell<bool>,
     rc_diagnostics: RefCell<Vec<String>>,
+    rc_warning_count: Cell<usize>,
+    rc_warnings_omitted: Cell<bool>,
 }
 
 #[derive(Debug)]
@@ -168,7 +171,21 @@ struct RcExecutionContext<'a> {
     dynamic_ordered_delivery: &'a Cell<bool>,
     dynamic_message_contents: &'a Cell<bool>,
     diagnostics: &'a RefCell<Vec<String>>,
+    warning_count: &'a Cell<usize>,
+    warnings_omitted: &'a Cell<bool>,
     depth: usize,
+}
+
+impl RcExecutionContext<'_> {
+    fn push_warning(self, diagnostic: String) {
+        let count = self.warning_count.get();
+        if count < MAX_RUNTIME_RC_WARNINGS {
+            self.diagnostics.borrow_mut().push(diagnostic);
+            self.warning_count.set(count + 1);
+        } else {
+            self.warnings_omitted.set(true);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -795,6 +812,16 @@ fn load_runtime_rc(
         *loaded_state.borrow_mut() = LoadedRuntimeRc::Empty;
         return Ok(());
     };
+    loaded
+        .config()
+        .for_each_compatibility_warning(|line, flag| {
+            let mut diagnostic = format!(
+                "warning: {}:{line}: recipe flag '{flag}' has no effect on a block",
+                loaded.path().display()
+            );
+            truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
+            context.push_warning(diagnostic);
+        });
     let mut preceding = Vec::new();
     let sequence = CompiledSequence::compile(&loaded.into_config().statements, &mut preceding);
     let requirements = sequence.requirements();
@@ -2343,6 +2370,8 @@ impl ExecutionPlan {
             dynamic_ordered_delivery: Cell::new(false),
             dynamic_message_contents: Cell::new(false),
             rc_diagnostics: RefCell::new(Vec::new()),
+            rc_warning_count: Cell::new(0),
+            rc_warnings_omitted: Cell::new(false),
         }
     }
 
@@ -2353,12 +2382,19 @@ impl ExecutionPlan {
             dynamic_ordered_delivery: &self.dynamic_ordered_delivery,
             dynamic_message_contents: &self.dynamic_message_contents,
             diagnostics: &self.rc_diagnostics,
+            warning_count: &self.rc_warning_count,
+            warnings_omitted: &self.rc_warnings_omitted,
             depth: 0,
         }
     }
 
     pub fn take_rc_diagnostics(&self) -> Vec<String> {
-        std::mem::take(&mut *self.rc_diagnostics.borrow_mut())
+        let mut diagnostics = std::mem::take(&mut *self.rc_diagnostics.borrow_mut());
+        if self.rc_warnings_omitted.replace(false) {
+            diagnostics.push("warning: additional runtime rc warnings were omitted".to_owned());
+        }
+        self.rc_warning_count.set(0);
+        diagnostics
     }
 
     pub fn requirements(&self) -> InputRequirements {

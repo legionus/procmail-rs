@@ -309,6 +309,18 @@ impl RcFileLoader {
                     else {
                         continue;
                     };
+                    let mut warning_error = None;
+                    loaded
+                        .config()
+                        .for_each_compatibility_warning(|line, flag| {
+                            if warning_error.is_none() {
+                                warning_error =
+                                    warnings.compatibility_flag(loaded.path(), line, flag).err();
+                            }
+                        });
+                    if let Some(error) = warning_error {
+                        return Err(error);
+                    }
 
                     // INCLUDERC assignments affect statements that follow in
                     // the same selected path. SWITCHRC never reaches those
@@ -372,16 +384,9 @@ fn parse_file_error(path: &Path, error: config::ParseError) -> RcFileError {
 }
 
 impl RcCheckWarnings {
-    fn dynamic_path(
-        &mut self,
-        depth: usize,
-        line: usize,
-        statement: &str,
-    ) -> Result<(), RcFileError> {
+    fn push(&mut self, message: String) -> Result<(), RcFileError> {
         if self.messages.len() < MAX_RC_CHECK_WARNINGS {
-            self.messages.push(format!(
-                "rc depth {depth}, line {line}: dynamic {statement} path was not validated"
-            ));
+            self.messages.push(message);
         } else {
             self.omitted = self.omitted.checked_add(1).ok_or_else(|| {
                 RcFileError::limit(Path::new("<check>"), "rc check warning count overflows")
@@ -390,10 +395,33 @@ impl RcCheckWarnings {
         Ok(())
     }
 
+    fn dynamic_path(
+        &mut self,
+        depth: usize,
+        line: usize,
+        statement: &str,
+    ) -> Result<(), RcFileError> {
+        self.push(format!(
+            "rc depth {depth}, line {line}: dynamic {statement} path was not validated"
+        ))
+    }
+
+    fn compatibility_flag(
+        &mut self,
+        path: &Path,
+        line: usize,
+        flag: char,
+    ) -> Result<(), RcFileError> {
+        self.push(format!(
+            "{}:{line}: recipe flag '{flag}' has no effect on a block",
+            path.display()
+        ))
+    }
+
     fn finish(mut self) -> Vec<String> {
         if self.omitted != 0 {
             self.messages.push(format!(
-                "{} additional dynamic rc path warnings were omitted",
+                "{} additional rc warnings were omitted",
                 self.omitted
             ));
         }

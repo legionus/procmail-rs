@@ -796,7 +796,7 @@ fn check_limits_dynamic_rc_path_warnings() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(stderr.matches("path was not validated").count(), limit);
     assert!(
-        stderr.contains("1 additional dynamic rc path warnings were omitted"),
+        stderr.contains("1 additional rc warnings were omitted"),
         "{stderr}"
     );
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -2257,6 +2257,136 @@ fn filesystem_ignore_write_error_is_rejected_before_stdin() {
         );
         assert_eq!(input.stream_position().unwrap(), 0);
         fs::remove_dir_all(config.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn block_pipe_flags_are_ignored_with_warnings_and_the_block_still_runs() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let selected = base.join("selected");
+    create_maildir(&selected);
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\n:0 ir\n{{\n:0\nmaildir:selected\n}}\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [Vec::new()]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(":2: recipe flag 'i' has no effect on a block"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(":2: recipe flag 'r' has no effect on a block"),
+        "{stderr}"
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn block_flag_warnings_include_the_runtime_rc_path() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let selected = base.join("selected");
+    let child = base.join("child.rc");
+    create_maildir(&selected);
+    fs::write(
+        &config,
+        format!("MAILDIR={}\nINCLUDERC=child.rc\n", base.display()),
+    )
+    .unwrap();
+    fs::write(&child, ":0 ir\n{\n:0\nmaildir:selected\n}\n").unwrap();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let checked = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&config)
+        .current_dir(base)
+        .output()
+        .unwrap();
+    assert_eq!(checked.status.code(), Some(0), "{:?}", checked.stderr);
+    let check_stderr = String::from_utf8(checked.stderr).unwrap();
+    assert!(
+        check_stderr.contains(&format!(
+            "{}:1: recipe flag 'i' has no effect on a block",
+            child.display()
+        )),
+        "{check_stderr}"
+    );
+
+    let filtered = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .current_dir(base)
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(filtered.status.code(), Some(0), "{:?}", filtered.stderr);
+    assert_eq!(delivered_messages(&selected), [Vec::new()]);
+    let filter_stderr = String::from_utf8(filtered.stderr).unwrap();
+    assert!(
+        filter_stderr.contains(&format!(
+            "warning: {}:1: recipe flag 'r' has no effect on a block",
+            child.display()
+        )),
+        "{filter_stderr}"
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn runtime_block_flag_warnings_stop_at_the_diagnostic_limit() {
+    let limit = procmail_rs::eval::MAX_RUNTIME_RC_WARNINGS;
+    for warning_count in [limit - 1, limit, limit + 1] {
+        let config = config_file("");
+        let base = config.parent().unwrap();
+        let selected = base.join("selected");
+        let child = base.join("child.rc");
+        create_maildir(&selected);
+        fs::write(
+            &config,
+            format!("MAILDIR={}\nINCLUDERC=child.rc\n", base.display()),
+        )
+        .unwrap();
+        let mut child_source = ":0 i\n{\n:0\nmaildir:selected\n}\n".repeat(warning_count);
+        child_source.push_str(":0\nmaildir:selected\n");
+        fs::write(&child, child_source).unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .current_dir(base)
+            .stdin(Stdio::piped())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr.matches("has no effect on a block").count(),
+            warning_count.min(limit),
+            "{stderr}"
+        );
+        assert_eq!(
+            stderr.contains("additional runtime rc warnings were omitted"),
+            warning_count > limit,
+            "{stderr}"
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 }
 

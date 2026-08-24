@@ -30,10 +30,10 @@ files are checked when their `INCLUDERC` or `SWITCHRC` statement executes.
 | mbox in general-filter mode | A bare output file does not gain a generated postmark. | Explicit `mbox:` delivery always writes a complete mboxrd record with a generated postmark. |
 | `i` on a pipe | Ignores an error while writing the selected message bytes to the child. | Supported with the same limited purpose. Child status and filter-output validation remain separate. |
 | `i` on mbox or Maildir | May ignore a failed write and report success after a partial append or publish a truncated Maildir file. | Rejected before message input. Filesystem publication must complete successfully. |
-| `i` on a recipe block | Ignored with a warning. | Rejected as unsupported instead of silently discarding the flag. |
+| `i` on a recipe block | Ignored with a warning. | Ignored with a source-located warning; filesystem delivery still rejects `i`. |
 | `r` on Maildir | Maildir delivery already preserves the message ending, so `r` has no additional effect. | Preserves the message bytes with or without `r`. |
 | `r` on mbox | Raw file delivery suppresses the usual mailbox delimiter handling as well as final-newline normalization. | Retains the generated postmark and mboxrd quoting. It omits the normal blank record separator but adds one LF when needed so a following postmark starts on a new line. |
-| `r` on a recipe block | Ignored with a warning. | Rejected as unsupported instead of silently discarding the flag. |
+| `r` on a recipe block | Ignored with a warning. | Ignored with a source-located warning. |
 | Local recipe lockfiles | Creates and later removes a named dotlock, or derives its name from the destination. | Defaults to a persistent, ownership-checked file held with `flock`. `LOCKMETHOD=dotlock` selects compatible creation, stale removal, and cleanup with the original pathname-replacement risk. |
 | `LOCKEXT` | Defaults to `.lock` and is appended when deriving a local lockfile name. | Preserves the default and statement-order assignment. The suffix may be empty, is bounded to 4096 bytes, may not contain NUL or `/`, and the complete derived path remains bounded to 4096 bytes. |
 | Implicit pipe lockfile | Attempts to derive a name from redirection found in the command. | Rejected before message input; shell command text is not reinterpreted to guess a lock path. |

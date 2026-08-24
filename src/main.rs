@@ -178,6 +178,13 @@ fn run() -> Result<u8, OperationalError> {
     let _trace_config = TraceConfig::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
 
+    config.for_each_compatibility_warning(|line, flag| {
+        eprintln!(
+            "procmail-rs: warning: {}:{line}: recipe flag '{flag}' has no effect on a block",
+            path.display()
+        );
+    });
+
     // Check resolvable runtime files before building the lazy execution tree.
     // Message-derived paths remain unavailable without stdin, so report them
     // as bounded warnings instead of pretending they were validated.

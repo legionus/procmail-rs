@@ -385,20 +385,16 @@ fn rejects_invalid_pipe_flag_combinations_and_uses() {
             "recipe flag 'i' is not supported for filesystem delivery because it may publish an incomplete message"
         );
     }
+}
 
-    let error = parse(":0 i\n{\n:0\nmaildir:target\n}\n").unwrap_err();
-    assert_eq!(error.line, 1);
-    assert_eq!(
-        error.message,
-        "recipe flag 'i' is not supported on blocks; original procmail ignores it"
-    );
+#[test]
+fn accepts_ignored_pipe_flags_on_blocks_and_reports_them_in_source_order() {
+    let config = parse(":0 ir\n{\n:0 r\n{\n:0\nmaildir:target\n}\n}\n").unwrap();
+    let mut warnings = Vec::new();
 
-    let error = parse(":0 r\n{\n:0\nmaildir:target\n}\n").unwrap_err();
-    assert_eq!(error.line, 1);
-    assert_eq!(
-        error.message,
-        "recipe flag 'r' is not supported on blocks; original procmail ignores it"
-    );
+    config.for_each_compatibility_warning(|line, flag| warnings.push((line, flag)));
+
+    assert_eq!(warnings, [(1, 'i'), (1, 'r'), (3, 'r')]);
 }
 
 #[test]
