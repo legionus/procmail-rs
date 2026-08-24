@@ -3,7 +3,7 @@
 
 use crate::config::{
     Assignment, AssignmentTarget, ConditionInput, Config, ContinuationMode, ControlFlow,
-    Destination, OutputEnding, PipeAction, Recipe, RecipeAction, RecipeOptions, Statement,
+    Destination, OutputEnding, PipeAction, RecipeOptions,
 };
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::rc_file::RcFileLoader;
@@ -18,8 +18,9 @@ mod explanation;
 mod message;
 mod result;
 mod runtime_rc;
+mod tree;
 
-use condition::{CompiledCondition, PartialMatch, compile_conditions};
+use condition::PartialMatch;
 pub use explanation::{
     ConditionExplanation, ConditionKindExplanation, DestinationKind, PlanExplanation,
     RecipeExplanation,
@@ -34,8 +35,10 @@ pub use result::{
 };
 use result::{ContinuationFrame, DeliveryContinuation};
 pub use runtime_rc::MAX_RUNTIME_RC_WARNINGS;
-use runtime_rc::{
-    CompiledInclude, CompiledSwitch, LoadedRuntimeRc, RcExecutionContext, RuntimeRcState,
+use runtime_rc::{LoadedRuntimeRc, RcExecutionContext, RuntimeRcState};
+use tree::{
+    ActionExecution, CompiledAction, CompiledAssignment, CompiledNode, CompiledSequence,
+    CompiledStatement, SequenceState,
 };
 
 pub trait Delivery {
@@ -64,64 +67,6 @@ pub struct ExecutionPlan {
     root: CompiledSequence,
     requires_ordered_delivery: bool,
     runtime_rc: RuntimeRcState,
-}
-
-#[derive(Debug)]
-struct CompiledSequence {
-    recipes: Vec<CompiledNode>,
-    trailing_statements: Vec<CompiledStatement>,
-}
-
-#[derive(Debug)]
-struct CompiledNode {
-    line: usize,
-    preceding_statements: Vec<CompiledStatement>,
-    lock: Option<crate::config::PathExpression>,
-    control: ControlFlow,
-    conditions: Vec<CompiledCondition>,
-    action: CompiledAction,
-}
-
-#[derive(Debug)]
-enum CompiledAction {
-    Deliver {
-        destination: Destination,
-        continuation: ContinuationMode,
-        output_ending: OutputEnding,
-    },
-    Pipe {
-        action: PipeAction,
-        options: RecipeOptions,
-    },
-    Block(CompiledSequence),
-}
-
-#[derive(Debug, Clone)]
-struct CompiledAssignment {
-    assignment: Assignment,
-    line: Option<usize>,
-    source: TraceVariableSource,
-}
-
-#[derive(Debug)]
-enum CompiledStatement {
-    Assignment(CompiledAssignment),
-    Host(CompiledAssignment),
-    Include(CompiledInclude),
-    Switch(CompiledSwitch),
-}
-
-fn assignment_requires_ordered_message(statement: &CompiledStatement) -> bool {
-    matches!(
-        statement,
-        CompiledStatement::Assignment(assignment)
-            if matches!(
-                assignment.assignment.target,
-                AssignmentTarget::LockFile
-            )
-                || assignment.assignment.target == AssignmentTarget::Trap
-                    && !assignment.assignment.value.is_empty()
-    )
 }
 
 #[derive(Debug)]
@@ -203,12 +148,6 @@ struct HeaderPlanState {
     restart: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct SequenceState {
-    previous: Option<RecipeExecution>,
-    chain_base_matched: Option<bool>,
-}
-
 // A resumed sequence must move its position and prior-recipe state together.
 // Keeping them in one value prevents a caller from advancing to another node
 // while accidentally retaining state that belongs to the old position.
@@ -228,20 +167,6 @@ struct ResumeCursor<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RecipeExecution {
-    conditions_matched: bool,
-    else_handled: bool,
-    action: ActionExecution,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActionExecution {
-    NotAttempted,
-    Succeeded,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SequenceControl {
     Continue,
     Stop,
@@ -257,80 +182,6 @@ enum HeaderControl {
 }
 
 impl CompiledSequence {
-    fn compile(statements: &[Statement], preceding: &mut Vec<CompiledStatement>) -> Self {
-        let mut recipes = Vec::new();
-        for statement in statements {
-            match statement {
-                Statement::Assignment(assignment) => {
-                    let compiled = CompiledAssignment {
-                        assignment: assignment.clone(),
-                        line: Some(assignment.line),
-                        source: TraceVariableSource::RcFile,
-                    };
-                    if assignment.target == AssignmentTarget::Host {
-                        preceding.push(CompiledStatement::Host(compiled));
-                    } else {
-                        preceding.push(CompiledStatement::Assignment(compiled));
-                    }
-                }
-                Statement::Recipe(recipe) => {
-                    recipes.push(CompiledNode::compile(recipe, std::mem::take(preceding)));
-                }
-                Statement::Include(expression) => {
-                    preceding.push(CompiledStatement::Include(CompiledInclude::new(
-                        expression.clone(),
-                    )));
-                }
-                Statement::Switch(expression) => {
-                    preceding.push(CompiledStatement::Switch(CompiledSwitch::new(
-                        expression.clone(),
-                    )));
-                }
-            }
-        }
-
-        // Keep statements after the final recipe instead of attaching every
-        // statement to a following recipe. Include and switch operations may
-        // legally terminate a file, so dropping this tail would make their
-        // behavior depend on whether an unrelated recipe follows them.
-        Self {
-            recipes,
-            trailing_statements: std::mem::take(preceding),
-        }
-    }
-
-    fn requirements(&self) -> InputRequirements {
-        self.recipes
-            .iter()
-            .fold(InputRequirements::default(), |requirements, recipe| {
-                requirements.union(recipe.requirements())
-            })
-    }
-
-    fn requires_ordered_delivery(&self) -> bool {
-        self.trailing_statements
-            .iter()
-            .any(assignment_requires_ordered_message)
-            || self.recipes.iter().enumerate().any(|(index, recipe)| {
-                recipe.requires_ordered_delivery()
-                    || recipe
-                        .preceding_statements
-                        .iter()
-                        .any(assignment_requires_ordered_message)
-                    || (index != 0
-                        && matches!(
-                            recipe.control,
-                            ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
-                        ))
-            })
-    }
-
-    fn needs_message_contents(&self) -> bool {
-        self.recipes
-            .iter()
-            .any(CompiledNode::needs_message_contents)
-    }
-
     fn execute(
         &self,
         message: &Message,
@@ -685,75 +536,6 @@ impl CompiledSequence {
         Ok(HeaderControl::Continue)
     }
 
-    fn requirements_from(&self, start: usize) -> InputRequirements {
-        let recipes = &self.recipes[start..];
-        let requirements = recipes
-            .iter()
-            .fold(InputRequirements::default(), |requirements, recipe| {
-                requirements.union(recipe.requirements())
-            });
-        if recipes.iter().any(CompiledNode::requires_ordered_delivery) {
-            requirements.union(InputRequirements {
-                needs_end_of_message: true,
-                ..InputRequirements::default()
-            })
-        } else {
-            requirements
-        }
-    }
-
-    fn has_error_handler(&self, index: usize) -> bool {
-        self.recipes
-            .get(index + 1)
-            .is_some_and(|next| next.control == ControlFlow::AfterPreviousError)
-    }
-
-    fn collect_explanations(
-        &self,
-        inherited_conditions: &[ConditionExplanation],
-        inherited_assignments: usize,
-        explanations: &mut Vec<RecipeExplanation>,
-    ) {
-        for recipe in &self.recipes {
-            let mut conditions = inherited_conditions.to_vec();
-            conditions.extend(recipe.conditions.iter().map(CompiledCondition::explain));
-            let assignment_count = inherited_assignments + recipe.preceding_statements.len();
-            match &recipe.action {
-                CompiledAction::Pipe { .. } => {
-                    explanations.push(RecipeExplanation {
-                        line: recipe.line,
-                        assignment_count,
-                        conditions,
-                        destination: DestinationKind::ExternalProgram,
-                        copy: false,
-                        defers_destination: true,
-                    });
-                }
-                CompiledAction::Deliver {
-                    destination,
-                    continuation,
-                    ..
-                } => {
-                    let destination_kind = match destination {
-                        Destination::Maildir(_) => DestinationKind::Maildir,
-                        Destination::Mbox(_) => DestinationKind::Mbox,
-                    };
-                    explanations.push(RecipeExplanation {
-                        line: recipe.line,
-                        assignment_count,
-                        conditions,
-                        destination: destination_kind,
-                        copy: *continuation == ContinuationMode::Continue,
-                        defers_destination: destination.needs_runtime_variables(),
-                    });
-                }
-                CompiledAction::Block(children) => {
-                    children.collect_explanations(&conditions, assignment_count, explanations);
-                }
-            }
-        }
-    }
-
     fn resume_from_frames(
         &self,
         cursor: ResumeCursor<'_>,
@@ -858,103 +640,7 @@ impl From<SequenceControl> for HeaderControl {
     }
 }
 
-impl SequenceState {
-    fn record(
-        &mut self,
-        control: ControlFlow,
-        conditions_matched: bool,
-        action: ActionExecution,
-        else_handled: bool,
-    ) {
-        self.previous = Some(RecipeExecution {
-            conditions_matched,
-            else_handled,
-            action,
-        });
-        if !matches!(
-            control,
-            ControlFlow::AfterChainMatch | ControlFlow::AfterPreviousSuccess
-        ) {
-            self.chain_base_matched = Some(conditions_matched);
-        }
-    }
-}
-
 impl CompiledNode {
-    fn compile(recipe: &Recipe, preceding_statements: Vec<CompiledStatement>) -> Self {
-        let conditions = compile_conditions(recipe);
-        let action = match &recipe.action {
-            RecipeAction::Pipe(action) => CompiledAction::Pipe {
-                action: action.clone(),
-                options: recipe.options,
-            },
-            RecipeAction::Deliver(destination) => CompiledAction::Deliver {
-                destination: destination.clone(),
-                continuation: recipe.options.continuation,
-                output_ending: recipe.options.output_ending,
-            },
-            RecipeAction::Block(statements) => {
-                CompiledAction::Block(CompiledSequence::compile(statements, &mut Vec::new()))
-            }
-        };
-        Self {
-            line: recipe.line,
-            preceding_statements,
-            lock: recipe.lock.clone(),
-            control: recipe.options.control,
-            conditions,
-            action,
-        }
-    }
-
-    fn requirements(&self) -> InputRequirements {
-        let action = match &self.action {
-            CompiledAction::Pipe { .. } => InputRequirements {
-                needs_headers: true,
-                needs_body_contents: true,
-                needs_end_of_message: true,
-            },
-            CompiledAction::Deliver { .. } => InputRequirements::default(),
-            CompiledAction::Block(sequence) => sequence.requirements(),
-        };
-        self.conditions
-            .iter()
-            .fold(action, |requirements, condition| {
-                requirements.union(condition.requirements())
-            })
-    }
-
-    fn requires_ordered_delivery(&self) -> bool {
-        self.lock.is_some()
-            || self
-                .conditions
-                .iter()
-                .any(CompiledCondition::requires_ordered_execution)
-            || match &self.action {
-                CompiledAction::Pipe { .. } => true,
-                CompiledAction::Deliver {
-                    destination,
-                    continuation: _,
-                    ..
-                } => {
-                    destination.needs_runtime_variables()
-                        || matches!(destination, Destination::Mbox(_))
-                }
-                CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
-            }
-    }
-
-    fn needs_message_contents(&self) -> bool {
-        self.conditions
-            .iter()
-            .any(CompiledCondition::needs_message_contents)
-            || match &self.action {
-                CompiledAction::Pipe { .. } => true,
-                CompiledAction::Deliver { .. } => false,
-                CompiledAction::Block(sequence) => sequence.needs_message_contents(),
-            }
-    }
-
     fn matches_complete(
         &self,
         message: CompleteMessage<'_>,
