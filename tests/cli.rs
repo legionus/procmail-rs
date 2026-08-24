@@ -70,6 +70,89 @@ fn bare_host_stops_processing_as_a_successful_fake_delivery() {
 }
 
 #[test]
+fn matching_host_continues_processing() {
+    let path = config_file("");
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nSAVED_HOST=$HOST\nHOST=$SAVED_HOST\n:0\nmaildir:selected\n",
+            path.parent().unwrap().display()
+        ),
+    )
+    .unwrap();
+    let maildir = path.parent().unwrap().join("selected");
+    create_maildir(&maildir);
+    let mut process = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .env("HOST", "ambient-host-must-not-win")
+        .env("HOSTNAME", "ambient-hostname-must-not-win")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: matching HOST\n\nbody\n")
+        .unwrap();
+    let status = process.wait_with_output().unwrap();
+
+    assert_eq!(status.status.code(), Some(0), "{:?}", status.stderr);
+    assert_eq!(
+        delivered_messages(&maildir),
+        vec![b"Subject: matching HOST\n\nbody\n".to_vec()]
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn mismatching_host_stops_only_the_runtime_include() {
+    let path = config_file("");
+    let directory = path.parent().unwrap();
+    let fallback = directory.join("fallback");
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nINCLUDERC=child.rc\n:0\nmaildir:fallback\n",
+            directory.display()
+        ),
+    )
+    .unwrap();
+    let child = directory.join("child.rc");
+    fs::write(
+        &child,
+        "HOST=${HOST}-cannot-match\n:0\nmaildir:unreachable\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&child).unwrap().permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(&child, permissions).unwrap();
+    let mut process = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: included HOST\n\nbody\n")
+        .unwrap();
+    let output = process.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(
+        delivered_messages(&fallback),
+        vec![b"Subject: included HOST\n\nbody\n".to_vec()]
+    );
+    assert!(!directory.join("unreachable").exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn failure_handler_can_override_exit_status_and_stop_with_host() {
     let path = config_file(":0 w\n| exit 7\n:0 e\n{\nEXITCODE=75\nHOST\n}\n");
     let rules = format!(
@@ -1736,7 +1819,6 @@ fn invalid_configuration_does_not_consume_stdin() {
         "DEFAULT=mailbox\n:0\nmaildir:inbox\n",
         "ORGMAIL=mailbox\n:0\nmaildir:inbox\n",
         "COMSAT=yes\n:0\nmaildir:inbox\n",
-        "HOST=other-host\n:0\nmaildir:inbox\n",
         "LIMIT_MSG_BODY=10KB\n:0\ninbox/\n",
         ":0 B\n* body\ninbox/\n",
         ":0\nmaildir:$UNDEFINED\n",
@@ -1797,10 +1879,6 @@ fn known_unsupported_constructs_fail_check_before_message_input() {
         (
             ":0\n! user@example.test\n".to_owned(),
             "rules.rc:line 2: forward actions are not supported".to_owned(),
-        ),
-        (
-            "HOST=other-host\n".to_owned(),
-            "rules.rc:line 1: non-empty HOST assignments are not supported yet".to_owned(),
         ),
         (
             ":0\nambiguous-path\n".to_owned(),

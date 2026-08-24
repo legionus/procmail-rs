@@ -10,6 +10,7 @@ use crate::trace::{NoTrace, TraceEvent, TraceSink};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeVariables {
     values: BTreeMap<String, String>,
+    system_hostname: Option<String>,
 }
 
 impl Default for RuntimeVariables {
@@ -25,11 +26,21 @@ impl Default for RuntimeVariables {
             "LOCKEXT".to_owned(),
             crate::config::DEFAULT_LOCK_EXT.to_owned(),
         );
-        Self { values }
+        Self {
+            values,
+            system_hostname: None,
+        }
     }
 }
 
 impl RuntimeVariables {
+    pub fn set_system_hostname(&mut self, hostname: String) {
+        self.system_hostname = Some(hostname);
+    }
+
+    pub(crate) fn system_hostname(&self) -> Option<&str> {
+        self.system_hostname.as_deref()
+    }
     pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.values.insert(name.into(), value.into());
     }

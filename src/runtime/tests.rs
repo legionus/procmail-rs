@@ -7,6 +7,16 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 #[test]
+fn keeps_the_system_hostname_separate_from_the_mutable_host_variable() {
+    let mut runtime = RuntimeVariables::default();
+    runtime.set_system_hostname("system.example".to_owned());
+    runtime.set("HOST", "configured.example");
+
+    assert_eq!(runtime.system_hostname(), Some("system.example"));
+    assert_eq!(runtime.get("HOST"), Some("configured.example"));
+}
+
+#[test]
 fn default_runtime_uses_the_procmail_lock_extension() {
     assert_eq!(
         RuntimeVariables::default().get("LOCKEXT"),

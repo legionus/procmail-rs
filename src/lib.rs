@@ -12,6 +12,7 @@ pub mod environment;
 pub mod eval;
 pub mod external_filter;
 pub mod external_process;
+pub mod hostname;
 pub mod limits;
 pub mod message;
 pub mod rc_file;

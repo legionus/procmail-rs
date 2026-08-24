@@ -2069,8 +2069,9 @@ fn execute_statements(
                 execute_assignment(assignment, runtime, trace)?;
             }
             CompiledStatement::Host(assignment) => {
-                execute_assignment(assignment, runtime, trace)?;
-                return Ok(SequenceControl::EndRcFile);
+                if !execute_host_assignment(assignment, runtime, trace)? {
+                    return Ok(SequenceControl::EndRcFile);
+                }
             }
             CompiledStatement::Include(include) => {
                 return Err(EvalError::RuntimeRcLoaderUnavailable {
@@ -2113,6 +2114,22 @@ fn execute_assignment(
     Ok(())
 }
 
+fn execute_host_assignment(
+    assignment: &CompiledAssignment,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) -> Result<bool, EvalError> {
+    execute_assignment(assignment, runtime, trace)?;
+    let configured = runtime.get("HOST").unwrap_or_default();
+    let current = runtime
+        .system_hostname()
+        .ok_or(EvalError::RuntimeSettingUnavailable {
+            line: assignment.assignment.line,
+            name: "HOST",
+        })?;
+    Ok(configured == current)
+}
+
 fn plan_statements_complete(
     statements: &[CompiledStatement],
     message: CompleteMessage<'_>,
@@ -2127,9 +2144,10 @@ fn plan_statements_complete(
                 execute_assignment(assignment, runtime, trace)?;
             }
             CompiledStatement::Host(assignment) => {
-                execute_assignment(assignment, runtime, trace)?;
-                execution.original_delivered = true;
-                return Ok(SequenceControl::EndRcFile);
+                if !execute_host_assignment(assignment, runtime, trace)? {
+                    execution.original_delivered = true;
+                    return Ok(SequenceControl::EndRcFile);
+                }
             }
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;
@@ -2213,11 +2231,13 @@ where
                 }
             }
             CompiledStatement::Host(assignment) => {
-                execute_assignment(assignment, context.runtime, context.trace)
-                    .map_err(OrderedExecutionError::Evaluation)?;
-                context.original_delivered = true;
-                context.pending_error = None;
-                return Ok(SequenceControl::EndRcFile);
+                if !execute_host_assignment(assignment, context.runtime, context.trace)
+                    .map_err(OrderedExecutionError::Evaluation)?
+                {
+                    context.original_delivered = true;
+                    context.pending_error = None;
+                    return Ok(SequenceControl::EndRcFile);
+                }
             }
             CompiledStatement::Include(include) => {
                 include
@@ -2283,9 +2303,10 @@ fn plan_statements_headers(
                 execute_assignment(assignment, runtime, trace)?;
             }
             CompiledStatement::Host(assignment) => {
-                execute_assignment(assignment, runtime, trace)?;
-                planning.execution.original_delivered = true;
-                return Ok(HeaderControl::EndRcFile);
+                if !execute_host_assignment(assignment, runtime, trace)? {
+                    planning.execution.original_delivered = true;
+                    return Ok(HeaderControl::EndRcFile);
+                }
             }
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;
@@ -2411,6 +2432,7 @@ impl ExecutionPlan {
                         crate::config::VariableSource::Environment => {
                             TraceVariableSource::Environment
                         }
+                        crate::config::VariableSource::System => TraceVariableSource::System,
                         crate::config::VariableSource::Runtime => TraceVariableSource::Runtime,
                     },
                 })

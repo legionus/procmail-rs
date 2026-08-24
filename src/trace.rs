@@ -413,6 +413,7 @@ fn variable_source_name(source: VariableSource) -> &'static str {
         VariableSource::RcFile => "rc-file",
         VariableSource::CommandLine => "command-line",
         VariableSource::Environment => "environment",
+        VariableSource::System => "system",
         VariableSource::Runtime => "runtime",
     }
 }
@@ -593,6 +594,7 @@ pub enum VariableSource {
     RcFile,
     CommandLine,
     Environment,
+    System,
     Runtime,
 }
 

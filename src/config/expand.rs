@@ -236,7 +236,10 @@ pub(super) fn expand(
     let mut variables = BTreeMap::<String, ExpandedValue>::new();
     let mut initial_variables = Vec::with_capacity(supplied.len());
     for variable in supplied {
-        let value = if variable.source() == VariableSource::Environment {
+        let value = if matches!(
+            variable.source(),
+            VariableSource::Environment | VariableSource::System
+        ) {
             ExpandedValue {
                 text: variable.value().to_owned(),
                 depth: 0,

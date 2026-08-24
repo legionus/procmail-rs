@@ -150,6 +150,7 @@ pub enum VariableSource {
     RcFile,
     CommandLine,
     Environment,
+    System,
     Runtime,
 }
 
@@ -238,6 +239,20 @@ impl SuppliedVariable {
             name: name.to_owned(),
             value,
             source: VariableSource::Environment,
+        })
+    }
+
+    pub fn from_system_hostname(value: String) -> Result<Self, SuppliedVariableError> {
+        if value.is_empty() || value.len() > crate::hostname::MAX_HOSTNAME_LEN {
+            return Err(SuppliedVariableError::new(format!(
+                "system HOST must contain from 1 through {} bytes",
+                crate::hostname::MAX_HOSTNAME_LEN
+            )));
+        }
+        Ok(Self {
+            name: "HOST".to_owned(),
+            value,
+            source: VariableSource::System,
         })
     }
 

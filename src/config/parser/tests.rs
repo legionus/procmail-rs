@@ -315,14 +315,15 @@ fn parses_bare_host_as_an_empty_assignment() {
 }
 
 #[test]
-fn rejects_non_empty_host_until_hostname_matching_is_supported() {
-    let error = parse("HOST=elsewhere\n").unwrap_err();
+fn parses_non_empty_host_for_runtime_comparison() {
+    let config = parse("HOST=elsewhere\n").unwrap();
+    let Statement::Assignment(assignment) = &config.statements[0] else {
+        panic!("expected assignment");
+    };
 
-    assert_eq!(error.line, 1);
-    assert_eq!(
-        error.message,
-        "non-empty HOST assignments are not supported yet"
-    );
+    assert_eq!(assignment.name, "HOST");
+    assert_eq!(assignment.value, "elsewhere");
+    assert_eq!(assignment.target, crate::config::AssignmentTarget::Host);
 }
 
 #[test]

@@ -143,6 +143,21 @@ fn admits_only_passwd_backed_initial_names() {
 }
 
 #[test]
+fn admits_a_bounded_system_hostname_without_allowing_host_on_the_command_line() {
+    let hostname = SuppliedVariable::from_system_hostname("mail.example".to_owned()).unwrap();
+    assert_eq!(hostname.name(), "HOST");
+    assert_eq!(hostname.value(), "mail.example");
+    assert_eq!(hostname.source(), VariableSource::System);
+
+    assert!(SuppliedVariable::from_system_hostname(String::new()).is_err());
+    assert!(
+        SuppliedVariable::from_system_hostname("h".repeat(crate::hostname::MAX_HOSTNAME_LEN + 1))
+            .is_err()
+    );
+    assert!(SuppliedVariable::parse("HOST=forged".to_owned()).is_err());
+}
+
+#[test]
 fn rejects_command_line_sources_not_allowed_by_policy() {
     for name in ["MAILDIR", "LASTFOLDER", "LIMIT_MSG_BODY", "LOGABSTRACT"] {
         let error = SuppliedVariable::parse(format!("{name}=value")).unwrap_err();

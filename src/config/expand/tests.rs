@@ -213,6 +213,24 @@ fn inserts_passwd_values_without_rescanning_their_text() {
 }
 
 #[test]
+fn exposes_the_system_hostname_to_rc_expansion_without_rescanning_it() {
+    let supplied = [SuppliedVariable::from_system_hostname("mail-$literal".to_owned()).unwrap()];
+    let config = parse("SAVED_HOST=$HOST\nHOST=$SAVED_HOST\n")
+        .unwrap()
+        .expand_with(&supplied)
+        .unwrap();
+
+    let Statement::Assignment(saved) = &config.statements[0] else {
+        panic!("expected SAVED_HOST assignment");
+    };
+    let Statement::Assignment(host) = &config.statements[1] else {
+        panic!("expected HOST assignment");
+    };
+    assert_eq!(saved.value, "mail-$literal");
+    assert_eq!(host.value, "mail-$literal");
+}
+
+#[test]
 fn rejects_self_references_and_cycles_without_recursive_scanning() {
     for source in ["A=$A\n", "A=$B\nB=$A\n"] {
         let error = parse(source).unwrap().expand().unwrap_err();

@@ -440,6 +440,7 @@ fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &st
                         | AssignmentTarget::Shell
                         | AssignmentTarget::ShellFlags
                         | AssignmentTarget::Path
+                        | AssignmentTarget::Host
                         | AssignmentTarget::LockMethod
                         | AssignmentTarget::LockFile
                         | AssignmentTarget::LockTimeout

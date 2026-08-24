@@ -312,12 +312,6 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
                 format!("variable {name} cannot be assigned in an rc file"),
             )
         })?;
-    if target == AssignmentTarget::Host && !value.is_empty() {
-        return Err(ParseError::new(
-            line_number,
-            "non-empty HOST assignments are not supported yet",
-        ));
-    }
     let limit = super::assignment_value_limit(target);
     if value.len() > limit {
         let kind = if matches!(

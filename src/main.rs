@@ -34,6 +34,7 @@ use procmail_rs::external_process::{
     FilterOptions, parse_process_timeout, process_timeout_from_config, run_filter,
     run_program_with_timeout, run_trap_with_timeout,
 };
+use procmail_rs::hostname::current_hostname;
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::RcFileLoader;
@@ -140,10 +141,15 @@ fn run() -> Result<u8, OperationalError> {
     let identity = UserIdentity::current().map_err(|error| {
         OperationalError::Configuration(format!("cannot determine current user identity: {error}"))
     })?;
+    let hostname = current_hostname().map_err(|error| {
+        OperationalError::Configuration(format!("cannot determine current hostname: {error}"))
+    })?;
     let mut supplied = vec![
         SuppliedVariable::from_environment("HOME", identity.home().to_owned())
             .map_err(|error| OperationalError::Configuration(error.to_string()))?,
         SuppliedVariable::from_environment("LOGNAME", identity.logname().to_owned())
+            .map_err(|error| OperationalError::Configuration(error.to_string()))?,
+        SuppliedVariable::from_system_hostname(hostname.clone())
             .map_err(|error| OperationalError::Configuration(error.to_string()))?,
     ];
     supplied.extend(command.supplied.iter().cloned());
@@ -233,6 +239,7 @@ fn run() -> Result<u8, OperationalError> {
         }
         Action::Filter => {
             let mut runtime = RuntimeVariables::default();
+            runtime.set_system_hostname(hostname);
             let mut trace = NoTrace;
             let mut stdin = io::stdin().lock();
             let head = Message::read_headers(&mut stdin, limits).map_err(|error| {
