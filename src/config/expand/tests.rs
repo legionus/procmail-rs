@@ -250,14 +250,17 @@ fn rejects_unsupported_and_malformed_references() {
 
 #[test]
 fn rejects_unsupported_procmail_variables_inside_expansions() {
-    for value in ["$DEFAULT", "${ORGMAIL}", "${SENDMAIL:-/usr/sbin/sendmail}"] {
+    for name in super::super::UNSUPPORTED_PROCMAIL_VARIABLES {
+        let value = format!("${{{name}}}");
         let error = parse(&format!("VALUE={value}\n"))
             .unwrap()
             .expand()
             .unwrap_err();
-        assert_eq!(error.line, 1);
-        assert!(error.message.contains("procmail variable"), "{value}");
-        assert!(error.message.contains("is not supported"), "{value}");
+        assert_eq!(error.line, 1, "{name}");
+        assert_eq!(
+            error.message,
+            format!("procmail variable {name} is not supported")
+        );
     }
 }
 

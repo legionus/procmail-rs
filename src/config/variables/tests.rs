@@ -55,16 +55,32 @@ fn assigns_explicit_sources_to_variable_classes() {
 
 #[test]
 fn rejects_unsupported_procmail_variables_from_command_line() {
-    let error = SuppliedVariable::parse("DEFAULT=mailbox".to_owned()).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "procmail variable DEFAULT is not supported"
-    );
+    for name in UNSUPPORTED_PROCMAIL_VARIABLES {
+        let error = SuppliedVariable::parse(format!("{name}=value")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("procmail variable {name} is not supported")
+        );
+    }
 }
 
 #[test]
 fn registry_classifies_every_unsupported_procmail_variable() {
     for name in UNSUPPORTED_PROCMAIL_VARIABLES {
+        assert_eq!(variable_policy(name), VariablePolicy::Unsupported, "{name}");
+    }
+}
+
+#[test]
+fn special_procmail_names_never_fall_through_to_user_policy() {
+    for name in [
+        "LOCKEXT",
+        "LOG",
+        "DELIVERED",
+        "SHELLMETAS",
+        "PROCMAIL_VERSION",
+        "PROCMAIL_OVERFLOW",
+    ] {
         assert_eq!(variable_policy(name), VariablePolicy::Unsupported, "{name}");
     }
 }
