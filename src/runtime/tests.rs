@@ -37,6 +37,17 @@ fn preserves_binary_values_and_replaces_the_previous_representation() {
     assert_eq!(runtime.get_bytes("VALUE"), Some(&b"text"[..]));
 }
 
+#[test]
+fn expands_binary_values_without_utf8_conversion() {
+    let mut runtime = RuntimeVariables::default();
+    runtime.set_bytes("VALUE", vec![b'a', 0xff, b'z']);
+
+    assert_eq!(
+        runtime.expand_bytes("pre-$VALUE-post", 4, 64).unwrap(),
+        b"pre-a\xffz-post"
+    );
+}
+
 struct NamedSink {
     name: &'static str,
     fail: bool,

@@ -78,6 +78,17 @@ impl RuntimeVariables {
             .or_else(|| self.values.get(name).map(String::as_bytes))
     }
 
+    pub fn expand_bytes(
+        &self,
+        source: &str,
+        line: usize,
+        limit: usize,
+    ) -> Result<Vec<u8>, crate::config::ExpansionError> {
+        crate::config::expand::expand_runtime_bytes(source, line, limit, |name| {
+            self.get_bytes(name)
+        })
+    }
+
     pub(crate) fn remove(&mut self, name: &str) {
         self.values.remove(name);
         self.byte_values.remove(name);

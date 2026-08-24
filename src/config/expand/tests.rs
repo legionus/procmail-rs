@@ -3,6 +3,63 @@
 
 use super::*;
 
+#[test]
+fn runtime_byte_expansion_preserves_binary_values_and_defaults() {
+    let binary = b"a\xffz";
+    let empty = b"";
+    let expanded =
+        expand_runtime_bytes(
+            "pre-$BINARY-${EMPTY:-$BINARY}-post",
+            7,
+            64,
+            |name| match name {
+                "BINARY" => Some(&binary[..]),
+                "EMPTY" => Some(&empty[..]),
+                _ => None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(expanded, b"pre-a\xffz-a\xffz-post");
+}
+
+#[test]
+fn runtime_byte_expansion_checks_the_combined_limit() {
+    let value = b"1234";
+    for limit in [7usize, 8, 9] {
+        let result = expand_runtime_bytes("$VALUE$VALUE", 3, limit, |name| {
+            (name == "VALUE").then_some(&value[..])
+        });
+        if limit < 8 {
+            let error = result.unwrap_err();
+            assert_eq!(error.line, 3);
+            assert!(error.message.contains("exceeds the hard limit"));
+        } else {
+            assert_eq!(result.unwrap(), b"12341234");
+        }
+    }
+}
+
+#[test]
+fn runtime_byte_expansion_rejects_missing_and_excessively_nested_values() {
+    let missing = expand_runtime_bytes("$MISSING", 9, 64, |_| None).unwrap_err();
+    assert_eq!(missing.line, 9);
+    assert_eq!(missing.message, "variable MISSING is not defined");
+
+    let mut source = String::new();
+    for index in 0..=MAX_EXPANSION_DEPTH {
+        source.push_str(&format!("${{V{index}:-"));
+    }
+    source.push('x');
+    source.push_str(&"}".repeat(MAX_EXPANSION_DEPTH + 1));
+    let error = expand_runtime_bytes(&source, 11, MAX_ASSIGNMENT_VALUE_LEN, |_| None).unwrap_err();
+    assert_eq!(error.line, 11);
+    assert_eq!(
+        error.message,
+        format!("variable expansion exceeds the hard depth limit of {MAX_EXPANSION_DEPTH}")
+    );
+}
+
 fn parse_wide(input: &str) -> Result<Config, super::super::ParseError> {
     let mut state = super::super::RcParseState::default();
     state.limits.linebuf = super::super::MAX_LINEBUF;

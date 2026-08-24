@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-mod expand;
+pub(crate) mod expand;
 mod parser;
 mod variables;
 

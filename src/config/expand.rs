@@ -478,6 +478,52 @@ fn evaluate_with_linebuf(
         .map_err(|error| relabel_linebuf_error(error, linebuf, hard_limit))
 }
 
+pub(crate) fn expand_runtime_bytes<'a>(
+    input: &str,
+    line: usize,
+    limit: usize,
+    mut lookup: impl FnMut(&str) -> Option<&'a [u8]>,
+) -> Result<Vec<u8>, ExpansionError> {
+    let expression = parse_expression(input, line)?;
+    evaluate_runtime_bytes(&expression, line, limit, &mut lookup, 0)
+}
+
+fn evaluate_runtime_bytes<'a>(
+    expression: &ExpansionExpression,
+    line: usize,
+    limit: usize,
+    lookup: &mut impl FnMut(&str) -> Option<&'a [u8]>,
+    nesting: usize,
+) -> Result<Vec<u8>, ExpansionError> {
+    check_expansion_depth(nesting, line)?;
+    let mut output = Vec::new();
+    for part in &expression.parts {
+        match part {
+            ExpansionPart::Literal(text) => {
+                push_bounded(&mut output, text.as_bytes(), limit, line)?;
+            }
+            ExpansionPart::Variable { name, default } => {
+                let value = lookup(name);
+                if let Some(value) = value.filter(|value| !value.is_empty()) {
+                    push_bounded(&mut output, value, limit, line)?;
+                } else if let Some(default) = default {
+                    let selected =
+                        evaluate_runtime_bytes(default, line, limit, lookup, nesting + 1)?;
+                    push_bounded(&mut output, &selected, limit, line)?;
+                } else if let Some(value) = value {
+                    push_bounded(&mut output, value, limit, line)?;
+                } else {
+                    return Err(ExpansionError::new(
+                        line,
+                        format!("variable {name} is not defined"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
 fn relabel_linebuf_error(
     mut error: ExpansionError,
     linebuf: usize,
