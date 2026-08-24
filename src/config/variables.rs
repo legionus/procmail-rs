@@ -8,12 +8,12 @@ use super::{MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING
 pub const MAX_COMMAND_LINE_VARIABLES: usize = 256;
 pub const MAX_LOCK_TIMEOUT_SECONDS: u64 = 86_400;
 pub const MAX_PROCESS_TIMEOUT_SECONDS: u64 = 86_400;
+pub const DEFAULT_LOCK_EXT: &str = ".lock";
 pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "DEFAULT",
     "ORGMAIL",
     "COMSAT",
     "DELIVERED",
-    "LOCKEXT",
     "LOG",
     "LOGABSTRACT",
     "MSGPREFIX",
@@ -43,6 +43,16 @@ pub fn parse_umask(value: &str) -> Result<u32, String> {
 pub fn validate_trap_command(value: &str) -> Result<(), String> {
     if value.as_bytes().contains(&0) {
         Err("TRAP command must not contain NUL".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_lock_ext(value: &str) -> Result<(), String> {
+    if value.as_bytes().contains(&0) {
+        Err("LOCKEXT must not contain NUL".to_owned())
+    } else if value.contains('/') {
+        Err("LOCKEXT must not contain '/'".to_owned())
     } else {
         Ok(())
     }
@@ -108,6 +118,7 @@ pub enum AssignmentTarget {
     Durability,
     LockMethod,
     LockFile,
+    LockExt,
     LockTimeout,
     LineBuf,
     ProcessTimeout,
@@ -265,6 +276,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "DURABILITY" => VariablePolicy::RcOnly(AssignmentTarget::Durability),
         "LOCKMETHOD" => VariablePolicy::RcOnly(AssignmentTarget::LockMethod),
         "LOCKFILE" => VariablePolicy::RcOnly(AssignmentTarget::LockFile),
+        "LOCKEXT" => VariablePolicy::RcOnly(AssignmentTarget::LockExt),
         "LOCKTIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::LockTimeout),
         "LINEBUF" => VariablePolicy::RcOnly(AssignmentTarget::LineBuf),
         "TIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::ProcessTimeout),
@@ -325,9 +337,10 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
 
 pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
     match target {
-        AssignmentTarget::Maildir | AssignmentTarget::LogFile | AssignmentTarget::LockFile => {
-            super::MAX_PATH_EXPRESSION_LEN
-        }
+        AssignmentTarget::Maildir
+        | AssignmentTarget::LogFile
+        | AssignmentTarget::LockFile
+        | AssignmentTarget::LockExt => super::MAX_PATH_EXPRESSION_LEN,
         AssignmentTarget::Shell | AssignmentTarget::ShellFlags | AssignmentTarget::Path => {
             MAX_SHELL_SETTING_LEN
         }

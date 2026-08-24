@@ -2018,6 +2018,48 @@ fn implicit_flock_name_is_derived_from_the_destination() {
 }
 
 #[test]
+fn lockext_is_applied_when_each_implicit_lock_is_acquired() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let first = base.join("first");
+    let second = base.join("second");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKEXT=.first\n:0 c:\nmbox:{}\n:0\n{{\nLOCKEXT=.second\n:0 :\nmbox:{}\n}}\n",
+            base.display(),
+            first.display(),
+            second.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: ordered LOCKEXT\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(base.join("first.first").is_file());
+    assert!(base.join("second.second").is_file());
+    assert!(
+        fs::read(&first)
+            .unwrap()
+            .ends_with(b"Subject: ordered LOCKEXT\n\nbody\n\n")
+    );
+    assert!(
+        fs::read(&second)
+            .unwrap()
+            .ends_with(b"Subject: ordered LOCKEXT\n\nbody\n\n")
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn named_dotlock_is_held_while_a_pipe_action_runs() {
     let config = config_file("");
     let base = config.parent().unwrap();

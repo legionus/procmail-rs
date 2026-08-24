@@ -46,6 +46,11 @@ fn assigns_explicit_sources_to_variable_classes() {
         variable_policy("PATH").assignment_target(VariableSource::RcFile),
         Some(AssignmentTarget::Path)
     );
+    assert_eq!(
+        variable_policy("LOCKEXT").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::LockExt)
+    );
+    assert!(!variable_policy("LOCKEXT").allows(VariableSource::CommandLine));
     assert_eq!(variable_policy("DEFAULT"), VariablePolicy::Unsupported);
     assert_eq!(
         variable_policy("USER_VALUE"),
@@ -81,7 +86,21 @@ fn special_procmail_names_never_fall_through_to_user_policy() {
         "PROCMAIL_VERSION",
         "PROCMAIL_OVERFLOW",
     ] {
-        assert_eq!(variable_policy(name), VariablePolicy::Unsupported, "{name}");
+        assert_ne!(
+            variable_policy(name),
+            VariablePolicy::RcOrCommandLine(AssignmentTarget::User),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn validates_lock_extension_after_expansion() {
+    for value in ["", ".lock", "-user"] {
+        assert!(validate_lock_ext(value).is_ok(), "{value:?}");
+    }
+    for value in ["dir/lock", "\0"] {
+        assert!(validate_lock_ext(value).is_err(), "{value:?}");
     }
 }
 

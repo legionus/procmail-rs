@@ -1138,6 +1138,24 @@ fn applies_path_limit_to_maildir_assignment() {
     assert_path_limit_error(error, 1, "MAILDIR path");
 }
 
+#[test]
+fn applies_path_limit_to_lockext_assignment() {
+    for length in [
+        MAX_PATH_EXPRESSION_LEN - 1,
+        MAX_PATH_EXPRESSION_LEN,
+        MAX_PATH_EXPRESSION_LEN + 1,
+    ] {
+        let source = format!("LOCKEXT={}\n", "x".repeat(length));
+        let result = parse_wide(&source);
+
+        if length <= MAX_PATH_EXPRESSION_LEN {
+            assert!(result.is_ok(), "length {length}");
+        } else {
+            assert_path_limit_error(result.unwrap_err(), 1, "LOCKEXT value");
+        }
+    }
+}
+
 fn assert_path_limit_error(error: ParseError, line: usize, description: &str) {
     assert_eq!(error.line, line);
     assert_eq!(

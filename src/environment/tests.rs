@@ -17,7 +17,11 @@ fn builds_only_defaults_and_explicit_runtime_values() {
     assert_eq!(environment.get("LINEBUF"), Some("2048"));
     assert_eq!(environment.get("TIMEOUT"), Some("960"));
     assert_eq!(environment.get("UMASK"), Some("077"));
-    assert_eq!(environment.values().count(), 7);
+    assert_eq!(
+        environment.get("LOCKEXT"),
+        Some(crate::config::DEFAULT_LOCK_EXT)
+    );
+    assert_eq!(environment.values().count(), 8);
 }
 
 #[test]

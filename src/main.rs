@@ -686,19 +686,45 @@ fn acquire_recipe_lock(
         let destination = destination
             .resolve_with(|name| runtime.get(name).map(str::to_owned))
             .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
-        let mut path = destination.path().to_owned();
-        path.push_str(".lock");
-        if path.len() > config::MAX_PATH_EXPRESSION_LEN {
-            return Err(OperationalError::PermanentDestination(format!(
-                "implicit lockfile path exceeds the hard limit of {} bytes",
-                config::MAX_PATH_EXPRESSION_LEN
-            )));
-        }
-        path
+        let extension = runtime.get("LOCKEXT").unwrap_or(config::DEFAULT_LOCK_EXT);
+        derive_implicit_lockfile_path(destination.path(), extension)?
     } else {
         lock.to_owned()
     };
     acquire_configured_lock(&path, runtime, uid).map(Some)
+}
+
+fn derive_implicit_lockfile_path(
+    destination: &str,
+    extension: &str,
+) -> Result<String, OperationalError> {
+    config::validate_lock_ext(extension).map_err(OperationalError::PermanentDestination)?;
+
+    // Check the complete byte length before reserving or appending the
+    // user-controlled suffix. This keeps a large LOCKEXT from causing a
+    // transient over-limit allocation and preserves the path ceiling at the
+    // filesystem boundary even if an internal caller bypassed rc validation.
+    let derived_len = destination
+        .len()
+        .checked_add(extension.len())
+        .ok_or_else(|| {
+            OperationalError::PermanentDestination(
+                "implicit lockfile path length overflows".to_owned(),
+            )
+        })?;
+    if derived_len > config::MAX_PATH_EXPRESSION_LEN {
+        return Err(OperationalError::PermanentDestination(format!(
+            "implicit lockfile path exceeds the hard limit of {} bytes",
+            config::MAX_PATH_EXPRESSION_LEN
+        )));
+    }
+    let mut path = String::new();
+    path.try_reserve_exact(derived_len).map_err(|_| {
+        OperationalError::Internal("cannot allocate implicit lockfile path".to_owned())
+    })?;
+    path.push_str(destination);
+    path.push_str(extension);
+    Ok(path)
 }
 
 fn acquire_configured_lock(

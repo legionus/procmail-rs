@@ -21,6 +21,10 @@ impl Default for RuntimeVariables {
         );
         values.insert("TIMEOUT".to_owned(), "960".to_owned());
         values.insert("UMASK".to_owned(), "077".to_owned());
+        values.insert(
+            "LOCKEXT".to_owned(),
+            crate::config::DEFAULT_LOCK_EXT.to_owned(),
+        );
         Self { values }
     }
 }

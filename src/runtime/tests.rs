@@ -6,6 +6,14 @@ use crate::delivery::{PendingFanout, PendingSink, PublishedDelivery};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+#[test]
+fn default_runtime_uses_the_procmail_lock_extension() {
+    assert_eq!(
+        RuntimeVariables::default().get("LOCKEXT"),
+        Some(crate::config::DEFAULT_LOCK_EXT)
+    );
+}
+
 struct NamedSink {
     name: &'static str,
     fail: bool,

@@ -92,6 +92,34 @@ fn prepares_named_and_implicit_delivery_lockfiles() {
 }
 
 #[test]
+fn expands_lockext_from_its_default_and_in_statement_order() {
+    let config = parse("DEFAULT_EXT=$LOCKEXT\nLOCKEXT=.next\nSELECTED_EXT=$LOCKEXT\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+
+    let Statement::Assignment(default_ext) = &config.statements[0] else {
+        panic!("expected default extension assignment");
+    };
+    let Statement::Assignment(selected_ext) = &config.statements[2] else {
+        panic!("expected selected extension assignment");
+    };
+    assert_eq!(default_ext.value, ".lock");
+    assert_eq!(selected_ext.value, ".next");
+}
+
+#[test]
+fn rejects_lockext_that_adds_a_path_component_after_expansion() {
+    let error = parse("SEPARATOR=/\nLOCKEXT=.locks${SEPARATOR}shared\n")
+        .unwrap()
+        .expand()
+        .unwrap_err();
+
+    assert_eq!(error.line, 2);
+    assert_eq!(error.message, "LOCKEXT must not contain '/'");
+}
+
+#[test]
 fn expands_supplied_variables_before_rc_assignments() {
     let supplied = [
         SuppliedVariable::parse("ROOT=old".into()).unwrap(),

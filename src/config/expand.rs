@@ -70,6 +70,7 @@ impl Assignment {
             }
             AssignmentTarget::Umask => super::parse_umask(&value).map(drop),
             AssignmentTarget::Trap => super::validate_trap_command(&value),
+            AssignmentTarget::LockExt => super::validate_lock_ext(&value),
             _ => Ok(()),
         }
         .map_err(|message| ExpansionError::new(self.line, message))?;
@@ -321,6 +322,12 @@ fn expand_config(
             text: linebuf.to_string(),
             depth: 0,
         });
+    variables
+        .entry("LOCKEXT".to_owned())
+        .or_insert(ExpandedValue {
+            text: super::DEFAULT_LOCK_EXT.to_owned(),
+            depth: 0,
+        });
 
     for statement in &mut config.statements {
         match statement {
@@ -333,6 +340,10 @@ fn expand_config(
                 assignment.value = expanded.text;
                 if assignment.target == AssignmentTarget::Trap {
                     super::validate_trap_command(&assignment.value)
+                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
+                }
+                if assignment.target == AssignmentTarget::LockExt {
+                    super::validate_lock_ext(&assignment.value)
                         .map_err(|message| ExpansionError::new(assignment.line, message))?;
                 }
                 if assignment.target == AssignmentTarget::LineBuf {
@@ -518,6 +529,7 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::Host
                         | AssignmentTarget::LockMethod
                         | AssignmentTarget::LockFile
+                        | AssignmentTarget::LockExt
                         | AssignmentTarget::LockTimeout
                         | AssignmentTarget::LineBuf
                         | AssignmentTarget::ProcessTimeout
