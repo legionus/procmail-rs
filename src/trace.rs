@@ -340,7 +340,7 @@ fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result
             write!(
                 output,
                 "event=variable-assigned line={} name=\"{}\" source={}",
-                line.map_or(0, |value| value),
+                line.unwrap_or(0),
                 EscapedBytes::new(name.as_str().as_bytes()),
                 variable_source_name(*source)
             )?;

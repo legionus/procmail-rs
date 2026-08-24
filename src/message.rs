@@ -125,10 +125,7 @@ impl Message {
         let mut raw = Vec::with_capacity(limits.headers_size.min(64 * 1024));
         let mut field_size = 0usize;
 
-        loop {
-            let Some(line) = read_header_line(reader, &limits, raw.len())? else {
-                break;
-            };
+        while let Some(line) = read_header_line(reader, &limits, raw.len())? {
             let is_separator = line == b"\n" || line == b"\r\n";
 
             if !is_separator {
