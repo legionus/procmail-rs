@@ -27,7 +27,7 @@ use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{
     CompletionState, ConditionKindExplanation, DeliveryAttemptError, DeliveryPlan, DestinationKind,
     ExecutionPlan, ExternalActionInput, FinalMessage, HeaderEvaluation, MappedMessageInput,
-    MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery,
+    MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery, RecipeLockGuard,
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
 use procmail_rs::external_process::{
@@ -519,6 +519,11 @@ fn deliver_staged(
                                 Err(error)
                             }
                         }
+                    },
+                    &mut |path, runtime| {
+                        acquire_configured_lock(path, runtime, staging_options.uid)
+                            .map(|lock| Box::new(lock) as Box<dyn RecipeLockGuard>)
+                            .map_err(DeliveryAttemptError::Recoverable)
                     },
                 ),
                 &mut |message: FinalMessage<'_>, runtime, _, state| {

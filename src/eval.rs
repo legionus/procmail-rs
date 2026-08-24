@@ -233,8 +233,13 @@ struct OrderedTreeExecution<'a, E, D, T> {
     external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
     external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
     global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
+    local_lock: Option<&'a mut LocalLockExecutor<'a, E>>,
     rc: RcExecutionContext<'a>,
 }
+
+pub trait RecipeLockGuard {}
+
+impl<T> RecipeLockGuard for T {}
 
 type ExternalActionExecutor<'a, E, T> = dyn FnMut(
         &PipeAction,
@@ -272,6 +277,9 @@ type ExternalConditionExecutor<'a, E, T> = dyn FnMut(&str, &[u8], &mut RuntimeVa
 
 type GlobalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + 'a;
 
+type LocalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<E>>
+    + 'a;
+
 type CompletionExecutor<'a, E, T> =
     dyn FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>) + 'a;
 
@@ -279,6 +287,7 @@ struct OptionalOrderedExecutors<'a, E, T> {
     external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
     external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
     global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
+    local_lock: Option<&'a mut LocalLockExecutor<'a, E>>,
 }
 
 #[derive(Debug)]
@@ -630,6 +639,9 @@ pub enum EvalError {
         line: usize,
         name: &'static str,
     },
+    LocalLockExecutorUnavailable {
+        line: usize,
+    },
     RuntimeRc(String),
     ExternalActionUnsupported {
         line: usize,
@@ -677,6 +689,12 @@ impl fmt::Display for EvalError {
                 formatter,
                 "line {line}: {name} requires runtime setting support"
             ),
+            Self::LocalLockExecutorUnavailable { line } => {
+                write!(
+                    formatter,
+                    "line {line}: recipe block requires local lock support"
+                )
+            }
             Self::RuntimeRc(message) => formatter.write_str(message),
             Self::ExternalActionUnsupported { line } => {
                 write!(
@@ -1765,6 +1783,9 @@ impl CompiledNode {
                 }
             }
             CompiledAction::Block(children) => {
+                if self.lock.is_some() {
+                    return Err(EvalError::LocalLockExecutorUnavailable { line: self.line });
+                }
                 // A selected block owns the outcome of its child sequence.
                 // Discard an older sibling failure before entering it so an
                 // empty or fully skipped block can still complete normally.
@@ -1930,6 +1951,39 @@ impl CompiledNode {
                 // result. Child actions either leave their latest failure in
                 // the context or clear it by completing successfully.
                 context.pending_error = None;
+                let lock = self
+                    .lock
+                    .as_ref()
+                    .map(|expression| {
+                        expression.resolve_with(|name| context.runtime.get(name).map(str::to_owned))
+                    })
+                    .transpose()
+                    .map_err(EvalError::Expansion)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                let _guard = if let Some(path) = lock.as_deref() {
+                    let executor = context.local_lock.as_mut().ok_or_else(|| {
+                        OrderedExecutionError::Evaluation(EvalError::LocalLockExecutorUnavailable {
+                            line: self.line,
+                        })
+                    })?;
+                    match executor(path, context.runtime) {
+                        Ok(guard) => Some(guard),
+                        Err(DeliveryAttemptError::Recoverable(error)) => {
+                            context.pending_error = Some(error);
+                            return Ok((ActionExecution::Failed, SequenceControl::Continue));
+                        }
+                        Err(DeliveryAttemptError::Fatal(error)) => {
+                            return Err(OrderedExecutionError::Delivery(error));
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Keep the guard in this stack frame while every child result
+                // propagates upward. Normal completion, delivery failure,
+                // HOST/SWITCHRC control flow, and evaluation errors all leave
+                // through this scope and therefore release the same lock.
                 children.execute_ordered(context)
             }
         }
@@ -1952,6 +2006,9 @@ impl CompiledNode {
                 self.plan_delivery(runtime, execution, has_error_handler)
             }
             CompiledAction::Block(children) => {
+                if self.lock.is_some() {
+                    return Err(EvalError::LocalLockExecutorUnavailable { line: self.line });
+                }
                 children.plan_complete(message, runtime, trace, execution, context)
             }
         }
@@ -2684,6 +2741,7 @@ impl ExecutionPlan {
                 external: None,
                 external_condition: None,
                 global_lock: None,
+                local_lock: None,
             },
             None,
         )
@@ -2725,18 +2783,19 @@ impl ExecutionPlan {
                 external: Some(external),
                 external_condition: None,
                 global_lock: None,
+                local_lock: None,
             },
             None,
         )
     }
 
-    pub fn execute_mapped_ordered_with_processes_trace<E, D, C, X, G, T>(
+    pub fn execute_mapped_ordered_with_processes_trace<E, D, C, X, G, L, T>(
         &self,
         message: MappedMessageInput<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut T,
         deliver: &mut D,
-        executors: (&mut C, &mut X, &mut G),
+        executors: (&mut C, &mut X, &mut G, &mut L),
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
         D: FnMut(
@@ -2762,9 +2821,13 @@ impl ExecutionPlan {
             &mut T,
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
         G: FnMut(&str, &mut RuntimeVariables) -> Result<(), E>,
+        L: FnMut(
+            &str,
+            &mut RuntimeVariables,
+        ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<E>>,
         T: TraceSink,
     {
-        let (external_condition, external, global_lock) = executors;
+        let (external_condition, external, global_lock, local_lock) = executors;
         self.execute_mapped_ordered_inner(
             message,
             runtime,
@@ -2774,18 +2837,19 @@ impl ExecutionPlan {
                 external: Some(external),
                 external_condition: Some(external_condition),
                 global_lock: Some(global_lock),
+                local_lock: Some(local_lock),
             },
             None,
         )
     }
 
-    pub fn execute_mapped_ordered_with_processes_and_completion_trace<E, D, C, X, G, F, T>(
+    pub fn execute_mapped_ordered_with_processes_and_completion_trace<E, D, C, X, G, L, F, T>(
         &self,
         message: MappedMessageInput<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut T,
         deliver: &mut D,
-        executors: (&mut C, &mut X, &mut G),
+        executors: (&mut C, &mut X, &mut G, &mut L),
         completion: &mut F,
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
@@ -2812,10 +2876,14 @@ impl ExecutionPlan {
             &mut T,
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
         G: FnMut(&str, &mut RuntimeVariables) -> Result<(), E>,
+        L: FnMut(
+            &str,
+            &mut RuntimeVariables,
+        ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<E>>,
         F: FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>),
         T: TraceSink,
     {
-        let (external_condition, external, global_lock) = executors;
+        let (external_condition, external, global_lock, local_lock) = executors;
         self.execute_mapped_ordered_inner(
             message,
             runtime,
@@ -2825,6 +2893,7 @@ impl ExecutionPlan {
                 external: Some(external),
                 external_condition: Some(external_condition),
                 global_lock: Some(global_lock),
+                local_lock: Some(local_lock),
             },
             Some(completion),
         )
@@ -2891,6 +2960,7 @@ impl ExecutionPlan {
             external: executors.external,
             external_condition: executors.external_condition,
             global_lock: executors.global_lock,
+            local_lock: executors.local_lock,
             rc: self.rc_context(),
         };
         let execution = self.root.execute_ordered(&mut context);

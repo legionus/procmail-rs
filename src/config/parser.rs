@@ -470,10 +470,10 @@ fn parse_recipe(
                 ),
             ));
         }
-        if lock.is_some() {
+        if lock.as_deref() == Some("") {
             return Err(ParseError::new(
                 start + 1,
-                "local lockfiles on recipe blocks are not supported",
+                "an implicit local lockfile cannot be derived for a recipe block",
             ));
         }
         if options.continuation == ContinuationMode::Continue {

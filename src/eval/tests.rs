@@ -1057,6 +1057,9 @@ fn program_condition_uses_child_status_before_entering_block() {
                     panic!("recipe contains no pipe action");
                 },
                 &mut |_, _| Ok::<_, &str>(()),
+                &mut |_, _| {
+                    Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(()))
+                },
             ),
         )
         .unwrap();
@@ -1065,6 +1068,69 @@ fn program_condition_uses_child_status_before_entering_block() {
     assert_eq!(delivered, ["selected"]);
     assert_eq!(outcome.published(), 1);
     assert!(outcome.original_delivered());
+}
+
+#[test]
+fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
+    struct Guard(std::rc::Rc<std::cell::Cell<bool>>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.set(false);
+        }
+    }
+
+    let config = crate::config::parse(
+        "MAILDIR=/mail\nLOCKMETHOD=flock\nLOCKTIMEOUT=7\nUMASK=077\nLOCKNAME=block.lock\n:0 : $LOCKNAME\n{\n:0\nmaildir:selected\n}\n",
+    )
+    .unwrap()
+    .expand()
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let raw = b"Subject: lock\n\nbody";
+    let held = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = held.clone();
+    let released = held.clone();
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = NoTrace;
+
+    let outcome = plan
+        .execute_mapped_ordered_with_processes_trace(
+            MappedMessageInput::new(raw, b"Subject: lock\n\n".len(), None),
+            &mut runtime,
+            &mut trace,
+            &mut |destination, message, _, _, runtime, _| {
+                assert!(observed.get());
+                assert_eq!(
+                    destination
+                        .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                        .unwrap(),
+                    Destination::Maildir("/mail/selected".into())
+                );
+                assert_eq!(message, raw);
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            (
+                &mut |_, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(true),
+                &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(None),
+                &mut |_, _| Ok::<_, &str>(()),
+                &mut |path, runtime| {
+                    assert_eq!(path, "/mail/block.lock");
+                    assert_eq!(runtime.get("LOCKMETHOD"), Some("flock"));
+                    assert_eq!(runtime.get("LOCKTIMEOUT"), Some("7"));
+                    assert_eq!(runtime.get("UMASK"), Some("077"));
+                    assert!(!held.replace(true));
+                    Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(Guard(
+                        held.clone(),
+                    )))
+                },
+            ),
+        )
+        .unwrap();
+
+    assert!(outcome.original_delivered());
+    assert_eq!(outcome.published(), 1);
+    assert!(!released.get());
 }
 
 #[test]

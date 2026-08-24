@@ -479,6 +479,22 @@ fn accepts_error_handler_after_a_block() {
 }
 
 #[test]
+fn accepts_only_explicit_local_lockfiles_on_recipe_blocks() {
+    let config = parse(":0 : block.lock\n{\n:0\nmaildir:target\n}\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected block recipe");
+    };
+    assert_eq!(recipe.lock.as_ref().unwrap().source(), "block.lock");
+
+    let error = parse(":0 :\n{\n:0\nmaildir:target\n}\n").unwrap_err();
+    assert_eq!(error.line, 1);
+    assert_eq!(
+        error.message,
+        "an implicit local lockfile cannot be derived for a recipe block"
+    );
+}
+
+#[test]
 fn enforces_recipe_nesting_depth_at_the_boundary() {
     fn nested(depth: usize) -> String {
         let mut source = ":0\n{\n".repeat(depth);

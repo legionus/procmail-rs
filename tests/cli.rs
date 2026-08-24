@@ -2175,6 +2175,161 @@ fn named_dotlock_is_held_while_a_pipe_action_runs() {
 }
 
 #[test]
+fn named_dotlock_is_held_across_a_selected_recipe_block() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let lock = base.join("block.lock");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKMETHOD=dotlock\nLOCKPATH={}\n:0 : $LOCKPATH\n{{\n:0 w\n| test -f \"$LOCKPATH\"\n}}\n",
+            base.display(),
+            lock.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: block lock\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(input)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(!lock.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn recipe_block_resolves_its_lockfile_from_match_at_selection_time() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let lock = base.join("selected.lock");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKMETHOD=dotlock\n:0 : $MATCH\n* ^X-Lock: \\/(selected\\.lock)$\n{{\n:0 w\n| test -f \"$MAILDIR/selected.lock\"\n}}\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"X-Lock: selected.lock\nSubject: dynamic block lock\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(input)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(!lock.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn recipe_block_releases_its_dotlock_before_an_error_handler_runs() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let lock = base.join("block.lock");
+    let fallback = base.join("fallback");
+    create_maildir(&fallback);
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKMETHOD=dotlock\nLOCKPATH={}\n:0 : $LOCKPATH\n{{\n:0 w\n| false\n}}\n:0 e\nmaildir:fallback\n",
+            base.display(),
+            lock.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: block failure\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(input)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
+    assert!(!lock.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn block_lock_timeout_is_recoverable_by_an_error_handler() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let lock = base.join("busy.lock");
+    let marker = base.join("entered");
+    let fallback = base.join("fallback");
+    create_maildir(&fallback);
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKMETHOD=flock\nLOCKTIMEOUT=1\nLOCKPATH={}\nMARKER={}\n:0 : $LOCKPATH\n{{\n:0 w\n| : > \"$MARKER\"; sleep 2\n}}\n:0 e\nmaildir:fallback\n",
+            base.display(),
+            lock.display(),
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let first_input = b"Subject: first block lock\n\nbody";
+    let mut first = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    first.stdin.take().unwrap().write_all(first_input).unwrap();
+    for _ in 0..200 {
+        if marker.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(marker.exists());
+
+    let second_input = b"Subject: second block lock\n\nbody";
+    let started = std::time::Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(second_input)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(delivered_messages(&fallback), [second_input.to_vec()]);
+    assert!(first.wait().unwrap().success());
+    assert!(lock.is_file());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn flock_serializes_external_actions_across_processes() {
     let config = config_file("");
     let base = config.parent().unwrap();
