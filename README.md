@@ -1,12 +1,58 @@
 # procmail-rs
 
-`procmail-rs` is an experimental mail filter for 32-bit and 64-bit Linux. The
-currently implemented CLI can validate or explain an rc file and can filter
-one message from standard input into explicitly selected Maildir destinations.
+`procmail-rs` is an experimental mail filter for 32-bit and 64-bit Linux. It
+validates or explains an rc file and filters one message from standard input
+into explicitly selected Maildir or mbox destinations.
 
 The program does not provide an implicit system mailbox or fallback delivery.
 See [Documentation/Compatibility.md](Documentation/Compatibility.md) for the
 supported compatibility boundary and deliberate differences from procmail.
+
+The security model assumes that messages, rc text, command-line values, paths,
+filesystem state, and child-process output can all be malformed or hostile.
+Input is bounded while it is read, arithmetic derived from it is checked, and
+delivery is not published until a complete operation succeeds. Commands named
+by an rc file are trusted code and are intentionally not sandboxed; use an
+external namespace, cgroup, or service policy when they need containment.
+
+## Build
+
+The build requires the stable Rust toolchain and Cargo. The supported release
+target is Linux with a 32-bit or 64-bit pointer width.
+
+```text
+cargo build --locked --release
+./target/release/procmail-rs --version
+```
+
+Development and release checks are described in
+[Documentation/ReleasePolicy.md](Documentation/ReleasePolicy.md).
+The project is distributed under the MIT license; dependency and fixture
+provenance is recorded in [Documentation/Licenses.md](Documentation/Licenses.md).
+
+## Minimal configuration
+
+Create the Maildir structure before filtering; delivery never creates or
+repairs its `tmp`, `new`, or `cur` directories.
+
+```text
+MAILDIR=/home/user/Mail
+LIMIT_MSG_SIZE=64M
+
+:0
+inbox/
+```
+
+Then validate it and filter one message:
+
+```text
+procmail-rs check --config ./procmailrc
+procmail-rs filter --config ./procmailrc <message.eml
+```
+
+See [Documentation/Limits.md](Documentation/Limits.md) for resource settings
+and [Documentation/Delivery.md](Documentation/Delivery.md) for destination,
+locking, and durability behavior.
 
 ## Commands
 

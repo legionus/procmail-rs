@@ -23,6 +23,39 @@ ceilings and supported recipe subset.
 | `i` on a pipe | Ignores an error while writing the selected message bytes to the child. | Child status and filter-output validation remain separate, as they are not pipe-input write errors. |
 | `r` on Maildir | Maildir delivery preserves the original message ending, so `r` has no additional effect. | procmail-rs preserves the same message bytes with or without `r`. |
 
+## Supported rc subset
+
+The accepted syntax is intentionally closed: syntax not listed here is either
+rejected explicitly or is an ordinary user variable assignment.
+
+| Syntax area | Supported forms |
+| --- | --- |
+| Statements | `NAME=value`, `INCLUDERC=expression`, `SWITCHRC=expression`, recipes, and nested recipe blocks |
+| Variable references | `$NAME`, `${NAME}`, and `${NAME:-expression}` with bounded nesting; one outer pair of double quotes may surround an assignment value |
+| Recipe header | `:0` followed by flags and an optional `: lockfile` |
+| Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
+| Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
+| Conditions | Byte regex, leading `!` negation, `? shell command`, `< size`, `> size`, `H ?? regex`, `B ?? regex`, and `$NAME ?? regex` |
+| Actions | Explicit Maildir or mbox delivery, trusted shell pipe action, and `{ ... }` block |
+| Regex additions | Procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `\+`, `\?`, `\|`, capture assignment with `\/`, and numbered `MATCH1` through the configured capture ceiling |
+| Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
+| External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
+| Logging | `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, and `LOGDETAIL=values`; metadata mode omits sensitive values by default |
+| Process settings | `SHELL`, `SHELLFLAGS`, `PATH`, `TIMEOUT`, `TRAP`, `EXITCODE`, and `UMASK` |
+| Delivery settings | `MAILDIR`, `DURABILITY`, `LOCKMETHOD`, `LOCKFILE`, `LOCKEXT`, and `LOCKTIMEOUT` |
+
+Shell command text is passed to the selected trusted shell. Shell parsing,
+environment-prefix assignments, quoting, expansion, redirection, and pipelines
+therefore follow that shell rather than an internal command tokenizer. Rc
+variable expansion remains the limited syntax listed above and does not become
+general shell evaluation.
+
+Reserved procmail variables `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `LOG`,
+`MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`,
+`SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` are rejected by name. Forward actions
+beginning with `!` are also rejected. This makes unsupported behavior visible
+instead of silently assigning it another meaning.
+
 ## Deliberate differences
 
 | Area | procmail 3.22 | procmail-rs |
