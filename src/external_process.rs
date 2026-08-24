@@ -3,6 +3,8 @@
 
 use std::fmt;
 use std::io::{BufReader, Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -53,6 +55,14 @@ pub struct ProgramRun {
     exit_code: Option<u8>,
 }
 
+#[derive(Debug)]
+pub struct CaptureRun {
+    input_write: InputWrite,
+    output: std::io::Result<Vec<u8>>,
+    child_exit: ChildExit,
+    exit_code: Option<u8>,
+}
+
 struct ProgramIoOptions {
     output_ending: OutputEnding,
     timeout: Duration,
@@ -70,6 +80,28 @@ pub struct FilterOptions {
     action_input: ActionInput,
     limits: MessageLimits,
     timeout: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureOptions {
+    output_ending: OutputEnding,
+    timeout: Duration,
+    output_limit: usize,
+}
+
+impl CaptureOptions {
+    pub fn new(output_ending: OutputEnding, output_limit: usize) -> Self {
+        Self {
+            output_ending,
+            timeout: DEFAULT_PROCESS_TIMEOUT,
+            output_limit,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
 }
 
 impl FilterOptions {
@@ -102,6 +134,28 @@ impl ProgramRun {
     }
 
     pub fn exit_code(self) -> Option<u8> {
+        self.exit_code
+    }
+}
+
+impl CaptureRun {
+    pub fn input_write(&self) -> InputWrite {
+        self.input_write
+    }
+
+    pub fn output(&self) -> Result<&[u8], &std::io::Error> {
+        self.output.as_deref()
+    }
+
+    pub fn into_output(self) -> std::io::Result<Vec<u8>> {
+        self.output
+    }
+
+    pub fn child_exit(&self) -> ChildExit {
+        self.child_exit
+    }
+
+    pub fn exit_code(&self) -> Option<u8> {
         self.exit_code
     }
 }
@@ -167,6 +221,7 @@ pub fn run_filter(
         .process_group(0)
         .spawn()
         .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
+    drop(command_builder);
     let mut child_stdin = child
         .stdin
         .take()
@@ -267,6 +322,137 @@ pub fn run_program_with_timeout(
     )
 }
 
+pub fn run_capture_with_timeout(
+    policy: &ShellPolicy,
+    environment: &ProcessEnvironment,
+    command: &str,
+    input: &[u8],
+    options: CaptureOptions,
+    stderr: Stdio,
+) -> Result<CaptureRun, ExternalProcessError> {
+    let invocation = policy
+        .authorize(environment)
+        .map_err(|error| process_error(error.to_string()))?;
+    let (mut output_reader, output_writer) = UnixStream::pair()
+        .map_err(|error| process_error(format!("cannot create command output channel: {error}")))?;
+    output_reader
+        .set_read_timeout(Some(PROCESS_POLL_INTERVAL))
+        .map_err(|error| process_error(format!("cannot bound command output wait: {error}")))?;
+    let output_writer: OwnedFd = output_writer.into();
+    let mut command_builder = Command::new(invocation.path());
+    let mut child = command_builder
+        .arg(invocation.flags())
+        .arg(command)
+        .env_clear()
+        .envs(environment.values())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(output_writer))
+        .stderr(stderr)
+        .process_group(0)
+        .spawn()
+        .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
+    drop(command_builder);
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .expect("piped child stdin is available after spawn");
+    // A command can block unless stdin and stdout progress independently. A
+    // timed socket also lets this thread supervise descendants that retain
+    // stdout after the direct shell exits; a plain blocking pipe read would
+    // otherwise wait forever without reaching the process-group timeout.
+    let (input_write, output, status, timed_out) = thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            write_action_input(&mut child_stdin, input, options.output_ending, false)
+        });
+        let started = Instant::now();
+        let output = read_bounded_output_until(
+            &mut output_reader,
+            options.output_limit,
+            options.timeout,
+            started,
+        );
+        drop(output_reader);
+        let output_failed = output.is_err();
+        let timed_out = output
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
+        let waited = if output_failed {
+            terminate_process_group(&mut child).map(|status| (status, timed_out))
+        } else {
+            let remaining = options.timeout.saturating_sub(started.elapsed());
+            wait_for_process_group(&mut child, remaining)
+        };
+        let input_write = writer.join();
+        (input_write, output, waited, timed_out)
+    });
+
+    let input_write = match input_write {
+        Ok(Ok(())) => InputWrite::Complete,
+        Ok(Err(_)) => InputWrite::Failed,
+        Err(_) => return Err(process_error("external command input worker failed")),
+    };
+    let (status, wait_timed_out) = status
+        .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?;
+    let timed_out = timed_out || wait_timed_out;
+    let exit_code = status.code().and_then(|code| u8::try_from(code).ok());
+
+    Ok(CaptureRun {
+        input_write,
+        output,
+        child_exit: if timed_out {
+            ChildExit::TimedOut
+        } else if status.success() {
+            ChildExit::Success
+        } else {
+            ChildExit::Failure
+        },
+        exit_code,
+    })
+}
+
+fn read_bounded_output_until(
+    reader: &mut impl Read,
+    limit: usize,
+    timeout: Duration,
+    started: Instant,
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if started.elapsed() >= timeout {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "captured command output exceeded TIMEOUT",
+                    ));
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if read == 0 {
+            return Ok(output);
+        }
+        let remaining = limit.checked_sub(output.len()).ok_or_else(|| {
+            std::io::Error::other("captured command output size accounting overflowed")
+        })?;
+        if read > remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("captured command output exceeds the hard limit of {limit} bytes"),
+            ));
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+}
+
 pub fn run_trap_with_timeout(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,
@@ -359,10 +545,6 @@ fn wait_for_process_group(
     child: &mut std::process::Child,
     timeout: Duration,
 ) -> Result<(std::process::ExitStatus, bool), ExternalProcessError> {
-    let group = i32::try_from(child.id())
-        .ok()
-        .and_then(Pid::from_raw)
-        .ok_or_else(|| process_error("external command returned an invalid process id"))?;
     let started = Instant::now();
     loop {
         if let Some(status) = child
@@ -381,17 +563,27 @@ fn wait_for_process_group(
         thread::sleep(PROCESS_POLL_INTERVAL.min(remaining));
     }
 
-    // The shell starts a fresh group so its descendants receive termination
-    // together. Keep the direct child unreaped during the grace interval: its
-    // PID continues to anchor the group number and cannot be reused before
-    // the final signal is sent.
+    terminate_process_group(child).map(|status| (status, true))
+}
+
+fn terminate_process_group(
+    child: &mut std::process::Child,
+) -> Result<std::process::ExitStatus, ExternalProcessError> {
+    let group = i32::try_from(child.id())
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| process_error("external command returned an invalid process id"))?;
+
+    // Keep the direct child unreaped during the grace interval. Its PID then
+    // anchors the process-group number, so termination cannot target a later
+    // unrelated group after rapid PID reuse.
     match kill_process_group(group, Signal::TERM) {
         Ok(()) => {}
         Err(rustix::io::Errno::SRCH) => {
             let status = child.wait().map_err(|error| {
                 process_error(format!("cannot reap timed-out command: {error}"))
             })?;
-            return Ok((status, true));
+            return Ok(status);
         }
         Err(error) => {
             return Err(process_error(format!(
@@ -411,7 +603,7 @@ fn wait_for_process_group(
     let status = child
         .wait()
         .map_err(|error| process_error(format!("cannot reap timed-out command: {error}")))?;
-    Ok((status, true))
+    Ok(status)
 }
 
 fn write_action_input(

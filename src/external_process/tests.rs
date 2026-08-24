@@ -311,6 +311,112 @@ fn timeout_interrupts_a_blocked_program_input_write() {
 }
 
 #[test]
+fn capture_pumps_binary_input_and_output_concurrently() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let input: Vec<u8> = (0..=255).cycle().take(1024 * 1024).collect();
+    let run = run_capture_with_timeout(
+        &policy,
+        &environment,
+        "cat",
+        &input,
+        CaptureOptions::new(OutputEnding::Preserve, input.len()),
+        Stdio::null(),
+    )
+    .unwrap();
+
+    assert_eq!(run.input_write(), InputWrite::Complete);
+    assert_eq!(run.child_exit(), ChildExit::Success);
+    assert_eq!(run.exit_code(), Some(0));
+    assert_eq!(run.output().unwrap(), input);
+}
+
+#[test]
+fn capture_enforces_its_output_limit_at_the_boundary() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let limit = 1024usize;
+    for length in [limit - 1, limit, limit + 1] {
+        let input = vec![b'x'; length];
+        let run = run_capture_with_timeout(
+            &policy,
+            &environment,
+            "cat",
+            &input,
+            CaptureOptions::new(OutputEnding::Preserve, limit),
+            Stdio::null(),
+        )
+        .unwrap();
+
+        if length <= limit {
+            assert_eq!(run.output().unwrap().len(), length);
+        } else {
+            assert_eq!(
+                run.output().unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+    }
+}
+
+#[test]
+fn capture_streams_stderr_and_obeys_timeout() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let path = temporary_path("capture-stderr");
+    let file = File::create(&path).unwrap();
+    let run = run_capture_with_timeout(
+        &policy,
+        &environment,
+        "printf diagnostic >&2; sleep 30",
+        b"",
+        CaptureOptions::new(OutputEnding::Preserve, 16).with_timeout(Duration::from_millis(50)),
+        Stdio::from(file),
+    )
+    .unwrap();
+
+    assert_eq!(run.child_exit(), ChildExit::TimedOut);
+    assert_eq!(fs::read(&path).unwrap(), b"diagnostic");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn capture_times_out_when_a_background_descendant_keeps_stdout_open() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let started = Instant::now();
+    let run = run_capture_with_timeout(
+        &policy,
+        &environment,
+        "sleep 30 &",
+        b"",
+        CaptureOptions::new(OutputEnding::Preserve, 16).with_timeout(Duration::from_millis(50)),
+        Stdio::null(),
+    )
+    .unwrap();
+
+    assert_eq!(run.child_exit(), ChildExit::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn capture_stops_infinite_output_at_the_byte_limit() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let started = Instant::now();
+    let run = run_capture_with_timeout(
+        &policy,
+        &environment,
+        "while :; do printf 0123456789abcdef; done",
+        b"",
+        CaptureOptions::new(OutputEnding::Preserve, 1024),
+        Stdio::null(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        run.output().unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
 fn parses_timeout_at_boundaries_and_in_statement_order() {
     assert_eq!(parse_process_timeout("1").unwrap(), Duration::from_secs(1));
     assert_eq!(
