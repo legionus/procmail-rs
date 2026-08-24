@@ -451,6 +451,9 @@ impl CompiledSequence {
                     CompiledAction::Pipe { .. } => {
                         return Err(EvalError::ExternalActionUnsupported { line: recipe.line });
                     }
+                    CompiledAction::HeadersUnsupported => {
+                        return Err(EvalError::HeaderActionUnsupported { line: recipe.line });
+                    }
                     CompiledAction::Deliver { .. } => {
                         let control = recipe.plan_delivery(
                             runtime,
@@ -698,6 +701,7 @@ impl CompiledNode {
                     )
             }
             CompiledAction::Block(_) => false,
+            CompiledAction::HeadersUnsupported => true,
         }
     }
 
@@ -722,6 +726,9 @@ impl CompiledNode {
                     return Err(EvalError::LocalLockExecutorUnavailable { line: self.line });
                 }
                 children.plan_complete(message, runtime, trace, execution, context)
+            }
+            CompiledAction::HeadersUnsupported => {
+                Err(EvalError::HeaderActionUnsupported { line: self.line })
             }
         }
     }

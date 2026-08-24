@@ -6,11 +6,12 @@ use regex::bytes::RegexBuilder;
 use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaseMode, ChildStatusMode, Condition,
     ConditionInput, ConditionKind, Config, ContinuationMode, ControlFlow, Destination,
-    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_PATH_EXPRESSION_LEN,
-    MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE,
-    MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression, PipeAction, RcFileExpression,
-    RcLimits, RcParseCounts, RcParseState, Recipe, RecipeAction, RecipeOptions, RegexCondition,
-    Statement, VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
+    HeaderAction, HeaderOperation, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN,
+    MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE,
+    MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError,
+    PathExpression, PipeAction, RcFileExpression, RcLimits, RcParseCounts, RcParseState, Recipe,
+    RecipeAction, RecipeOptions, RegexCondition, Statement, VariablePolicy, VariableSource,
+    WriteErrorMode, variable_policy,
 };
 
 #[cfg(test)]
@@ -426,16 +427,18 @@ fn parse_recipe(
     }
 
     let is_pipe = action.starts_with('|');
+    let is_headers = action == "headers {";
     let has_program_condition = conditions
         .iter()
         .any(|condition| matches!(condition.kind, ConditionKind::Program(_)));
-    if !is_pipe && action != "{" && options.write_errors == WriteErrorMode::Ignore {
+    if !is_pipe && !is_headers && action != "{" && options.write_errors == WriteErrorMode::Ignore {
         return Err(ParseError::new(
             start + 1,
             "recipe flag 'i' is not supported for filesystem delivery because it may publish an incomplete message",
         ));
     }
     if !is_pipe
+        && !is_headers
         && (options.action_input != ActionInput::Message
             || options.action_mode != ActionMode::Deliver
             || (!has_program_condition
@@ -451,6 +454,9 @@ fn parse_recipe(
     let (action, next) = if is_pipe {
         let (command, next) = parse_pipe_command(lines, index, state.limits.linebuf)?;
         (RecipeAction::Pipe(PipeAction { command }), next)
+    } else if is_headers {
+        let (action, next) = parse_header_action(lines, index, state.limits.linebuf)?;
+        (RecipeAction::Headers(action), next)
     } else if action == "{" {
         let next_depth = depth
             .checked_add(1)
@@ -536,6 +542,120 @@ fn parse_recipe(
         action,
     };
     Ok((recipe, next))
+}
+
+fn parse_header_action(
+    lines: &[&str],
+    opening: usize,
+    linebuf: usize,
+) -> Result<(HeaderAction, usize), ParseError> {
+    let mut operations = Vec::new();
+    let mut index = opening + 1;
+
+    // Bound the operation list independently of the rc byte ceiling because
+    // even very short operations create typed nodes and later editing work.
+    // Stop before parsing the excess line so it cannot allocate another node.
+    while let Some(raw) = lines.get(index) {
+        check_linebuf(raw, index + 1, linebuf)?;
+        let text = raw.trim();
+        if text.is_empty() || text.starts_with('#') {
+            index += 1;
+            continue;
+        }
+        if text == "}" {
+            return Ok((HeaderAction { operations }, index + 1));
+        }
+        if operations.len() == MAX_HEADER_OPERATIONS_PER_ACTION {
+            return Err(ParseError::limit(
+                index + 1,
+                format!(
+                    "header operation count exceeds the hard limit of {MAX_HEADER_OPERATIONS_PER_ACTION}"
+                ),
+            ));
+        }
+
+        operations.push(parse_header_operation(text, index + 1)?);
+        index += 1;
+    }
+
+    Err(ParseError::new(
+        opening + 1,
+        "headers action has no closing '}'",
+    ))
+}
+
+fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, ParseError> {
+    let (operation, arguments) = text.split_once(char::is_whitespace).ok_or_else(|| {
+        ParseError::new(line, format!("header operation '{text}' has no arguments"))
+    })?;
+    let arguments = arguments.trim_start();
+
+    if operation == "remove" {
+        validate_header_name(arguments, line)?;
+        return Ok(HeaderOperation::Remove {
+            line,
+            name: arguments.to_owned(),
+        });
+    }
+
+    if !matches!(operation, "set" | "add" | "prepend") {
+        return Err(ParseError::new(
+            line,
+            format!("unknown headers operation '{operation}'"),
+        ));
+    }
+
+    let (name, value) = arguments.split_once(':').ok_or_else(|| {
+        ParseError::new(
+            line,
+            format!("header operation '{operation}' requires NAME: VALUE"),
+        )
+    })?;
+    let name = name.trim();
+    validate_header_name(name, line)?;
+    let value = value.trim_start();
+    if value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
+        return Err(ParseError::new(
+            line,
+            "header value contains a forbidden byte",
+        ));
+    }
+    let fields = (line, name.to_owned(), value.to_owned());
+    match operation {
+        "set" => Ok(HeaderOperation::Set {
+            line: fields.0,
+            name: fields.1,
+            value: fields.2,
+        }),
+        "add" => Ok(HeaderOperation::Add {
+            line: fields.0,
+            name: fields.1,
+            value: fields.2,
+        }),
+        "prepend" => Ok(HeaderOperation::Prepend {
+            line: fields.0,
+            name: fields.1,
+            value: fields.2,
+        }),
+        _ => Err(ParseError::new(
+            line,
+            format!("unknown headers operation '{operation}'"),
+        )),
+    }
+}
+
+fn validate_header_name(name: &str, line: usize) -> Result<(), ParseError> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(ParseError::new(
+            line,
+            "header name must contain only ASCII letters, digits, and '-'",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_pipe_command(

@@ -198,6 +198,9 @@ impl CompiledNode {
         T: TraceSink,
     {
         match &self.action {
+            CompiledAction::HeadersUnsupported => Err(OrderedExecutionError::Evaluation(
+                EvalError::HeaderActionUnsupported { line: self.line },
+            )),
             CompiledAction::Pipe { action, options } => {
                 let message =
                     current_ordered_message(context.message, context.replacement.as_ref());

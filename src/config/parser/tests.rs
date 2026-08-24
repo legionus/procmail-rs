@@ -1326,3 +1326,101 @@ fn config_with_conditions(mut count: usize) -> String {
     }
     source
 }
+
+#[test]
+fn parses_typed_header_action_operations() {
+    let config = parse(
+        ":0\nheaders {\n remove X-Old\n set X-State: ready\n add X-State: later\n prepend X-First: yes\n}\n",
+    )
+    .unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+
+    assert_eq!(
+        recipe.action,
+        RecipeAction::Headers(HeaderAction {
+            operations: vec![
+                HeaderOperation::Remove {
+                    line: 3,
+                    name: "X-Old".into(),
+                },
+                HeaderOperation::Set {
+                    line: 4,
+                    name: "X-State".into(),
+                    value: "ready".into(),
+                },
+                HeaderOperation::Add {
+                    line: 5,
+                    name: "X-State".into(),
+                    value: "later".into(),
+                },
+                HeaderOperation::Prepend {
+                    line: 6,
+                    name: "X-First".into(),
+                    value: "yes".into(),
+                },
+            ],
+        })
+    );
+}
+
+#[test]
+fn reports_unknown_header_operation_at_its_source_line() {
+    let error = parse(":0\nheaders {\n replace X-Test: value\n}\n").unwrap_err();
+
+    assert_eq!(error.line, 3);
+    assert_eq!(error.message, "unknown headers operation 'replace'");
+}
+
+#[test]
+fn rejects_unclosed_header_action() {
+    let error = parse(":0\nheaders {\n remove X-Test\n").unwrap_err();
+
+    assert_eq!(error.line, 2);
+    assert_eq!(error.message, "headers action has no closing '}'");
+}
+
+#[test]
+fn rejects_parsed_header_action_during_preparation_for_now() {
+    let config = parse(":0\nheaders {\n remove X-Test\n}\n").unwrap();
+    let error = config.expand().unwrap_err();
+
+    assert_eq!(error.line, 2);
+    assert_eq!(
+        error.to_string(),
+        "line 2: headers actions are parsed but not executable yet"
+    );
+}
+
+#[test]
+fn enforces_header_operation_count_at_the_boundary() {
+    for count in [
+        MAX_HEADER_OPERATIONS_PER_ACTION - 1,
+        MAX_HEADER_OPERATIONS_PER_ACTION,
+        MAX_HEADER_OPERATIONS_PER_ACTION + 1,
+    ] {
+        let source = format!(":0\nheaders {{\n{}}}\n", " remove X-Test\n".repeat(count));
+        let result = parse(&source);
+
+        if count <= MAX_HEADER_OPERATIONS_PER_ACTION {
+            let config = result.unwrap();
+            let Statement::Recipe(recipe) = &config.statements[0] else {
+                panic!("expected recipe");
+            };
+            let RecipeAction::Headers(action) = &recipe.action else {
+                panic!("expected headers action");
+            };
+            assert_eq!(action.operations.len(), count);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.line, MAX_HEADER_OPERATIONS_PER_ACTION + 3);
+            assert_eq!(
+                error.message,
+                format!(
+                    "header operation count exceeds the hard limit of {MAX_HEADER_OPERATIONS_PER_ACTION}"
+                )
+            );
+        }
+    }
+}

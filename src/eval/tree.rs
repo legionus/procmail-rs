@@ -39,6 +39,7 @@ pub(super) enum CompiledAction {
         options: RecipeOptions,
     },
     Block(CompiledSequence),
+    HeadersUnsupported,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +223,7 @@ impl CompiledSequence {
                 CompiledAction::Block(children) => {
                     children.collect_explanations(&conditions, assignment_count, explanations);
                 }
+                CompiledAction::HeadersUnsupported => {}
             }
         }
     }
@@ -243,6 +245,7 @@ impl CompiledNode {
             RecipeAction::Block(statements) => {
                 CompiledAction::Block(CompiledSequence::compile(statements, &mut Vec::new()))
             }
+            RecipeAction::Headers(_) => CompiledAction::HeadersUnsupported,
         };
         Self {
             line: recipe.line,
@@ -263,6 +266,7 @@ impl CompiledNode {
             },
             CompiledAction::Deliver { .. } => InputRequirements::default(),
             CompiledAction::Block(sequence) => sequence.requirements(),
+            CompiledAction::HeadersUnsupported => InputRequirements::default(),
         };
         self.conditions
             .iter()
@@ -284,6 +288,7 @@ impl CompiledNode {
                         || matches!(destination, Destination::Mbox(_))
                 }
                 CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
+                CompiledAction::HeadersUnsupported => true,
             }
     }
 
@@ -295,6 +300,7 @@ impl CompiledNode {
                 CompiledAction::Pipe { .. } => true,
                 CompiledAction::Deliver { .. } => false,
                 CompiledAction::Block(sequence) => sequence.needs_message_contents(),
+                CompiledAction::HeadersUnsupported => false,
             }
     }
 }

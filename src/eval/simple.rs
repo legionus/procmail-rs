@@ -73,6 +73,9 @@ impl CompiledNode {
             CompiledAction::Pipe { .. } => {
                 Err(EvalError::ExternalActionUnsupported { line: self.line })
             }
+            CompiledAction::HeadersUnsupported => {
+                Err(EvalError::HeaderActionUnsupported { line: self.line })
+            }
             CompiledAction::Deliver {
                 destination,
                 continuation,

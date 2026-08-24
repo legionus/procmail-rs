@@ -510,6 +510,12 @@ fn expand_recipe(
             }
         }
         RecipeAction::Pipe(_) => {}
+        RecipeAction::Headers(_) => {
+            return Err(ExpansionError::new(
+                recipe.action_line,
+                "headers actions are parsed but not executable yet",
+            ));
+        }
         RecipeAction::Block(statements) => {
             prepare_runtime_statements(statements, variables, &mut BTreeSet::new(), maildir)?;
         }
@@ -648,6 +654,12 @@ fn prepare_runtime_recipe(
             expression.expansion = Some(parsed);
         }
         RecipeAction::Pipe(_) => {}
+        RecipeAction::Headers(_) => {
+            return Err(ExpansionError::new(
+                recipe.action_line,
+                "headers actions are parsed but not executable yet",
+            ));
+        }
         RecipeAction::Block(children) => {
             let mut child_dynamic = dynamic.clone();
             prepare_runtime_statements(children, known, &mut child_dynamic, maildir)?;

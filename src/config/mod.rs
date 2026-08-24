@@ -43,6 +43,7 @@ pub const MAX_CONDITIONS_PER_RECIPE: usize = 256;
 pub const MAX_EXPANSION_DEPTH: usize = 32;
 pub const MAX_PATH_EXPRESSION_LEN: usize = 4096;
 pub const MAX_PIPE_COMMAND_LEN: usize = 64 * 1024;
+pub const MAX_HEADER_OPERATIONS_PER_ACTION: usize = 256;
 pub const MAX_RECIPE_NESTING_DEPTH: usize = 64;
 pub const MAX_REGEX_COMPILED_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_REGEX_PATTERN_LEN: usize = 64 * 1024;
@@ -228,7 +229,7 @@ fn statements_have_pipe_actions(statements: &[Statement]) -> bool {
         Statement::Recipe(recipe) => match &recipe.action {
             RecipeAction::Pipe(_) => true,
             RecipeAction::Block(children) => statements_have_pipe_actions(children),
-            RecipeAction::Deliver(_) => false,
+            RecipeAction::Deliver(_) | RecipeAction::Headers(_) => false,
         },
         Statement::Assignment(_) | Statement::Include(_) | Statement::Switch(_) => false,
     })
@@ -244,7 +245,7 @@ fn statements_have_external_commands(statements: &[Statement]) -> bool {
                 || match &recipe.action {
                     RecipeAction::Pipe(_) => true,
                     RecipeAction::Block(children) => statements_have_external_commands(children),
-                    RecipeAction::Deliver(_) => false,
+                    RecipeAction::Deliver(_) | RecipeAction::Headers(_) => false,
                 }
         }
         Statement::Assignment(assignment) => assignment.target == AssignmentTarget::Trap,
@@ -365,6 +366,35 @@ pub enum RecipeAction {
     Deliver(Destination),
     Pipe(PipeAction),
     Block(Vec<Statement>),
+    Headers(HeaderAction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderAction {
+    pub operations: Vec<HeaderOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderOperation {
+    Remove {
+        line: usize,
+        name: String,
+    },
+    Set {
+        line: usize,
+        name: String,
+        value: String,
+    },
+    Add {
+        line: usize,
+        name: String,
+        value: String,
+    },
+    Prepend {
+        line: usize,
+        name: String,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

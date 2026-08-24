@@ -161,6 +161,9 @@ pub enum EvalError {
     ExternalActionUnsupported {
         line: usize,
     },
+    HeaderActionUnsupported {
+        line: usize,
+    },
     ExternalConditionUnsupported {
         line: usize,
     },
@@ -215,6 +218,12 @@ impl fmt::Display for EvalError {
                 write!(
                     formatter,
                     "line {line}: external action is not executable yet"
+                )
+            }
+            Self::HeaderActionUnsupported { line } => {
+                write!(
+                    formatter,
+                    "line {line}: headers action is not executable yet"
                 )
             }
             Self::ExternalConditionUnsupported { line } => {
