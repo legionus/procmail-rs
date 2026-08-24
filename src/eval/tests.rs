@@ -71,6 +71,93 @@ fn head(raw: &[u8]) -> MessageHead {
 }
 
 #[test]
+fn header_edit_updates_following_header_rules_without_buffering_body() {
+    let config = config::parse(
+        ":0\nheaders {\n set X-State: new\n}\n:0\n* ^X-State: new$\nmaildir:selected\n",
+    )
+    .unwrap()
+    .expand()
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let mut head = head(b"X-State: old\n\nbody");
+    let mut runtime = RuntimeVariables::default();
+
+    assert!(!plan.requirements().needs_end_of_message);
+    let result = plan.evaluate_headers_editing_with_trace(&mut head, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected a header-only decision");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+    assert_eq!(head.as_bytes(), b"X-State: new\n\n");
+}
+
+#[test]
+fn ordered_header_edit_updates_later_delivery_bytes() {
+    let config = config::parse(
+        ":0 B\n* needle\nheaders {\n add X-Body-Matched: yes\n}\n:0\n* ^X-Body-Matched: yes$\nmaildir:selected\n",
+    )
+    .unwrap()
+    .expand()
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let raw = b"Subject: test\n\nneedle body";
+    let mut runtime = RuntimeVariables::default();
+    let mut delivered = Vec::new();
+
+    plan.execute_mapped_ordered_with_trace(
+        raw,
+        b"Subject: test\n\n".len(),
+        &mut runtime,
+        &mut NoTrace,
+        &mut |destination, message, _, _, _, _| {
+            delivered.push((destination.path().to_owned(), message.to_vec()));
+            Ok::<_, DeliveryAttemptError<&str>>(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        delivered,
+        [(
+            "selected".to_owned(),
+            b"Subject: test\nX-Body-Matched: yes\n\nneedle body".to_vec(),
+        )]
+    );
+}
+
+#[test]
+fn external_action_observes_edited_headers() {
+    let config = config::parse(":0\nheaders {\n set X-State: new\n}\n:0 w\n| consume\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let raw = b"X-State: old\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+    let mut calls = 0usize;
+
+    plan.execute_mapped_ordered_with_external_trace(
+        MappedMessageInput::new(raw, b"X-State: old\n\n".len(), None),
+        &mut runtime,
+        &mut NoTrace,
+        &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+        &mut |_, _, _, input, _, _| {
+            calls += 1;
+            assert_eq!(input.header(), b"X-State: new\n\n");
+            assert_eq!(input.body(), b"body");
+            assert_eq!(input.selected(), b"X-State: new\n\nbody");
+            Ok::<_, DeliveryAttemptError<&str>>(None)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(calls, 1);
+}
+
+#[test]
 fn computes_static_input_requirements() {
     let header_only = compile(":0\n* ^Subject:\ninbox/\n");
     assert_eq!(
@@ -287,6 +374,28 @@ fn rendered_default_trace_excludes_message_and_configuration_values() {
     }
     assert!(rendered.contains("name=\"TOKEN\""));
     assert!(rendered.contains("event=condition"));
+    assert!(rendered.contains("event=recipe"));
+}
+
+#[test]
+fn rendered_trace_excludes_edited_header_names_and_values() {
+    let config = config::parse(
+        ":0\nheaders {\n add X-Private-Edited-Name: private-edited-value\n}\n:0\nmaildir:selected\n",
+    )
+    .unwrap()
+    .expand()
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let mut head = head(b"Subject: test\n\nbody");
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = BoundedTraceWriter::new(Vec::new());
+
+    let result = plan.evaluate_headers_editing_with_trace(&mut head, &mut runtime, &mut trace);
+    assert!(matches!(result, HeaderEvaluation::Decided(_)));
+
+    let rendered = String::from_utf8(trace.into_inner()).unwrap();
+    assert!(!rendered.contains("X-Private-Edited-Name"));
+    assert!(!rendered.contains("private-edited-value"));
     assert!(rendered.contains("event=recipe"));
 }
 

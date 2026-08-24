@@ -164,6 +164,11 @@ pub enum EvalError {
     HeaderActionUnsupported {
         line: usize,
     },
+    HeaderEdit {
+        line: usize,
+        message: String,
+    },
+    MessageLimits(String),
     ExternalConditionUnsupported {
         line: usize,
     },
@@ -225,6 +230,12 @@ impl fmt::Display for EvalError {
                     formatter,
                     "line {line}: headers action is not executable yet"
                 )
+            }
+            Self::HeaderEdit { line, message } => {
+                write!(formatter, "line {line}: cannot edit headers: {message}")
+            }
+            Self::MessageLimits(message) => {
+                write!(formatter, "invalid message limits: {message}")
             }
             Self::ExternalConditionUnsupported { line } => {
                 write!(

@@ -1034,6 +1034,49 @@ fn header_only_runtime_include_does_not_touch_staging() {
 }
 
 #[test]
+fn runtime_include_header_edit_updates_following_parent_recipe() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    let child_rc = mailbase.join("header.rc");
+    fs::write(
+        &child_rc,
+        ":0\nheaders {\n set X-Runtime-State: selected\n}\n",
+    )
+    .unwrap();
+    fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nINCLUDERC=header.rc\n:0\n* ^X-Runtime-State: selected$\nmaildir:selected\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: test\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(
+        delivered_messages(&selected),
+        [b"Subject: test\nX-Runtime-State: selected\n\nbody".to_vec()]
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn body_runtime_include_touches_staging_only_when_selected() {
     let path = config_file("");
     let base = path.parent().unwrap();

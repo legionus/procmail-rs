@@ -6,8 +6,8 @@ use super::condition::{CompiledCondition, compile_conditions};
 use super::explanation::{ConditionExplanation, DestinationKind, RecipeExplanation};
 use super::runtime_rc::{CompiledInclude, CompiledSwitch};
 use crate::config::{
-    Assignment, AssignmentTarget, ContinuationMode, ControlFlow, Destination, OutputEnding,
-    PipeAction, Recipe, RecipeAction, RecipeOptions, Statement,
+    Assignment, AssignmentTarget, ContinuationMode, ControlFlow, Destination, HeaderAction,
+    OutputEnding, PipeAction, Recipe, RecipeAction, RecipeOptions, Statement,
 };
 use crate::trace::VariableSource as TraceVariableSource;
 
@@ -39,7 +39,7 @@ pub(super) enum CompiledAction {
         options: RecipeOptions,
     },
     Block(CompiledSequence),
-    HeadersUnsupported,
+    Headers(HeaderAction),
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +154,28 @@ impl CompiledSequence {
             })
     }
 
+    pub(super) fn requires_preemptive_ordered_delivery(&self) -> bool {
+        // Header edits can run while only the bounded header section is
+        // available. Keep them out of this early deferral decision so a
+        // header-only configuration does not read or stage the body merely
+        // because a later action must observe the edited bytes.
+        self.trailing_statements
+            .iter()
+            .any(assignment_requires_ordered_message)
+            || self.recipes.iter().enumerate().any(|(index, recipe)| {
+                recipe.requires_preemptive_ordered_delivery()
+                    || recipe
+                        .preceding_statements
+                        .iter()
+                        .any(assignment_requires_ordered_message)
+                    || (index != 0
+                        && matches!(
+                            recipe.control,
+                            ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
+                        ))
+            })
+    }
+
     pub(super) fn needs_message_contents(&self) -> bool {
         self.recipes
             .iter()
@@ -223,7 +245,7 @@ impl CompiledSequence {
                 CompiledAction::Block(children) => {
                     children.collect_explanations(&conditions, assignment_count, explanations);
                 }
-                CompiledAction::HeadersUnsupported => {}
+                CompiledAction::Headers(_) => {}
             }
         }
     }
@@ -245,7 +267,7 @@ impl CompiledNode {
             RecipeAction::Block(statements) => {
                 CompiledAction::Block(CompiledSequence::compile(statements, &mut Vec::new()))
             }
-            RecipeAction::Headers(_) => CompiledAction::HeadersUnsupported,
+            RecipeAction::Headers(action) => CompiledAction::Headers(action.clone()),
         };
         Self {
             line: recipe.line,
@@ -266,7 +288,10 @@ impl CompiledNode {
             },
             CompiledAction::Deliver { .. } => InputRequirements::default(),
             CompiledAction::Block(sequence) => sequence.requirements(),
-            CompiledAction::HeadersUnsupported => InputRequirements::default(),
+            CompiledAction::Headers(_) => InputRequirements {
+                needs_headers: true,
+                ..InputRequirements::default()
+            },
         };
         self.conditions
             .iter()
@@ -288,11 +313,28 @@ impl CompiledNode {
                         || matches!(destination, Destination::Mbox(_))
                 }
                 CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
-                CompiledAction::HeadersUnsupported => true,
+                CompiledAction::Headers(_) => true,
             }
     }
 
-    fn needs_message_contents(&self) -> bool {
+    fn requires_preemptive_ordered_delivery(&self) -> bool {
+        self.lock.is_some()
+            || self
+                .conditions
+                .iter()
+                .any(CompiledCondition::requires_ordered_execution)
+            || match &self.action {
+                CompiledAction::Pipe { .. } => true,
+                CompiledAction::Deliver { destination, .. } => {
+                    destination.needs_runtime_variables()
+                        || matches!(destination, Destination::Mbox(_))
+                }
+                CompiledAction::Block(sequence) => sequence.requires_preemptive_ordered_delivery(),
+                CompiledAction::Headers(_) => false,
+            }
+    }
+
+    pub(super) fn needs_message_contents(&self) -> bool {
         self.conditions
             .iter()
             .any(CompiledCondition::needs_message_contents)
@@ -300,7 +342,7 @@ impl CompiledNode {
                 CompiledAction::Pipe { .. } => true,
                 CompiledAction::Deliver { .. } => false,
                 CompiledAction::Block(sequence) => sequence.needs_message_contents(),
-                CompiledAction::HeadersUnsupported => false,
+                CompiledAction::Headers(_) => false,
             }
     }
 }

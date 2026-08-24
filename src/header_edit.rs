@@ -19,13 +19,11 @@ impl EditedHeader {
         &self.bytes
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn into_bytes_for_body(self, body_len: usize) -> Result<Vec<u8>, HeaderEditError> {
         validate_edited_header(&self.bytes, body_len, self.limits)?;
         Ok(self.bytes)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn into_streaming_bytes(self) -> Vec<u8> {
         self.bytes
     }
@@ -88,7 +86,6 @@ impl EditedField<'_> {
 /// including folded continuation lines. `set` replaces the first matching
 /// field at its existing position and deletes later duplicates; when absent,
 /// it appends the field. `add` appends and `prepend` inserts at the beginning.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn apply_header_action(
     header: &[u8],
     body_len: usize,
@@ -445,7 +442,8 @@ mod tests {
         }]);
 
         let edited = apply(head.as_bytes(), 0, &action);
-        let head = head.with_edited_header(edited);
+        let mut head = head;
+        head.replace_edited_header(edited);
         assert_eq!(reader.stream_position().unwrap(), body_position);
 
         let message = head.read_body(&mut reader).unwrap();

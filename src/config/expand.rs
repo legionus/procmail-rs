@@ -122,7 +122,6 @@ impl RcFileExpression {
 }
 
 impl HeaderValue {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn resolve_with(
         &self,
         line: usize,
@@ -139,6 +138,26 @@ impl HeaderValue {
             evaluate_with_linebuf(expression, line, MAX_ASSIGNMENT_VALUE_LEN, &mut lookup)?.text;
         validate_header_value(&value, line)?;
         Ok(value)
+    }
+}
+
+impl HeaderAction {
+    pub(crate) fn resolve_with(
+        &self,
+        mut lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Self, ExpansionError> {
+        let mut resolved = self.clone();
+        for operation in &mut resolved.operations {
+            let (line, value) = match operation {
+                HeaderOperation::Remove { .. } => continue,
+                HeaderOperation::Set { line, value, .. }
+                | HeaderOperation::Add { line, value, .. }
+                | HeaderOperation::Prepend { line, value, .. } => (*line, value),
+            };
+            value.source = value.resolve_with(line, &mut lookup)?;
+            value.expansion = None;
+        }
+        Ok(resolved)
     }
 }
 
@@ -533,10 +552,6 @@ fn expand_recipe(
         RecipeAction::Pipe(_) => {}
         RecipeAction::Headers(action) => {
             prepare_header_action(action, variables, &BTreeSet::new())?;
-            return Err(ExpansionError::new(
-                recipe.action_line,
-                "headers actions are parsed but not executable yet",
-            ));
         }
         RecipeAction::Block(statements) => {
             prepare_runtime_statements(statements, variables, &mut BTreeSet::new(), maildir)?;
@@ -678,10 +693,6 @@ fn prepare_runtime_recipe(
         RecipeAction::Pipe(_) => {}
         RecipeAction::Headers(action) => {
             prepare_header_action(action, known, dynamic)?;
-            return Err(ExpansionError::new(
-                recipe.action_line,
-                "headers actions are parsed but not executable yet",
-            ));
         }
         RecipeAction::Block(children) => {
             let mut child_dynamic = dynamic.clone();

@@ -278,11 +278,12 @@ fn run() -> Result<u8, OperationalError> {
             runtime.set_system_hostname(hostname);
             let mut trace = NoTrace;
             let mut stdin = io::stdin().lock();
-            let head = Message::read_headers(&mut stdin, limits).map_err(|error| {
+            let mut head = Message::read_headers(&mut stdin, limits).map_err(|error| {
                 OperationalError::Input(format!("cannot read message headers from stdin: {error}"))
             })?;
             let delivery_result =
-                match plan.evaluate_headers_with_trace(&head, &mut runtime, &mut trace) {
+                match plan.evaluate_headers_editing_with_trace(&mut head, &mut runtime, &mut trace)
+                {
                     HeaderEvaluation::Decided(delivery) => deliver_decided(
                         head,
                         &mut stdin,

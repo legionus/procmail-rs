@@ -72,8 +72,22 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> HeaderEvaluation {
+        let mut head = head.clone();
+        self.evaluate_headers_editing_with_trace(&mut head, runtime, trace)
+    }
+
+    pub fn evaluate_headers_editing_with_trace(
+        &self,
+        head: &mut MessageHead,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+    ) -> HeaderEvaluation {
         let initial_runtime = runtime.clone();
-        if self.requires_ordered_delivery {
+        // Actions such as pipes and locked delivery need the complete message
+        // before any recipe is executed. Header editing is deliberately not
+        // included here: it can safely update the bounded MessageHead and let
+        // the existing streaming path forward the untouched body afterwards.
+        if self.requires_preemptive_ordered_delivery {
             return HeaderEvaluation::NeedsMessage(Continuation {
                 frames: vec![ContinuationFrame {
                     recipe_index: 0,
@@ -381,7 +395,7 @@ impl CompiledSequence {
 
     fn plan_headers(
         &self,
-        head: &MessageHead,
+        head: &mut MessageHead,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
         planning: &mut HeaderPlanState,
@@ -451,8 +465,22 @@ impl CompiledSequence {
                     CompiledAction::Pipe { .. } => {
                         return Err(EvalError::ExternalActionUnsupported { line: recipe.line });
                     }
-                    CompiledAction::HeadersUnsupported => {
-                        return Err(EvalError::HeaderActionUnsupported { line: recipe.line });
+                    CompiledAction::Headers(action) => {
+                        let action = action
+                            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                            .map_err(EvalError::Expansion)?;
+                        let edited = crate::header_edit::apply_header_action(
+                            head.as_bytes(),
+                            0,
+                            &action,
+                            head.limits(),
+                        )
+                        .map_err(|error| EvalError::HeaderEdit {
+                            line: recipe.line,
+                            message: error.to_string(),
+                        })?;
+                        head.replace_edited_header(edited);
+                        HeaderControl::Continue
                     }
                     CompiledAction::Deliver { .. } => {
                         let control = recipe.plan_delivery(
@@ -701,7 +729,7 @@ impl CompiledNode {
                     )
             }
             CompiledAction::Block(_) => false,
-            CompiledAction::HeadersUnsupported => true,
+            CompiledAction::Headers(_) => false,
         }
     }
 
@@ -727,7 +755,7 @@ impl CompiledNode {
                 }
                 children.plan_complete(message, runtime, trace, execution, context)
             }
-            CompiledAction::HeadersUnsupported => {
+            CompiledAction::Headers(_) => {
                 Err(EvalError::HeaderActionUnsupported { line: self.line })
             }
         }
@@ -838,7 +866,7 @@ fn plan_statements_complete(
 
 fn plan_statements_headers(
     statements: &[CompiledStatement],
-    head: &MessageHead,
+    head: &mut MessageHead,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
     planning: &mut HeaderPlanState,
@@ -859,7 +887,7 @@ fn plan_statements_headers(
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;
                 if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded() {
-                    if sequence.requires_ordered_delivery() {
+                    if sequence.requires_preemptive_ordered_delivery() {
                         planning.frames.clear();
                         planning.restart = true;
                         planning.requirements =
@@ -908,7 +936,7 @@ fn plan_statements_headers(
                     LoadedRuntimeRc::Failed => {}
                     LoadedRuntimeRc::Empty => return Ok(HeaderControl::EndRcFile),
                     LoadedRuntimeRc::Sequence(sequence) => {
-                        if sequence.requires_ordered_delivery() {
+                        if sequence.requires_preemptive_ordered_delivery() {
                             planning.frames.clear();
                             planning.restart = true;
                             planning.requirements =

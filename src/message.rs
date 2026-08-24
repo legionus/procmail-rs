@@ -32,9 +32,14 @@ pub struct StreamedMessage {
 }
 
 impl Message {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn with_edited_header(&self, edited: EditedHeader) -> Result<Self, HeaderEditError> {
-        let body = self.body();
+        Self::from_edited_header(edited, self.body())
+    }
+
+    pub(crate) fn from_edited_header(
+        edited: EditedHeader,
+        body: &[u8],
+    ) -> Result<Self, HeaderEditError> {
         let header = edited.into_bytes_for_body(body.len())?;
         let total = header
             .len()
@@ -186,11 +191,13 @@ impl Message {
 }
 
 impl MessageHead {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn with_edited_header(mut self, edited: EditedHeader) -> Self {
+    pub(crate) fn replace_edited_header(&mut self, edited: EditedHeader) {
         self.raw = edited.into_streaming_bytes();
         self.matching_header = normalize_folded_header(&self.raw);
-        self
+    }
+
+    pub(crate) fn limits(&self) -> MessageLimits {
+        self.limits
     }
 
     pub fn as_bytes(&self) -> &[u8] {

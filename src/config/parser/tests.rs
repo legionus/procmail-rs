@@ -1477,15 +1477,9 @@ fn rejects_unclosed_header_action() {
 }
 
 #[test]
-fn rejects_parsed_header_action_during_preparation_for_now() {
+fn prepares_parsed_header_action_for_execution() {
     let config = parse(":0\nheaders {\n remove X-Test\n}\n").unwrap();
-    let error = config.expand().unwrap_err();
-
-    assert_eq!(error.line, 2);
-    assert_eq!(
-        error.to_string(),
-        "line 2: headers actions are parsed but not executable yet"
-    );
+    assert!(config.expand().is_ok());
 }
 
 #[test]

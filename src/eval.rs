@@ -5,6 +5,7 @@ use crate::config::{
     Assignment, AssignmentTarget, ConditionInput, Config, ContinuationMode, ControlFlow,
     Destination, OutputEnding, PipeAction, RecipeOptions,
 };
+use crate::limits::MessageLimits;
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::rc_file::RcFileLoader;
 use crate::runtime::RuntimeVariables;
@@ -70,6 +71,8 @@ impl InputRequirements {
 pub struct ExecutionPlan {
     root: CompiledSequence,
     requires_ordered_delivery: bool,
+    requires_preemptive_ordered_delivery: bool,
+    message_limits: Result<MessageLimits, String>,
     runtime_rc: RuntimeRcState,
 }
 
@@ -241,10 +244,13 @@ impl ExecutionPlan {
             .collect::<Vec<_>>();
         let root = CompiledSequence::compile(&config.statements, &mut initial_statements);
         let requires_ordered_delivery = root.requires_ordered_delivery();
+        let requires_preemptive_ordered_delivery = root.requires_preemptive_ordered_delivery();
 
         Self {
             root,
             requires_ordered_delivery,
+            requires_preemptive_ordered_delivery,
+            message_limits: MessageLimits::from_config(config).map_err(|error| error.to_string()),
             runtime_rc: RuntimeRcState::new(loader),
         }
     }
@@ -263,7 +269,7 @@ impl ExecutionPlan {
             requirements.needs_body_contents = true;
             requirements.needs_end_of_message = true;
         }
-        if self.requires_ordered_delivery() {
+        if self.requires_preemptive_ordered_delivery {
             requirements.union(InputRequirements {
                 needs_end_of_message: true,
                 ..InputRequirements::default()

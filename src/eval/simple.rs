@@ -13,8 +13,8 @@ struct SequenceExecution {
 impl CompiledSequence {
     fn execute(
         &self,
-        message: &Message,
-        matching: CompleteMessage<'_>,
+        message: &mut Message,
+        limits: MessageLimits,
         delivery: &mut impl Delivery,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
@@ -31,6 +31,14 @@ impl CompiledSequence {
             // Control-flow flags inspect only results produced at this block
             // level. Child sequences therefore cannot overwrite the state
             // used by the next sibling recipe.
+            let matching_full = recipe
+                .needs_message_contents()
+                .then(|| message.matching_message())
+                .flatten();
+            let matching = CompleteMessage::Buffered {
+                message,
+                matching_full: matching_full.as_deref(),
+            };
             let conditions_matched = recipe.execution_gate(state)
                 && recipe.matches_complete(matching, runtime, trace)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
@@ -40,7 +48,7 @@ impl CompiledSequence {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
-                recipe.execute_action(message, matching, delivery, runtime, trace, execution)?
+                recipe.execute_action(message, limits, delivery, runtime, trace, execution)?
             } else {
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
@@ -62,8 +70,8 @@ impl CompiledSequence {
 impl CompiledNode {
     fn execute_action(
         &self,
-        message: &Message,
-        matching: CompleteMessage<'_>,
+        message: &mut Message,
+        limits: MessageLimits,
         delivery: &mut impl Delivery,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
@@ -73,8 +81,29 @@ impl CompiledNode {
             CompiledAction::Pipe { .. } => {
                 Err(EvalError::ExternalActionUnsupported { line: self.line })
             }
-            CompiledAction::HeadersUnsupported => {
-                Err(EvalError::HeaderActionUnsupported { line: self.line })
+            CompiledAction::Headers(action) => {
+                let action = action
+                    .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                    .map_err(EvalError::Expansion)?;
+                let edited = crate::header_edit::apply_header_action(
+                    message.header(),
+                    message.body().len(),
+                    &action,
+                    limits,
+                )
+                .map_err(|error| EvalError::HeaderEdit {
+                    line: self.line,
+                    message: error.to_string(),
+                })?;
+                *message =
+                    message
+                        .with_edited_header(edited)
+                        .map_err(|error| EvalError::HeaderEdit {
+                            line: self.line,
+                            message: error.to_string(),
+                        })?;
+                execution.pending_error = None;
+                Ok((ActionExecution::Succeeded, SequenceControl::Continue))
             }
             CompiledAction::Deliver {
                 destination,
@@ -118,7 +147,7 @@ impl CompiledNode {
                 // empty or fully skipped block can still complete normally.
                 execution.pending_error = None;
                 let control =
-                    children.execute(message, matching, delivery, runtime, trace, execution)?;
+                    children.execute(message, limits, delivery, runtime, trace, execution)?;
                 let action = if execution.pending_error.is_some() {
                     ActionExecution::Failed
                 } else {
@@ -136,22 +165,19 @@ pub fn evaluate(
     delivery: &mut impl Delivery,
 ) -> Result<Outcome, EvalError> {
     let plan = ExecutionPlan::compile(config);
-    let matching_full = plan
-        .needs_message_contents()
-        .then(|| message.matching_message())
-        .flatten();
-    let matching = CompleteMessage::Buffered {
-        message,
-        matching_full: matching_full.as_deref(),
-    };
+    let limits = plan
+        .message_limits
+        .clone()
+        .map_err(EvalError::MessageLimits)?;
+    let mut message = message.clone();
     let mut execution = SequenceExecution {
         deliveries: 0,
         original_delivered: false,
         pending_error: None,
     };
     plan.root.execute(
-        message,
-        matching,
+        &mut message,
+        limits,
         delivery,
         &mut RuntimeVariables::default(),
         &mut NoTrace,

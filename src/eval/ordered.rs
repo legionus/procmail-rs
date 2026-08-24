@@ -17,6 +17,7 @@ struct OrderedTreeExecution<'a, E, D, T> {
     global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
     local_lock: Option<&'a mut LocalLockExecutor<'a, E>>,
     rc: RcExecutionContext<'a>,
+    limits: MessageLimits,
 }
 
 pub trait RecipeLockGuard {}
@@ -198,9 +199,38 @@ impl CompiledNode {
         T: TraceSink,
     {
         match &self.action {
-            CompiledAction::HeadersUnsupported => Err(OrderedExecutionError::Evaluation(
-                EvalError::HeaderActionUnsupported { line: self.line },
-            )),
+            CompiledAction::Headers(action) => {
+                let message =
+                    current_ordered_message(context.message, context.replacement.as_ref());
+                let body = message
+                    .body()
+                    .ok_or(EvalError::BodyWasNotBuffered)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                let action = action
+                    .resolve_with(|name| context.runtime.get(name).map(str::to_owned))
+                    .map_err(EvalError::Expansion)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                let edited = crate::header_edit::apply_header_action(
+                    message.raw_header(),
+                    body.len(),
+                    &action,
+                    context.limits,
+                )
+                .map_err(|error| EvalError::HeaderEdit {
+                    line: self.line,
+                    message: error.to_string(),
+                })
+                .map_err(OrderedExecutionError::Evaluation)?;
+                let message = Message::from_edited_header(edited, body)
+                    .map_err(|error| EvalError::HeaderEdit {
+                        line: self.line,
+                        message: error.to_string(),
+                    })
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                context.replace_message(message);
+                context.pending_error = None;
+                Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+            }
             CompiledAction::Pipe { action, options } => {
                 let message =
                     current_ordered_message(context.message, context.replacement.as_ref());
@@ -703,6 +733,11 @@ impl ExecutionPlan {
             global_lock: executors.global_lock,
             local_lock: executors.local_lock,
             rc: self.rc_context(),
+            limits: self
+                .message_limits
+                .clone()
+                .map_err(EvalError::MessageLimits)
+                .map_err(OrderedExecutionError::Evaluation)?,
         };
         let execution = self.root.execute_ordered(&mut context);
         let result = match execution {
