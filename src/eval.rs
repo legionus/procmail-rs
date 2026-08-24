@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use std::cell::{Cell, RefCell};
 use std::fmt;
 
 use crate::config::{
     Assignment, AssignmentTarget, ConditionInput, Config, ContinuationMode, ControlFlow,
-    Destination, OutputEnding, PipeAction, RcFileExpression, Recipe, RecipeAction, RecipeOptions,
-    Statement,
+    Destination, OutputEnding, PipeAction, Recipe, RecipeAction, RecipeOptions, Statement,
 };
 use crate::message::{Message, MessageHead, StreamedMessage};
-use crate::rc_file::{MAX_RC_TRANSITIONS, RcFileLoader};
+use crate::rc_file::RcFileLoader;
 use crate::runtime::RuntimeVariables;
 use crate::trace::{
     NoTrace, RecipeDecision, TraceEvent, TraceName, TraceSink, TraceValue,
@@ -19,15 +17,17 @@ use crate::trace::{
 
 mod condition;
 mod message;
+mod runtime_rc;
 
 use condition::{CompiledCondition, PartialMatch, compile_conditions};
 use message::{
     CompleteMessage, OwnedCompleteMessage, current_ordered_message, matching_views_are_valid,
 };
 pub use message::{ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage};
-
-const MAX_RC_DIAGNOSTIC_LEN: usize = 1024;
-pub const MAX_RUNTIME_RC_WARNINGS: usize = 128;
+pub use runtime_rc::MAX_RUNTIME_RC_WARNINGS;
+use runtime_rc::{
+    CompiledInclude, CompiledSwitch, LoadedRuntimeRc, RcExecutionContext, RuntimeRcState,
+};
 
 pub trait Delivery {
     fn deliver(&mut self, destination: &Destination, message: &Message) -> Result<(), String>;
@@ -54,13 +54,7 @@ impl InputRequirements {
 pub struct ExecutionPlan {
     root: CompiledSequence,
     requires_ordered_delivery: bool,
-    runtime_rc: RefCell<Option<RcFileLoader>>,
-    rc_transitions: Cell<usize>,
-    dynamic_ordered_delivery: Cell<bool>,
-    dynamic_message_contents: Cell<bool>,
-    rc_diagnostics: RefCell<Vec<String>>,
-    rc_warning_count: Cell<usize>,
-    rc_warnings_omitted: Cell<bool>,
+    runtime_rc: RuntimeRcState,
 }
 
 #[derive(Debug)]
@@ -119,51 +113,6 @@ fn assignment_requires_ordered_message(statement: &CompiledStatement) -> bool {
                 || assignment.assignment.target == AssignmentTarget::Trap
                     && !assignment.assignment.value.is_empty()
     )
-}
-
-#[derive(Debug)]
-struct CompiledInclude {
-    expression: RcFileExpression,
-    loaded: RefCell<LoadedRuntimeRc>,
-}
-
-#[derive(Debug)]
-struct CompiledSwitch {
-    expression: RcFileExpression,
-    loaded: RefCell<LoadedRuntimeRc>,
-}
-
-#[derive(Debug, Default)]
-enum LoadedRuntimeRc {
-    #[default]
-    Unloaded,
-    Empty,
-    Failed,
-    Sequence(Box<CompiledSequence>),
-}
-
-#[derive(Clone, Copy)]
-struct RcExecutionContext<'a> {
-    loader: &'a RefCell<Option<RcFileLoader>>,
-    transitions: &'a Cell<usize>,
-    dynamic_ordered_delivery: &'a Cell<bool>,
-    dynamic_message_contents: &'a Cell<bool>,
-    diagnostics: &'a RefCell<Vec<String>>,
-    warning_count: &'a Cell<usize>,
-    warnings_omitted: &'a Cell<bool>,
-    depth: usize,
-}
-
-impl RcExecutionContext<'_> {
-    fn push_warning(self, diagnostic: String) {
-        let count = self.warning_count.get();
-        if count < MAX_RUNTIME_RC_WARNINGS {
-            self.diagnostics.borrow_mut().push(diagnostic);
-            self.warning_count.set(count + 1);
-        } else {
-            self.warnings_omitted.set(true);
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -619,137 +568,6 @@ impl fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
-fn truncate_utf8(value: &mut String, limit: usize) {
-    if value.len() <= limit {
-        return;
-    }
-    let mut end = limit;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
-}
-
-impl RcExecutionContext<'_> {
-    fn descend(self) -> Result<Self, EvalError> {
-        let depth = self
-            .depth
-            .checked_add(1)
-            .ok_or_else(|| EvalError::RuntimeRc("rc include depth overflows".to_owned()))?;
-        Ok(Self { depth, ..self })
-    }
-
-    fn record_transition(self) -> Result<(), EvalError> {
-        let transitions = self
-            .transitions
-            .get()
-            .checked_add(1)
-            .ok_or_else(|| EvalError::RuntimeRc("rc transition count overflows".to_owned()))?;
-        if transitions > MAX_RC_TRANSITIONS {
-            return Err(EvalError::RuntimeRc(format!(
-                "rc transitions exceed the hard limit of {MAX_RC_TRANSITIONS}"
-            )));
-        }
-        self.transitions.set(transitions);
-        Ok(())
-    }
-}
-
-impl CompiledInclude {
-    fn ensure_loaded(
-        &self,
-        runtime: &RuntimeVariables,
-        context: RcExecutionContext<'_>,
-    ) -> Result<(), EvalError> {
-        load_runtime_rc(
-            &self.expression,
-            &self.loaded,
-            "INCLUDERC",
-            runtime,
-            context,
-        )
-    }
-}
-
-impl CompiledSwitch {
-    fn ensure_loaded(
-        &self,
-        runtime: &RuntimeVariables,
-        context: RcExecutionContext<'_>,
-    ) -> Result<(), EvalError> {
-        load_runtime_rc(&self.expression, &self.loaded, "SWITCHRC", runtime, context)
-    }
-}
-
-fn load_runtime_rc(
-    expression: &RcFileExpression,
-    loaded_state: &RefCell<LoadedRuntimeRc>,
-    statement: &'static str,
-    runtime: &RuntimeVariables,
-    context: RcExecutionContext<'_>,
-) -> Result<(), EvalError> {
-    context.record_transition()?;
-    if !matches!(*loaded_state.borrow(), LoadedRuntimeRc::Unloaded) {
-        return Ok(());
-    }
-    let child_context = context.descend()?;
-    let loaded = context
-        .loader
-        .borrow_mut()
-        .as_mut()
-        .ok_or(EvalError::RuntimeRcLoaderUnavailable {
-            line: expression.line,
-            statement,
-        })?
-        .load_config(expression, runtime, child_context.depth);
-    let loaded = match loaded {
-        Ok(loaded) => loaded,
-        Err(error) if error.is_resource_limit() => {
-            return Err(EvalError::RuntimeRc(format!(
-                "line {}: {statement} resource limit: {}",
-                expression.line,
-                error.safe_message()
-            )));
-        }
-        Err(error) => {
-            let mut diagnostic = format!(
-                "line {}: {statement} failed: {}",
-                expression.line,
-                error.safe_message()
-            );
-            truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
-            context.diagnostics.borrow_mut().push(diagnostic);
-            *loaded_state.borrow_mut() = LoadedRuntimeRc::Failed;
-            return Ok(());
-        }
-    };
-    let Some(loaded) = loaded else {
-        *loaded_state.borrow_mut() = LoadedRuntimeRc::Empty;
-        return Ok(());
-    };
-    loaded
-        .config()
-        .for_each_compatibility_warning(|line, flag| {
-            let mut diagnostic = format!(
-                "warning: {}:{line}: recipe flag '{flag}' has no effect on a block",
-                loaded.path().display()
-            );
-            truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
-            context.push_warning(diagnostic);
-        });
-    let mut preceding = Vec::new();
-    let sequence = CompiledSequence::compile(&loaded.into_config().statements, &mut preceding);
-    let requirements = sequence.requirements();
-    if requirements.needs_body_contents {
-        context.dynamic_message_contents.set(true);
-    }
-    if sequence.requires_ordered_delivery() {
-        context.dynamic_ordered_delivery.set(true);
-    }
-    *loaded_state.borrow_mut() = LoadedRuntimeRc::Sequence(Box::new(sequence));
-    Ok(())
-}
-
 impl CompiledSequence {
     fn compile(statements: &[Statement], preceding: &mut Vec<CompiledStatement>) -> Self {
         let mut recipes = Vec::new();
@@ -771,16 +589,14 @@ impl CompiledSequence {
                     recipes.push(CompiledNode::compile(recipe, std::mem::take(preceding)));
                 }
                 Statement::Include(expression) => {
-                    preceding.push(CompiledStatement::Include(CompiledInclude {
-                        expression: expression.clone(),
-                        loaded: RefCell::new(LoadedRuntimeRc::Unloaded),
-                    }));
+                    preceding.push(CompiledStatement::Include(CompiledInclude::new(
+                        expression.clone(),
+                    )));
                 }
                 Statement::Switch(expression) => {
-                    preceding.push(CompiledStatement::Switch(CompiledSwitch {
-                        expression: expression.clone(),
-                        loaded: RefCell::new(LoadedRuntimeRc::Unloaded),
-                    }));
+                    preceding.push(CompiledStatement::Switch(CompiledSwitch::new(
+                        expression.clone(),
+                    )));
                 }
             }
         }
@@ -1971,13 +1787,13 @@ fn execute_statements(
             }
             CompiledStatement::Include(include) => {
                 return Err(EvalError::RuntimeRcLoaderUnavailable {
-                    line: include.expression.line,
+                    line: include.line(),
                     statement: "INCLUDERC",
                 });
             }
             CompiledStatement::Switch(switch) => {
                 return Err(EvalError::RuntimeRcLoaderUnavailable {
-                    line: switch.expression.line,
+                    line: switch.line(),
                     statement: "SWITCHRC",
                 });
             }
@@ -2047,7 +1863,7 @@ fn plan_statements_complete(
             }
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;
-                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded.borrow()
+                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded()
                     && sequence.plan_complete_with_context(
                         message,
                         runtime,
@@ -2065,7 +1881,7 @@ fn plan_statements_complete(
                 // INCLUDERC boundary consumes that result and resumes its
                 // caller, while the root treats it as end of processing.
                 switch.ensure_loaded(runtime, context)?;
-                match &*switch.loaded.borrow() {
+                match &*switch.loaded() {
                     LoadedRuntimeRc::Unloaded => unreachable!(),
                     LoadedRuntimeRc::Failed => {}
                     LoadedRuntimeRc::Empty => return Ok(SequenceControl::EndRcFile),
@@ -2139,7 +1955,7 @@ where
                 include
                     .ensure_loaded(context.runtime, context.rc)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded.borrow() {
+                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded() {
                     let previous = context.rc;
                     context.rc = previous
                         .descend()
@@ -2159,7 +1975,7 @@ where
                 switch
                     .ensure_loaded(context.runtime, context.rc)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                match &*switch.loaded.borrow() {
+                match &*switch.loaded() {
                     LoadedRuntimeRc::Unloaded => unreachable!(),
                     LoadedRuntimeRc::Failed => {}
                     LoadedRuntimeRc::Empty => return Ok(SequenceControl::EndRcFile),
@@ -2206,7 +2022,7 @@ fn plan_statements_headers(
             }
             CompiledStatement::Include(include) => {
                 include.ensure_loaded(runtime, context)?;
-                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded.borrow() {
+                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded() {
                     if sequence.requires_ordered_delivery() {
                         planning.frames.clear();
                         planning.restart = true;
@@ -2251,7 +2067,7 @@ fn plan_statements_headers(
                 // successful switch. If the dynamic target needs the body,
                 // restart from the private root plan after staging it.
                 switch.ensure_loaded(runtime, context)?;
-                match &*switch.loaded.borrow() {
+                match &*switch.loaded() {
                     LoadedRuntimeRc::Unloaded => unreachable!(),
                     LoadedRuntimeRc::Failed => {}
                     LoadedRuntimeRc::Empty => return Ok(HeaderControl::EndRcFile),
@@ -2340,41 +2156,21 @@ impl ExecutionPlan {
         Self {
             root,
             requires_ordered_delivery,
-            runtime_rc: RefCell::new(loader),
-            rc_transitions: Cell::new(0),
-            dynamic_ordered_delivery: Cell::new(false),
-            dynamic_message_contents: Cell::new(false),
-            rc_diagnostics: RefCell::new(Vec::new()),
-            rc_warning_count: Cell::new(0),
-            rc_warnings_omitted: Cell::new(false),
+            runtime_rc: RuntimeRcState::new(loader),
         }
     }
 
     fn rc_context(&self) -> RcExecutionContext<'_> {
-        RcExecutionContext {
-            loader: &self.runtime_rc,
-            transitions: &self.rc_transitions,
-            dynamic_ordered_delivery: &self.dynamic_ordered_delivery,
-            dynamic_message_contents: &self.dynamic_message_contents,
-            diagnostics: &self.rc_diagnostics,
-            warning_count: &self.rc_warning_count,
-            warnings_omitted: &self.rc_warnings_omitted,
-            depth: 0,
-        }
+        self.runtime_rc.context()
     }
 
     pub fn take_rc_diagnostics(&self) -> Vec<String> {
-        let mut diagnostics = std::mem::take(&mut *self.rc_diagnostics.borrow_mut());
-        if self.rc_warnings_omitted.replace(false) {
-            diagnostics.push("warning: additional runtime rc warnings were omitted".to_owned());
-        }
-        self.rc_warning_count.set(0);
-        diagnostics
+        self.runtime_rc.take_diagnostics()
     }
 
     pub fn requirements(&self) -> InputRequirements {
         let mut requirements = self.root.requirements();
-        if self.dynamic_message_contents.get() {
+        if self.runtime_rc.needs_message_contents() {
             requirements.needs_body_contents = true;
             requirements.needs_end_of_message = true;
         }
@@ -2389,11 +2185,11 @@ impl ExecutionPlan {
     }
 
     pub fn requires_ordered_delivery(&self) -> bool {
-        self.requires_ordered_delivery || self.dynamic_ordered_delivery.get()
+        self.requires_ordered_delivery || self.runtime_rc.requires_ordered_delivery()
     }
 
     pub fn needs_message_contents(&self) -> bool {
-        self.root.needs_message_contents() || self.dynamic_message_contents.get()
+        self.root.needs_message_contents() || self.runtime_rc.needs_message_contents()
     }
 
     pub fn explain(&self) -> PlanExplanation {
@@ -2939,7 +2735,7 @@ impl ExecutionPlan {
         let mut execution = continuation.execution;
 
         if continuation.restart {
-            self.rc_transitions.set(0);
+            self.runtime_rc.reset_transitions();
             self.root
                 .plan_complete(message, runtime, trace, &mut execution, self.rc_context())?;
             return Ok(DeliveryPlan {
