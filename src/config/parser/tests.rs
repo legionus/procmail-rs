@@ -472,6 +472,12 @@ fn rejects_unsupported_flag() {
 }
 
 #[test]
+fn non_ascii_regex_bytes_do_not_become_string_slice_offsets() {
+    let source = ":0\n* é^TO\nmaildir:target\n";
+    let _ = parse(source);
+}
+
+#[test]
 fn accepts_chain_flags_but_rejects_their_combination() {
     assert!(parse(":0 A\nmaildir:after-match\n").is_ok());
     assert!(parse(":0 a\nmaildir:after-success\n").is_ok());

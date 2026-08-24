@@ -879,7 +879,7 @@ fn expand_reserved_procmail_regex_forms(
             .then(|| {
                 FORMS
                     .iter()
-                    .find(|(name, _, _)| pattern[index..].starts_with(name))
+                    .find(|(name, _, _)| bytes[index..].starts_with(name.as_bytes()))
             })
             .flatten();
         if let Some((name, value, insensitive)) = replacement {
