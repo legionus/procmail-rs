@@ -36,7 +36,7 @@ rejected explicitly or is an ordinary user variable assignment.
 | Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
 | Conditions | Byte regex, leading `!` negation, `? shell command`, `< size`, `> size`, `H ?? regex`, `B ?? regex`, and `$NAME ?? regex` |
-| Actions | Explicit Maildir or mbox delivery, trusted shell pipe action, and `{ ... }` block |
+| Actions | Explicit Maildir or mbox delivery, trusted shell pipe action, `{ ... }` block, and the procmail-rs `headers { ... }` extension |
 | Regex additions | Procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `\+`, `\?`, `\|`, capture assignment with `\/`, and numbered `MATCH1` through the configured capture ceiling |
 | Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
 | External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
@@ -50,6 +50,61 @@ therefore follow that shell rather than an internal command tokenizer. Rc
 variable expansion remains the limited syntax listed above and does not become
 general shell evaluation.
 
+## Native header editing extension
+
+`headers { ... }` is a procmail-rs action for common header-only changes that
+would otherwise require a pipe through `formail`. It is deliberately not
+procmail syntax. A selected action applies every operation in source order and
+then continues with the following recipe:
+
+```text
+:0
+headers {
+    remove X-Old-Status
+    set X-Filter-Status: checked
+    add X-Filter-Result: clean
+    prepend X-Processed-By: procmail-rs
+}
+```
+
+Field names are matched without regard to ASCII case. The operations behave as
+follows:
+
+| Operation | Behavior |
+| --- | --- |
+| `remove NAME` | Removes every field named `NAME`, including all continuation lines belonging to a folded field. |
+| `set NAME: VALUE` | Replaces the first matching field at its existing position and removes later duplicates. Appends a new field when none exists. |
+| `add NAME: VALUE` | Appends a new field even when fields with the same name already exist. Repeated additions retain source order. |
+| `prepend NAME: VALUE` | Inserts a new field before every current field. A later `prepend` therefore appears before an earlier one. |
+
+`NAME` must be non-empty printable ASCII without `:`. `VALUE` uses the bounded
+rc expansion forms `$NAME`, `${NAME}`, and `${NAME:-expression}` when the
+action executes. NUL, CR, LF, and requested folded continuations are rejected.
+Inserted values are not reparsed as shell text. Existing fields and the body
+remain byte-for-byte unchanged. New fields use the first physical header
+line's LF or CRLF ending, or the separator's ending when the header is empty.
+
+The condition and control flags `H`, `B`, `D`, `c`, `A`, `a`, `E`, and `e` are
+accepted with their usual meanings. The action always continues after a
+successful edit, so `c` does not change its behavior. Action flags `h`, `b`,
+`f`, `w`, `W`, `i`, and `r`, as well as local lockfiles, are rejected because
+the action neither invokes a child nor publishes a destination.
+
+The complete edited header is checked against `LIMIT_MSG_SIZE`,
+`LIMIT_MSG_HEADERS`, `LIMIT_HEADER_LINE`, and `LIMIT_HEADER_FIELD` before it
+becomes visible. If expansion, validation, or a limit check fails, the earlier
+message remains selected. Later conditions, runtime rc files, external
+actions, and delivery see the edited header. A header-only path can still
+stream the untouched body without retaining it.
+
+This action is not a complete built-in replacement for `formail`. It does not
+extract or rename fields, generate addresses or message identifiers, split
+digests, rewrite the body, or implement other `formail` options. In particular,
+the common `formail -I NAME:` removal idiom maps to `remove NAME`; `set NAME:`
+creates an empty field. Unlike a `formail -I` filter, `set` keeps the position
+of the first matching field. Use a trusted pipe action when broader `formail`
+behavior is required.
+
 Reserved procmail variables `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `LOG`,
 `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`,
 `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` are rejected by name. Forward actions
@@ -60,6 +115,7 @@ instead of silently assigning it another meaning.
 
 | Area | procmail 3.22 | procmail-rs |
 | --- | --- | --- |
+| Native header editing | Requires an external filter such as `formail`; there is no `headers { ... }` action. | Provides the bounded `headers` extension described above. Rc files using it are intentionally not accepted by procmail 3.22. |
 | Destination type and directory delivery | May infer a directory or mailbox from the current filesystem. | Never infers a backend from the filesystem. Requires `maildir:PATH` or a trailing `/` for a Maildir containing `tmp`, `new`, and `cur`, and requires `mbox:PATH` for mbox delivery. |
 | Default delivery | Can fall back to `DEFAULT`, `ORGMAIL`, or the system mailbox. | Never selects an implicit destination. An undelivered original is an error. |
 | Forwarding | A `!` action forwards through the configured sendmail command. | Rejected before message input; procmail-rs never forwards or invokes sendmail implicitly. |
