@@ -2,6 +2,7 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use super::*;
+use std::os::unix::ffi::OsStrExt;
 
 #[test]
 fn builds_only_defaults_and_explicit_runtime_values() {
@@ -22,6 +23,20 @@ fn builds_only_defaults_and_explicit_runtime_values() {
         Some(crate::config::DEFAULT_LOCK_EXT)
     );
     assert_eq!(environment.values().count(), 8);
+}
+
+#[test]
+fn exports_non_utf8_runtime_values_without_replacement() {
+    let mut runtime = RuntimeVariables::default();
+    runtime.set_bytes("BINARY", vec![b'a', 0xff, b'z']);
+    let environment = ProcessEnvironment::from_runtime(&runtime).unwrap();
+    let value = environment
+        .values()
+        .find_map(|(name, value)| (name == "BINARY").then_some(value))
+        .unwrap();
+
+    assert_eq!(value.as_bytes(), b"a\xffz");
+    assert_eq!(environment.get("BINARY"), None);
 }
 
 #[test]

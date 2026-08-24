@@ -10,6 +10,7 @@ use crate::trace::{NoTrace, TraceEvent, TraceSink};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeVariables {
     values: BTreeMap<String, String>,
+    byte_values: BTreeMap<String, Vec<u8>>,
     system_hostname: Option<String>,
 }
 
@@ -28,6 +29,7 @@ impl Default for RuntimeVariables {
         );
         Self {
             values,
+            byte_values: BTreeMap::new(),
             system_hostname: None,
         }
     }
@@ -42,7 +44,23 @@ impl RuntimeVariables {
         self.system_hostname.as_deref()
     }
     pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        self.values.insert(name.into(), value.into());
+        let name = name.into();
+        self.byte_values.remove(&name);
+        self.values.insert(name, value.into());
+    }
+
+    pub fn set_bytes(&mut self, name: impl Into<String>, value: Vec<u8>) {
+        let name = name.into();
+        match String::from_utf8(value) {
+            Ok(value) => {
+                self.byte_values.remove(&name);
+                self.values.insert(name, value);
+            }
+            Err(error) => {
+                self.values.remove(&name);
+                self.byte_values.insert(name, error.into_bytes());
+            }
+        }
     }
 
     pub fn last_folder(&self) -> Option<&str> {
@@ -53,8 +71,16 @@ impl RuntimeVariables {
         self.values.get(name).map(String::as_str)
     }
 
+    pub fn get_bytes(&self, name: &str) -> Option<&[u8]> {
+        self.byte_values
+            .get(name)
+            .map(Vec::as_slice)
+            .or_else(|| self.values.get(name).map(String::as_bytes))
+    }
+
     pub(crate) fn remove(&mut self, name: &str) {
         self.values.remove(name);
+        self.byte_values.remove(name);
     }
 
     pub(crate) fn values(&self) -> impl Iterator<Item = (&str, &str)> {
@@ -63,8 +89,25 @@ impl RuntimeVariables {
             .map(|(name, value)| (name.as_str(), value.as_str()))
     }
 
+    pub(crate) fn byte_values(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.values
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes()))
+            .chain(
+                self.byte_values
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_slice())),
+            )
+    }
+
     pub(crate) fn clear_match_values(&mut self) {
         self.values.retain(|name, _| {
+            name != "MATCH"
+                && !name.strip_prefix("MATCH").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        });
+        self.byte_values.retain(|name, _| {
             name != "MATCH"
                 && !name.strip_prefix("MATCH").is_some_and(|suffix| {
                     !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())

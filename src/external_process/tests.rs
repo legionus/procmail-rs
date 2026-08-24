@@ -331,6 +331,24 @@ fn capture_pumps_binary_input_and_output_concurrently() {
 }
 
 #[test]
+fn capture_exports_binary_runtime_values_to_the_shell() {
+    let mut runtime = RuntimeVariables::default();
+    runtime.set_bytes("BINARY", vec![b'a', 0xff, b'z']);
+    let (environment, policy) = enabled_shell(&runtime);
+    let run = run_capture_with_timeout(
+        &policy,
+        &environment,
+        "printf %s \"$BINARY\"",
+        b"",
+        CaptureOptions::new(OutputEnding::Preserve, 3),
+        Stdio::null(),
+    )
+    .unwrap();
+
+    assert_eq!(run.output().unwrap(), b"a\xffz");
+}
+
+#[test]
 fn capture_enforces_its_output_limit_at_the_boundary() {
     let (environment, policy) = enabled_shell(&RuntimeVariables::default());
     let limit = 1024usize;

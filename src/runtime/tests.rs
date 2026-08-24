@@ -24,6 +24,19 @@ fn default_runtime_uses_the_procmail_lock_extension() {
     );
 }
 
+#[test]
+fn preserves_binary_values_and_replaces_the_previous_representation() {
+    let mut runtime = RuntimeVariables::default();
+    runtime.set_bytes("VALUE", vec![b'a', 0xff, b'z']);
+
+    assert_eq!(runtime.get("VALUE"), None);
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"a\xffz"[..]));
+
+    runtime.set("VALUE", "text");
+    assert_eq!(runtime.get("VALUE"), Some("text"));
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"text"[..]));
+}
+
 struct NamedSink {
     name: &'static str,
     fail: bool,

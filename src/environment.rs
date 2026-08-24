@@ -2,7 +2,9 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt;
+use std::os::unix::ffi::OsStrExt;
 
 use crate::config::{
     MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING_LEN,
@@ -18,7 +20,7 @@ pub const MAX_CHILD_ENVIRONMENT_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessEnvironment {
-    values: BTreeMap<String, String>,
+    values: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +51,7 @@ impl ProcessEnvironment {
         // Build a fresh map instead of starting from std::env. This makes the
         // future spawn path independent of secrets and behavior-changing
         // values inherited by the procmail-rs process.
-        for (name, value) in runtime.values() {
+        for (name, value) in runtime.byte_values() {
             validate_entry(name, value)?;
             values.insert(name.to_owned(), value.to_owned());
         }
@@ -60,20 +62,22 @@ impl ProcessEnvironment {
         ] {
             values
                 .entry(name.to_owned())
-                .or_insert_with(|| value.to_owned());
+                .or_insert_with(|| value.as_bytes().to_vec());
         }
         validate_aggregate(&values)?;
         Ok(Self { values })
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(String::as_str)
+        self.values
+            .get(name)
+            .and_then(|value| std::str::from_utf8(value).ok())
     }
 
-    pub fn values(&self) -> impl Iterator<Item = (&str, &str)> {
+    pub fn values(&self) -> impl Iterator<Item = (&str, &OsStr)> {
         self.values
             .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .map(|(name, value)| (name.as_str(), OsStr::from_bytes(value)))
     }
 }
 
@@ -162,7 +166,7 @@ fn validate_shell_path(path: &str) -> Result<(), ShellPolicyError> {
     Ok(())
 }
 
-fn validate_entry(name: &str, value: &str) -> Result<(), ProcessEnvironmentError> {
+fn validate_entry(name: &str, value: &[u8]) -> Result<(), ProcessEnvironmentError> {
     if name.is_empty()
         || name.len() > MAX_ASSIGNMENT_NAME_LEN
         || !name.bytes().enumerate().all(|(index, byte)| {
@@ -171,7 +175,7 @@ fn validate_entry(name: &str, value: &str) -> Result<(), ProcessEnvironmentError
     {
         return Err(error("child environment contains an invalid variable name"));
     }
-    if value.as_bytes().contains(&0) {
+    if value.contains(&0) {
         return Err(error(format!(
             "child environment variable {name} contains NUL"
         )));
@@ -187,7 +191,7 @@ fn validate_entry(name: &str, value: &str) -> Result<(), ProcessEnvironmentError
     Ok(())
 }
 
-fn validate_aggregate(values: &BTreeMap<String, String>) -> Result<(), ProcessEnvironmentError> {
+fn validate_aggregate(values: &BTreeMap<String, Vec<u8>>) -> Result<(), ProcessEnvironmentError> {
     if values.len() > MAX_CHILD_ENVIRONMENT_VARIABLES {
         return Err(error(format!(
             "child environment variable count exceeds the hard limit of {MAX_CHILD_ENVIRONMENT_VARIABLES}"
