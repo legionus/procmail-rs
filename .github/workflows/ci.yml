@@ -1,0 +1,122 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  quality:
+    name: Stable build, lint, and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Check formatting
+        run: |
+          cargo +stable fmt --all -- --check
+          cargo +stable fmt --manifest-path fuzz/Cargo.toml --all -- --check
+      - name: Check the production targets
+        run: cargo +stable check --locked
+      - name: Run clippy
+        run: cargo +stable clippy --locked --all-targets -- -D warnings
+      - name: Run the complete test suite
+        run: cargo +stable test --locked
+      - name: Check patch whitespace
+        run: git diff --check
+
+  linux-32:
+    name: 32-bit Linux tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the 32-bit toolchain support
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-multilib
+          rustup toolchain install stable --profile minimal
+          rustup target add --toolchain stable i686-unknown-linux-gnu
+      - name: Run tests as 32-bit Linux executables
+        run: cargo +stable test --locked --target i686-unknown-linux-gnu
+
+  audit:
+    name: Dependencies, licenses, and unsafe audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      # Pin the audit frontends so a release of a development tool cannot
+      # silently change CI policy or its output parser between two revisions.
+      - name: Install audit tools
+        run: |
+          cargo +stable install --locked cargo-audit --version 0.22.2
+          cargo +stable install --locked cargo-deny --version 0.20.2
+          cargo +stable install --locked cargo-geiger --version 0.13.0
+      - name: Check advisories, licenses, sources, and duplicate versions
+        run: |
+          cargo +stable audit
+          cargo +stable deny check
+      # Check both the project total reported by geiger and the source block
+      # ceilings. This catches growth hidden inside either reviewed module.
+      - name: Check unsafe ceilings
+        run: |
+          cargo +stable geiger --locked --forbid-only
+          cargo +stable geiger --locked --output-format GitHubMarkdown | tee geiger.md
+          grep -Eq '18/18.*procmail-rs ' geiger.md
+          test "$(grep -Ec 'unsafe[[:space:]]*\{' src/mapped_file.rs)" -eq 3
+          test "$(grep -Ec 'unsafe[[:space:]]*\{' src/user_identity.rs)" -eq 3
+
+  fuzz:
+    name: Nightly fuzz smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nightly Rust and the fuzz frontend
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install --locked cargo-fuzz --version 0.13.2
+      # Keep the native libFuzzer dependency confined to the separate fuzz
+      # package; neither command changes the production dependency graph.
+      - name: Build and run bounded fuzz sessions
+        run: |
+          cargo +nightly fuzz build rc
+          cargo +nightly fuzz build message
+          cargo +nightly fuzz run rc -- -max_total_time=15 -max_len=4096
+          cargo +nightly fuzz run message -- -max_total_time=15 -max_len=4096
+
+  delivery-stress:
+    name: Performance and concurrent delivery
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Run the five-round release benchmark
+        run: cargo +stable run --locked --release --example regex-bench
+      - name: Run concurrent Maildir and mbox delivery tests
+        run: >-
+          cargo +stable test --locked --release --test stress_delivery --
+          --ignored --test-threads=1
