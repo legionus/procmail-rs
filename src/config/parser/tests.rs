@@ -932,7 +932,9 @@ fn size_conditions_do_not_use_regex_pattern_limit() {
 
 #[test]
 fn rejects_regex_above_compiled_size_limit() {
-    let error = parse(":0\n* (?:a.){65535}\ninbox/\n").unwrap_err();
+    // Two alternatives keep the compiled program above the byte limit on
+    // both pointer widths; a single repeated branch is smaller on 32-bit.
+    let error = parse(":0\n* (?:a.|b.){65535}\ninbox/\n").unwrap_err();
 
     assert_eq!(error.line, 2);
     assert!(error.message.starts_with("invalid regular expression:"));

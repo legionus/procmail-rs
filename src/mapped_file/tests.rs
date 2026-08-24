@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(target_pointer_width = "32")]
+use rustix::fs::ftruncate;
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
 use super::*;
@@ -73,4 +75,59 @@ fn represents_an_empty_file_without_mapping_pages() {
 fn rejects_file_above_mapping_limit_without_removing_it() {
     let error = mapped(b"1234", 3).err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[cfg(target_pointer_width = "32")]
+fn sparse_mapped(len: u64, maximum_len: usize) -> io::Result<(MappedFile, PathBuf)> {
+    let name = format!(
+        "procmail-rs-sparse-map-test-{}-{}",
+        process::id(),
+        NEXT_NAME.fetch_add(1, Ordering::Relaxed)
+    );
+    let directory = openat(
+        CWD,
+        "/tmp",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(io_error)?;
+    let fd = openat(
+        &directory,
+        name.as_str(),
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(io_error)?;
+    ftruncate(&fd, len).map_err(io_error)?;
+    let path = PathBuf::from("/tmp").join(&name);
+
+    match MappedFile::unlink_and_map(fd, &directory, &name, maximum_len) {
+        Ok(mapping) => Ok((mapping, path)),
+        Err(error) => {
+            let _ = unlinkat(&directory, name.as_str(), AtFlags::empty());
+            Err(error)
+        }
+    }
+}
+
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn rejects_file_size_that_does_not_fit_in_usize() {
+    let error = sparse_mapped(u64::from(u32::MAX) + 1, usize::MAX)
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn reports_address_space_exhaustion() {
+    let almost_entire_address_space = u64::from(u32::MAX) - 4095;
+    let error = sparse_mapped(almost_entire_address_space, usize::MAX)
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.raw_os_error(),
+        Some(rustix::io::Errno::NOMEM.raw_os_error())
+    );
 }

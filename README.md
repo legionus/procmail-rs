@@ -1,8 +1,8 @@
 # procmail-rs
 
-`procmail-rs` is an experimental mail filter for 64-bit Linux. The currently
-implemented CLI can validate or explain an rc file and can filter one message
-from standard input into explicitly selected Maildir destinations.
+`procmail-rs` is an experimental mail filter for 32-bit and 64-bit Linux. The
+currently implemented CLI can validate or explain an rc file and can filter
+one message from standard input into explicitly selected Maildir destinations.
 
 The program does not provide an implicit system mailbox or fallback delivery.
 See [Documentation/Compatibility.md](Documentation/Compatibility.md) for the
