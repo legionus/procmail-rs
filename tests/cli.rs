@@ -1843,6 +1843,87 @@ fn known_unsupported_constructs_fail_check_before_message_input() {
 }
 
 #[test]
+fn logabstract_rejects_header_logging_modes_before_message_input() {
+    for rules in [
+        "LOGABSTRACT=\n:0\nmaildir:unused\n",
+        "LOGABSTRACT=No\n:0\nmaildir:unused\n",
+        "LOGABSTRACT=off\n:0\nmaildir:unused\n",
+        "LOGABSTRACT=yes\n:0\nmaildir:unused\n",
+        "LOGABSTRACT=all\n:0\nmaildir:unused\n",
+        "MODE=all\nLOGABSTRACT=$MODE\n:0\nmaildir:unused\n",
+    ] {
+        let config = config_file(rules);
+        let input_path = config.parent().unwrap().join("message.eml");
+        fs::write(
+            &input_path,
+            b"From: private-from-sentinel\nSubject: private-subject-sentinel\n\nbody",
+        )
+        .unwrap();
+        let mut input = fs::File::open(&input_path).unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::from(input.try_clone().unwrap()))
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(78), "{rules:?}");
+        assert_eq!(input.stream_position().unwrap(), 0, "{rules:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("LOGABSTRACT supports only 'no'"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("private-from-sentinel"), "{stderr}");
+        assert!(!stderr.contains("private-subject-sentinel"), "{stderr}");
+        fs::remove_dir_all(config.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn logabstract_no_does_not_create_an_abstract_log() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let selected = base.join("selected");
+    let logfile = base.join("filter.log");
+    create_maildir(&selected);
+    fs::write(
+        &config,
+        format!(
+            "MODE=no\nLOGABSTRACT=$MODE\nLOGFILE={}\nMAILDIR={}\n:0\nmaildir:selected\n",
+            logfile.display(),
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"From: private-from-sentinel\nSubject: private-subject-sentinel\n\nprivate-body";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&selected), [input.to_vec()]);
+    assert!(!logfile.exists());
+    assert_message_contents_absent(
+        &output.stderr,
+        &[
+            "private-from-sentinel",
+            "private-subject-sentinel",
+            "private-body",
+        ],
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn compatibility_document_lists_every_unsupported_variable() {
     let documentation = include_str!("../Documentation/Compatibility.md");
     for name in procmail_rs::config::UNSUPPORTED_PROCMAIL_VARIABLES {

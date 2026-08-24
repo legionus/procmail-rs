@@ -31,6 +31,11 @@ fn assigns_explicit_sources_to_variable_classes() {
     assert!(!variable_policy("LOGFILE").allows(VariableSource::CommandLine));
     assert!(!variable_policy("LOGDETAIL").allows(VariableSource::CommandLine));
     assert_eq!(
+        variable_policy("LOGABSTRACT").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::LogAbstract)
+    );
+    assert!(!variable_policy("LOGABSTRACT").allows(VariableSource::CommandLine));
+    assert_eq!(
         variable_policy("USER_VALUE").assignment_target(VariableSource::CommandLine),
         Some(AssignmentTarget::User)
     );
@@ -80,6 +85,7 @@ fn registry_classifies_every_unsupported_procmail_variable() {
 fn special_procmail_names_never_fall_through_to_user_policy() {
     for name in [
         "LOCKEXT",
+        "LOGABSTRACT",
         "LOG",
         "DELIVERED",
         "SHELLMETAS",
@@ -101,6 +107,17 @@ fn validates_lock_extension_after_expansion() {
     }
     for value in ["dir/lock", "\0"] {
         assert!(validate_lock_ext(value).is_err(), "{value:?}");
+    }
+}
+
+#[test]
+fn accepts_only_the_privacy_preserving_log_abstract_mode() {
+    assert!(validate_log_abstract("no").is_ok());
+    for value in ["", "No", "off", "yes", "all"] {
+        assert_eq!(
+            validate_log_abstract(value).unwrap_err(),
+            "LOGABSTRACT supports only 'no'; other values could log sensitive header values"
+        );
     }
 }
 
@@ -127,7 +144,7 @@ fn admits_only_passwd_backed_initial_names() {
 
 #[test]
 fn rejects_command_line_sources_not_allowed_by_policy() {
-    for name in ["MAILDIR", "LASTFOLDER", "LIMIT_MSG_BODY"] {
+    for name in ["MAILDIR", "LASTFOLDER", "LIMIT_MSG_BODY", "LOGABSTRACT"] {
         let error = SuppliedVariable::parse(format!("{name}=value")).unwrap_err();
         assert_eq!(
             error.to_string(),

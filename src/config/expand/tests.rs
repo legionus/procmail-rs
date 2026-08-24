@@ -109,6 +109,61 @@ fn expands_lockext_from_its_default_and_in_statement_order() {
 }
 
 #[test]
+fn validates_logabstract_after_static_and_conditional_expansion() {
+    let config = parse("MODE=no\nLOGABSTRACT=$MODE\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let Statement::Assignment(assignment) = &config.statements[1] else {
+        panic!("expected LOGABSTRACT assignment");
+    };
+    assert_eq!(assignment.value, "no");
+    assert_eq!(assignment.target, AssignmentTarget::LogAbstract);
+
+    let error = parse("MODE=all\n:0\n{\nLOGABSTRACT=$MODE\n}\n")
+        .unwrap()
+        .expand()
+        .unwrap_err();
+    assert_eq!(error.line, 4);
+    assert_eq!(
+        error.message,
+        "LOGABSTRACT supports only 'no'; other values could log sensitive header values"
+    );
+}
+
+#[test]
+fn validates_runtime_logabstract_value_when_the_block_executes() {
+    let config = parse(":0\n{\nLOGABSTRACT=$MATCH\n}\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected block recipe");
+    };
+    let RecipeAction::Block(children) = &recipe.action else {
+        panic!("expected block action");
+    };
+    let Statement::Assignment(assignment) = &children[0] else {
+        panic!("expected LOGABSTRACT assignment");
+    };
+
+    assert_eq!(
+        assignment
+            .resolve_with(|name| (name == "MATCH").then(|| "no".to_owned()))
+            .unwrap(),
+        "no"
+    );
+    let error = assignment
+        .resolve_with(|name| (name == "MATCH").then(|| "all".to_owned()))
+        .unwrap_err();
+    assert_eq!(error.line, 3);
+    assert_eq!(
+        error.message,
+        "LOGABSTRACT supports only 'no'; other values could log sensitive header values"
+    );
+}
+
+#[test]
 fn rejects_lockext_that_adds_a_path_component_after_expansion() {
     let error = parse("SEPARATOR=/\nLOCKEXT=.locks${SEPARATOR}shared\n")
         .unwrap()

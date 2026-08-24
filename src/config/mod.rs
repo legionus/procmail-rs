@@ -17,7 +17,8 @@ pub use variables::{
     MAX_PROCESS_TIMEOUT_SECONDS, MessageLimitVariable, RcLimitVariable, SuppliedVariable,
     SuppliedVariableError, UNSUPPORTED_PROCMAIL_VARIABLES, VariablePolicy, VariableSource,
     assignment_value_limit, parse_lock_timeout_seconds, parse_process_timeout_seconds, parse_umask,
-    validate_lock_ext, validate_lock_method, validate_trap_command, variable_policy,
+    validate_lock_ext, validate_lock_method, validate_log_abstract, validate_trap_command,
+    variable_policy,
 };
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;

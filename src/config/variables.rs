@@ -15,7 +15,6 @@ pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "COMSAT",
     "DELIVERED",
     "LOG",
-    "LOGABSTRACT",
     "MSGPREFIX",
     "NORESRETRY",
     "PROCMAIL_OVERFLOW",
@@ -55,6 +54,17 @@ pub fn validate_lock_ext(value: &str) -> Result<(), String> {
         Err("LOCKEXT must not contain '/'".to_owned())
     } else {
         Ok(())
+    }
+}
+
+pub fn validate_log_abstract(value: &str) -> Result<(), String> {
+    if value == "no" {
+        Ok(())
+    } else {
+        Err(
+            "LOGABSTRACT supports only 'no'; other values could log sensitive header values"
+                .to_owned(),
+        )
     }
 }
 
@@ -114,6 +124,7 @@ pub enum AssignmentTarget {
     Maildir,
     LogFile,
     LogDetail,
+    LogAbstract,
     Verbose,
     Durability,
     LockMethod,
@@ -272,6 +283,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "MAILDIR" => VariablePolicy::RcOnly(AssignmentTarget::Maildir),
         "LOGFILE" => VariablePolicy::RcOnly(AssignmentTarget::LogFile),
         "LOGDETAIL" => VariablePolicy::RcOnly(AssignmentTarget::LogDetail),
+        "LOGABSTRACT" => VariablePolicy::RcOnly(AssignmentTarget::LogAbstract),
         "VERBOSE" => VariablePolicy::RcOnly(AssignmentTarget::Verbose),
         "DURABILITY" => VariablePolicy::RcOnly(AssignmentTarget::Durability),
         "LOCKMETHOD" => VariablePolicy::RcOnly(AssignmentTarget::LockMethod),
@@ -345,6 +357,7 @@ pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
             MAX_SHELL_SETTING_LEN
         }
         AssignmentTarget::LogDetail
+        | AssignmentTarget::LogAbstract
         | AssignmentTarget::Verbose
         | AssignmentTarget::Durability
         | AssignmentTarget::LockMethod

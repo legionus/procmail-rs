@@ -71,6 +71,7 @@ impl Assignment {
             AssignmentTarget::Umask => super::parse_umask(&value).map(drop),
             AssignmentTarget::Trap => super::validate_trap_command(&value),
             AssignmentTarget::LockExt => super::validate_lock_ext(&value),
+            AssignmentTarget::LogAbstract => super::validate_log_abstract(&value),
             _ => Ok(()),
         }
         .map_err(|message| ExpansionError::new(self.line, message))?;
@@ -346,6 +347,10 @@ fn expand_config(
                     super::validate_lock_ext(&assignment.value)
                         .map_err(|message| ExpansionError::new(assignment.line, message))?;
                 }
+                if assignment.target == AssignmentTarget::LogAbstract {
+                    super::validate_log_abstract(&assignment.value)
+                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
+                }
                 if assignment.target == AssignmentTarget::LineBuf {
                     linebuf = parse_linebuf(&assignment.value, assignment.line)?;
                 }
@@ -535,6 +540,7 @@ fn prepare_runtime_statements(
                         | AssignmentTarget::ProcessTimeout
                         | AssignmentTarget::Umask
                         | AssignmentTarget::Trap
+                        | AssignmentTarget::LogAbstract
                 ) {
                     return Err(ExpansionError::new(
                         assignment.line,
@@ -572,6 +578,20 @@ fn prepare_runtime_statements(
                         0,
                     )?;
                     super::parse_umask(&value.text)
+                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
+                }
+                if assignment.target == AssignmentTarget::LogAbstract
+                    && !expression_needs_runtime(&expression, known)
+                    && !expression_references_any(&expression, dynamic)
+                {
+                    let value = evaluate_config_expression(
+                        &expression,
+                        assignment.line,
+                        assignment_value_limit(assignment.target),
+                        known,
+                        0,
+                    )?;
+                    super::validate_log_abstract(&value.text)
                         .map_err(|message| ExpansionError::new(assignment.line, message))?;
                 }
                 assignment.expansion = Some(expression);
