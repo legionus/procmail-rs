@@ -327,6 +327,17 @@ fn parses_non_empty_host_for_runtime_comparison() {
 }
 
 #[test]
+fn rejects_assignment_to_the_read_only_program_version() {
+    let error = parse("PROCMAIL_VERSION=3.22\n").unwrap_err();
+
+    assert_eq!(error.line, 1);
+    assert_eq!(
+        error.message,
+        "variable PROCMAIL_VERSION cannot be assigned in an rc file"
+    );
+}
+
+#[test]
 fn rejects_runtime_variable_assignment() {
     let error = parse("LASTFOLDER=forged\n").unwrap_err();
 

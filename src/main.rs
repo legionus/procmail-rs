@@ -151,6 +151,8 @@ fn run() -> Result<u8, OperationalError> {
             .map_err(|error| OperationalError::Configuration(error.to_string()))?,
         SuppliedVariable::from_system_hostname(hostname.clone())
             .map_err(|error| OperationalError::Configuration(error.to_string()))?,
+        SuppliedVariable::from_program_version()
+            .map_err(|error| OperationalError::Configuration(error.to_string()))?,
     ];
     supplied.extend(command.supplied.iter().cloned());
     let path = &command.config;

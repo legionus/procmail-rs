@@ -18,7 +18,6 @@ pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "MSGPREFIX",
     "NORESRETRY",
     "PROCMAIL_OVERFLOW",
-    "PROCMAIL_VERSION",
     "SHELLMETAS",
     "SUSPEND",
     "SENDMAIL",
@@ -159,6 +158,7 @@ pub enum VariablePolicy {
     RcOnly(AssignmentTarget),
     RcOrCommandLine(AssignmentTarget),
     RuntimeOnly,
+    ReadOnly,
     Unsupported,
 }
 
@@ -256,6 +256,20 @@ impl SuppliedVariable {
         })
     }
 
+    pub fn from_program_version() -> Result<Self, SuppliedVariableError> {
+        let value = env!("CARGO_PKG_VERSION");
+        if value.is_empty() || value.len() > MAX_ASSIGNMENT_VALUE_LEN {
+            return Err(SuppliedVariableError::new(format!(
+                "program version must contain from 1 through {MAX_ASSIGNMENT_VALUE_LEN} bytes"
+            )));
+        }
+        Ok(Self {
+            name: "PROCMAIL_VERSION".to_owned(),
+            value: value.to_owned(),
+            source: VariableSource::System,
+        })
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -314,6 +328,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
         "EXITCODE" => VariablePolicy::RcOnly(AssignmentTarget::ExitCode),
         "HOST" => VariablePolicy::RcOnly(AssignmentTarget::Host),
+        "PROCMAIL_VERSION" => VariablePolicy::ReadOnly,
         "LASTFOLDER" | "MATCH" => VariablePolicy::RuntimeOnly,
         name if name.strip_prefix("MATCH").is_some_and(|suffix| {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
@@ -399,6 +414,7 @@ impl VariablePolicy {
                     VariableSource::RcFile | VariableSource::CommandLine
                 )
                 | (Self::RuntimeOnly, VariableSource::Runtime)
+                | (Self::ReadOnly, VariableSource::System)
         )
     }
 

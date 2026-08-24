@@ -158,6 +158,20 @@ fn admits_a_bounded_system_hostname_without_allowing_host_on_the_command_line() 
 }
 
 #[test]
+fn exposes_a_read_only_program_version() {
+    let version = SuppliedVariable::from_program_version().unwrap();
+
+    assert_eq!(version.name(), "PROCMAIL_VERSION");
+    assert_eq!(version.value(), env!("CARGO_PKG_VERSION"));
+    assert_eq!(version.source(), VariableSource::System);
+    assert_eq!(
+        variable_policy("PROCMAIL_VERSION"),
+        VariablePolicy::ReadOnly
+    );
+    assert!(SuppliedVariable::parse("PROCMAIL_VERSION=3.22".to_owned()).is_err());
+}
+
+#[test]
 fn rejects_command_line_sources_not_allowed_by_policy() {
     for name in ["MAILDIR", "LASTFOLDER", "LIMIT_MSG_BODY", "LOGABSTRACT"] {
         let error = SuppliedVariable::parse(format!("{name}=value")).unwrap_err();

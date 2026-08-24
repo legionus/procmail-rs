@@ -107,6 +107,41 @@ fn matching_host_continues_processing() {
 }
 
 #[test]
+fn package_version_is_available_to_rc_expansion() {
+    let path = config_file("");
+    let maildir = path.parent().unwrap().join(env!("CARGO_PKG_VERSION"));
+    create_maildir(&maildir);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\nmaildir:$PROCMAIL_VERSION\n",
+            path.parent().unwrap().display()
+        ),
+    )
+    .unwrap();
+    let mut process = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: package version\n\nbody\n")
+        .unwrap();
+    let output = process.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(
+        delivered_messages(&maildir),
+        vec![b"Subject: package version\n\nbody\n".to_vec()]
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn mismatching_host_stops_only_the_runtime_include() {
     let path = config_file("");
     let directory = path.parent().unwrap();
@@ -1819,6 +1854,7 @@ fn invalid_configuration_does_not_consume_stdin() {
         "DEFAULT=mailbox\n:0\nmaildir:inbox\n",
         "ORGMAIL=mailbox\n:0\nmaildir:inbox\n",
         "COMSAT=yes\n:0\nmaildir:inbox\n",
+        "PROCMAIL_VERSION=3.22\n:0\nmaildir:inbox\n",
         "LIMIT_MSG_BODY=10KB\n:0\ninbox/\n",
         ":0 B\n* body\ninbox/\n",
         ":0\nmaildir:$UNDEFINED\n",

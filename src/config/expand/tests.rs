@@ -231,6 +231,20 @@ fn exposes_the_system_hostname_to_rc_expansion_without_rescanning_it() {
 }
 
 #[test]
+fn exposes_the_program_version_to_rc_expansion() {
+    let supplied = [SuppliedVariable::from_program_version().unwrap()];
+    let config = parse("VERSION=$PROCMAIL_VERSION\n")
+        .unwrap()
+        .expand_with(&supplied)
+        .unwrap();
+    let Statement::Assignment(assignment) = &config.statements[0] else {
+        panic!("expected VERSION assignment");
+    };
+
+    assert_eq!(assignment.value, env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
 fn rejects_self_references_and_cycles_without_recursive_scanning() {
     for source in ["A=$A\n", "A=$B\nB=$A\n"] {
         let error = parse(source).unwrap().expand().unwrap_err();
