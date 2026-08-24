@@ -412,13 +412,20 @@ fn accepts_ignored_pipe_flags_on_blocks_and_reports_them_in_source_order() {
 #[test]
 fn documents_filesystem_flag_compatibility() {
     let compatibility = include_str!("../../../Documentation/Compatibility.md");
+    let (implemented, differences) = compatibility
+        .split_once("## Deliberate differences")
+        .unwrap();
 
-    assert!(compatibility.contains("`i` on mbox or Maildir"));
-    assert!(compatibility.contains("publish a truncated Maildir file"));
-    assert!(compatibility.contains("Rejected before message input"));
-    assert!(compatibility.contains("`r` on Maildir"));
-    assert!(compatibility.contains("`r` on mbox"));
-    assert!(compatibility.contains("following postmark starts on a new line"));
+    assert!(implemented.contains("Reserved regex forms"));
+    assert!(implemented.contains("`i` on a pipe"));
+    assert!(implemented.contains("`r` on Maildir"));
+    assert!(differences.contains("Destination type and directory delivery"));
+    assert!(!differences.contains("Generic directory delivery"));
+    assert!(differences.contains("`i` on mbox or Maildir"));
+    assert!(differences.contains("publish a truncated Maildir file"));
+    assert!(differences.contains("Rejected before message input"));
+    assert!(differences.contains("`r` on mbox"));
+    assert!(differences.contains("following postmark starts on a new line"));
 }
 
 #[test]

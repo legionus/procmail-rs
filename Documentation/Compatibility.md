@@ -12,14 +12,24 @@ An unsupported construct is rejected with its rc source line before stdin is
 read whenever it can be identified during configuration loading. Runtime rc
 files are checked when their `INCLUDERC` or `SWITCHRC` statement executes.
 
+## Implemented compatibility
+
+These behaviors follow procmail 3.22 semantics within the documented resource
+ceilings and supported recipe subset.
+
+| Area | Compatible behavior | Bounded implementation notes |
+| --- | --- | --- |
+| Reserved regex forms | Expands `^TO`, `^TO_`, `^FROM_DAEMON`, and `^FROM_MAILER` wherever they occur unless the caret is immediately preceded by `\\`. `^FROM_DAEMON` forces case-insensitive matching. | `LINEBUF` bounds only the user-written rc line. Generated macro text may exceed it but remains subject to the 64 KiB expanded-regex limit and the compiled-size limit. |
+| `i` on a pipe | Ignores an error while writing the selected message bytes to the child. | Child status and filter-output validation remain separate, as they are not pipe-input write errors. |
+| `r` on Maildir | Maildir delivery preserves the original message ending, so `r` has no additional effect. | procmail-rs preserves the same message bytes with or without `r`. |
+
 ## Deliberate differences
 
 | Area | procmail 3.22 | procmail-rs |
 | --- | --- | --- |
-| Destination type | May infer a directory or mailbox from the current filesystem. | Requires `maildir:PATH`, a trailing `/`, or `mbox:PATH`. |
+| Destination type and directory delivery | May infer a directory or mailbox from the current filesystem. | Never infers a backend from the filesystem. Requires `maildir:PATH` or a trailing `/` for a Maildir containing `tmp`, `new`, and `cur`, and requires `mbox:PATH` for mbox delivery. |
 | Default delivery | Can fall back to `DEFAULT`, `ORGMAIL`, or the system mailbox. | Never selects an implicit destination. An undelivered original is an error. |
 | Forwarding | A `!` action forwards through the configured sendmail command. | Rejected before message input; procmail-rs never forwards or invokes sendmail implicitly. |
-| Generic directory delivery | A destination may select directory delivery after inspecting the filesystem. | Never inferred from the filesystem. Only `maildir:PATH` or the explicit trailing-slash Maildir syntax selects a directory backend, which must have `tmp`, `new`, and `cur`. |
 | Comsat notification | `COMSAT` may enable notification after delivery. | `COMSAT` is rejected as an unsupported reserved variable; delivery has no notification side effect. |
 | `HOST` | Initializes the variable from the current hostname, continues on an exact match, and ends the current rc file on a mismatch. | Implements the same control flow using the bounded UTF-8 node name returned by `uname`. Ambient environment values cannot replace it. Node names that are empty, invalid UTF-8, or longer than 255 bytes are rejected before message input. |
 | Runtime rc files | Opens paths using the process filesystem permissions. | Requires trusted regular files owned by the current uid and rejects broadly writable files and symlinks. |
@@ -27,13 +37,10 @@ files are checked when their `INCLUDERC` or `SWITCHRC` statement executes.
 | `PROCMAIL_VERSION` | Contains the running procmail version number and cannot be changed. | Contains the bounded package version from `Cargo.toml` and cannot be changed. The value identifies procmail-rs and does not claim to be procmail 3.22. |
 | Unsupported reserved variables | Variables such as `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` retain their original special meanings. | Rejects these names explicitly in assignments, `--set`, and expansion references. Unknown names remain ordinary user variables. |
 | `LOGABSTRACT` | Defaults to a final abstract containing `From`, `Subject`, destination, and message size; `no` suppresses it and `all` logs every successful delivery. | Accepts only the exact value `no`, including after bounded variable expansion. Abstract logging remains disabled because other modes could expose sensitive header values. A statically known unsupported value is rejected before message input; a runtime-derived value is rejected when its selected assignment executes. |
-| Reserved regex forms | Expands `^TO`, `^TO_`, `^FROM_DAEMON`, and `^FROM_MAILER` wherever they occur unless the caret is immediately preceded by `\\`. `^FROM_DAEMON` forces case-insensitive matching. | Implements the same fixed byte-regex substitutions and case behavior. `LINEBUF` bounds only the user-written rc line; generated macro text may exceed it but remains subject to the 64 KiB expanded-regex limit and the compiled-size limit. |
 | Pipe command parsing | Uses a hybrid direct-command and shell parser. | Runs every trusted pipe command through the configured, policy-checked shell. |
 | mbox in general-filter mode | A bare output file does not gain a generated postmark. | Explicit `mbox:` delivery always writes a complete mboxrd record with a generated postmark. |
-| `i` on a pipe | Ignores an error while writing the selected message bytes to the child. | Supported with the same limited purpose. Child status and filter-output validation remain separate. |
 | `i` on mbox or Maildir | May ignore a failed write and report success after a partial append or publish a truncated Maildir file. | Rejected before message input. Filesystem publication must complete successfully. |
 | `i` on a recipe block | Ignored with a warning. | Ignored with a source-located warning; filesystem delivery still rejects `i`. |
-| `r` on Maildir | Maildir delivery already preserves the message ending, so `r` has no additional effect. | Preserves the message bytes with or without `r`. |
 | `r` on mbox | Raw file delivery suppresses the usual mailbox delimiter handling as well as final-newline normalization. | Retains the generated postmark and mboxrd quoting. It omits the normal blank record separator but adds one LF when needed so a following postmark starts on a new line. |
 | `r` on a recipe block | Ignored with a warning. | Ignored with a source-located warning. |
 | Local recipe lockfiles | Creates and later removes a named dotlock, or derives its name from the destination. | Defaults to a persistent, ownership-checked file held with `flock`. `LOCKMETHOD=dotlock` selects compatible creation, stale removal, and cleanup with the original pathname-replacement risk. |
@@ -51,7 +58,7 @@ files are checked when their `INCLUDERC` or `SWITCHRC` statement executes.
 
 ## Updating this document
 
-Add an entry whenever compatibility is intentionally narrowed or behavior is
-made safer than the reference implementation. A difference must have focused
-tests that exercise the procmail-rs behavior; where practical, store a reviewed
-reference result without making the original executable a test dependency.
+Add compatible behavior to the implemented table and add intentionally narrowed
+or safer behavior to the differences table. Each entry needs focused tests that
+exercise the procmail-rs behavior; where practical, store a reviewed reference
+result without making the original executable a test dependency.
