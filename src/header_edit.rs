@@ -4,10 +4,13 @@
 use std::fmt;
 
 use crate::config::{HeaderAction, HeaderOperation};
+use crate::limits::MessageLimits;
+use crate::message::MessageLimit;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EditedHeader {
     bytes: Vec<u8>,
+    limits: MessageLimits,
 }
 
 impl EditedHeader {
@@ -17,7 +20,13 @@ impl EditedHeader {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn into_bytes(self) -> Vec<u8> {
+    pub(crate) fn into_bytes_for_body(self, body_len: usize) -> Result<Vec<u8>, HeaderEditError> {
+        validate_edited_header(&self.bytes, body_len, self.limits)?;
+        Ok(self.bytes)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn into_streaming_bytes(self) -> Vec<u8> {
         self.bytes
     }
 }
@@ -25,12 +34,16 @@ impl EditedHeader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HeaderEditError {
     SizeOverflow,
+    LimitExceeded { kind: MessageLimit, limit: usize },
 }
 
 impl fmt::Display for HeaderEditError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SizeOverflow => formatter.write_str("edited header size overflows usize"),
+            Self::LimitExceeded { kind, limit } => {
+                write!(formatter, "edited message exceeds {kind} ({limit} bytes)")
+            }
         }
     }
 }
@@ -78,7 +91,9 @@ impl EditedField<'_> {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn apply_header_action(
     header: &[u8],
+    body_len: usize,
     action: &HeaderAction,
+    limits: MessageLimits,
 ) -> Result<EditedHeader, HeaderEditError> {
     let (fields, separator, line_ending) = split_fields(header);
     let mut edited: Vec<EditedField<'_>> = fields.into_iter().map(EditedField::Borrowed).collect();
@@ -128,17 +143,113 @@ pub(crate) fn apply_header_action(
                 );
             }
         }
+        validate_aggregate_size(&edited, separator, line_ending, body_len, limits)?;
     }
 
-    let size = edited.iter().try_fold(separator.len(), |size, field| {
-        size.checked_add(field.bytes().len())
-    });
-    let mut result = Vec::with_capacity(size.ok_or(HeaderEditError::SizeOverflow)?);
+    let size = serialized_size(&edited, separator, line_ending)?;
+    let mut result = Vec::with_capacity(size);
     for field in edited {
+        if !result.is_empty() && !result.ends_with(b"\n") {
+            result.extend_from_slice(line_ending);
+        }
         result.extend_from_slice(field.bytes());
     }
     result.extend_from_slice(separator);
-    Ok(EditedHeader { bytes: result })
+    validate_edited_header(&result, body_len, limits)?;
+    Ok(EditedHeader {
+        bytes: result,
+        limits,
+    })
+}
+
+fn serialized_size(
+    fields: &[EditedField<'_>],
+    separator: &[u8],
+    line_ending: &[u8],
+) -> Result<usize, HeaderEditError> {
+    let mut size = 0usize;
+    let mut previous_terminated = true;
+    for field in fields {
+        if size != 0 && !previous_terminated {
+            size = size
+                .checked_add(line_ending.len())
+                .ok_or(HeaderEditError::SizeOverflow)?;
+        }
+        size = size
+            .checked_add(field.bytes().len())
+            .ok_or(HeaderEditError::SizeOverflow)?;
+        previous_terminated = field.bytes().ends_with(b"\n");
+    }
+    size.checked_add(separator.len())
+        .ok_or(HeaderEditError::SizeOverflow)
+}
+
+fn validate_aggregate_size(
+    fields: &[EditedField<'_>],
+    separator: &[u8],
+    line_ending: &[u8],
+    body_len: usize,
+    limits: MessageLimits,
+) -> Result<(), HeaderEditError> {
+    let headers = serialized_size(fields, separator, line_ending)?;
+    check_limit(headers, limits.headers_size, MessageLimit::Headers)?;
+    let message = headers
+        .checked_add(body_len)
+        .ok_or(HeaderEditError::SizeOverflow)?;
+    check_limit(message, limits.message_size, MessageLimit::Message)
+}
+
+fn validate_edited_header(
+    header: &[u8],
+    body_len: usize,
+    limits: MessageLimits,
+) -> Result<(), HeaderEditError> {
+    check_limit(header.len(), limits.headers_size, MessageLimit::Headers)?;
+    let message = header
+        .len()
+        .checked_add(body_len)
+        .ok_or(HeaderEditError::SizeOverflow)?;
+    check_limit(message, limits.message_size, MessageLimit::Message)?;
+
+    let mut field_size = 0usize;
+    let mut cursor = 0usize;
+    while cursor < header.len() {
+        let end = header[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(header.len(), |offset| cursor + offset + 1);
+        let line = &header[cursor..end];
+        check_limit(
+            line.len(),
+            limits.header_line_size,
+            MessageLimit::HeaderLine,
+        )?;
+        if line == b"\n" || line == b"\r\n" {
+            break;
+        }
+        field_size = if matches!(line.first(), Some(b' ' | b'\t')) {
+            field_size
+                .checked_add(line.len())
+                .ok_or(HeaderEditError::SizeOverflow)?
+        } else {
+            line.len()
+        };
+        check_limit(
+            field_size,
+            limits.header_field_size,
+            MessageLimit::HeaderField,
+        )?;
+        cursor = end;
+    }
+    Ok(())
+}
+
+fn check_limit(size: usize, limit: usize, kind: MessageLimit) -> Result<(), HeaderEditError> {
+    if size > limit {
+        Err(HeaderEditError::LimitExceeded { kind, limit })
+    } else {
+        Ok(())
+    }
 }
 
 fn make_field(name: &str, value: &str, line_ending: &[u8]) -> Result<Vec<u8>, HeaderEditError> {
@@ -245,6 +356,10 @@ mod tests {
         HeaderAction { operations }
     }
 
+    fn apply(header: &[u8], body_len: usize, action: &HeaderAction) -> EditedHeader {
+        apply_header_action(header, body_len, action, MessageLimits::default()).unwrap()
+    }
+
     #[test]
     fn operations_run_in_order_and_match_names_without_ascii_case() {
         let header = b"A: one\nX-Test: old\nX-Test: second\nZ: last\n\n";
@@ -267,7 +382,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            apply_header_action(header, &action).unwrap().as_bytes(),
+            apply(header, 0, &action).as_bytes(),
             b"First: yes\nA: one\nx-test: new\nZ: last\nX-Test: added\n\n"
         );
     }
@@ -281,7 +396,7 @@ mod tests {
         }]);
 
         assert_eq!(
-            apply_header_action(header, &action).unwrap().as_bytes(),
+            apply(header, 0, &action).as_bytes(),
             b"Keep: one\r\nkeep: two\r\n\r\n"
         );
     }
@@ -295,10 +410,7 @@ mod tests {
             value: value("two"),
         }]);
 
-        assert_eq!(
-            apply_header_action(header, &action).unwrap().as_bytes(),
-            b"A: one\nB: two\n\n"
-        );
+        assert_eq!(apply(header, 0, &action).as_bytes(), b"A: one\nB: two\n\n");
     }
 
     #[test]
@@ -309,7 +421,7 @@ mod tests {
             name: "A".into(),
             value: value("new"),
         }]);
-        let edited = apply_header_action(original.header(), &action).unwrap();
+        let edited = apply(original.header(), original.body().len(), &action);
         let replacement = original.with_edited_header(edited).unwrap();
 
         assert_eq!(replacement.header(), b"A: new\nKeep: exact\n\n");
@@ -332,12 +444,100 @@ mod tests {
             value: value("new"),
         }]);
 
-        let edited = apply_header_action(head.as_bytes(), &action).unwrap();
+        let edited = apply(head.as_bytes(), 0, &action);
         let head = head.with_edited_header(edited);
         assert_eq!(reader.stream_position().unwrap(), body_position);
 
         let message = head.read_body(&mut reader).unwrap();
         assert_eq!(message.header(), b"A: new\n\n");
         assert_eq!(message.body(), b"body remains unread");
+    }
+
+    #[test]
+    fn rechecks_each_edited_message_limit_at_its_boundary() {
+        let empty = action(Vec::new());
+
+        for size in [7usize, 8, 9] {
+            let limits = MessageLimits {
+                headers_size: 8,
+                ..MessageLimits::default()
+            };
+            let header = vec![b'x'; size];
+            let result = apply_header_action(&header, 0, &empty, limits);
+            assert_limit_result(result, size, 8, MessageLimit::Headers);
+        }
+
+        for body_len in [7usize, 8, 9] {
+            let limits = MessageLimits {
+                message_size: 12,
+                ..MessageLimits::default()
+            };
+            let result = apply_header_action(b"A:\n\n", body_len, &empty, limits);
+            assert_limit_result(result, body_len + 4, 12, MessageLimit::Message);
+        }
+
+        for line_len in [7usize, 8, 9] {
+            let limits = MessageLimits {
+                header_line_size: 8,
+                ..MessageLimits::default()
+            };
+            let mut header = b"A:".to_vec();
+            header.extend(std::iter::repeat_n(b'x', line_len - 3));
+            header.extend_from_slice(b"\n\n");
+            let result = apply_header_action(&header, 0, &empty, limits);
+            assert_limit_result(result, line_len, 8, MessageLimit::HeaderLine);
+        }
+
+        for field_len in [7usize, 8, 9] {
+            let limits = MessageLimits {
+                header_field_size: 8,
+                ..MessageLimits::default()
+            };
+            let mut header = b"A:\n ".to_vec();
+            header.extend(std::iter::repeat_n(b'x', field_len - 5));
+            header.extend_from_slice(b"\n\n");
+            let result = apply_header_action(&header, 0, &empty, limits);
+            assert_limit_result(result, field_len, 8, MessageLimit::HeaderField);
+        }
+    }
+
+    #[test]
+    fn growth_limit_failure_keeps_the_input_header_unchanged() {
+        let header = b"A: one\n\n".to_vec();
+        let action = action(vec![HeaderOperation::Add {
+            line: 1,
+            name: "B".into(),
+            value: value("two"),
+        }]);
+        let limits = MessageLimits {
+            headers_size: header.len(),
+            ..MessageLimits::default()
+        };
+
+        let error = apply_header_action(&header, 0, &action, limits).unwrap_err();
+        assert_eq!(
+            error,
+            HeaderEditError::LimitExceeded {
+                kind: MessageLimit::Headers,
+                limit: header.len(),
+            }
+        );
+        assert_eq!(header, b"A: one\n\n");
+    }
+
+    fn assert_limit_result(
+        result: Result<EditedHeader, HeaderEditError>,
+        size: usize,
+        limit: usize,
+        kind: MessageLimit,
+    ) {
+        if size <= limit {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                HeaderEditError::LimitExceeded { kind, limit }
+            );
+        }
     }
 }
