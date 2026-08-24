@@ -199,7 +199,7 @@ impl CompiledNode {
         T: TraceSink,
     {
         match &self.action {
-            CompiledAction::Capture => Err(OrderedExecutionError::Evaluation(
+            CompiledAction::Capture { .. } => Err(OrderedExecutionError::Evaluation(
                 EvalError::ExternalActionUnsupported { line: self.line },
             )),
             CompiledAction::Headers(action) => {

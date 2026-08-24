@@ -179,6 +179,49 @@ fn computes_static_input_requirements() {
 }
 
 #[test]
+fn backquoted_assignments_require_the_complete_message() {
+    for source in [
+        "VALUE=`extract`\n:0\nmaildir:selected\n",
+        ":0\n{\nVALUE=`extract`\n:0\nmaildir:selected\n}\n",
+        ":0\n* ^Never:\nmaildir:selected\nVALUE=`extract`\n",
+    ] {
+        assert_eq!(
+            compile(source).requirements(),
+            InputRequirements {
+                needs_headers: true,
+                needs_body_contents: true,
+                needs_end_of_message: true,
+            },
+            "source: {source:?}",
+        );
+    }
+}
+
+#[test]
+fn capture_action_requirements_follow_h_and_b_flags() {
+    assert_eq!(
+        compile(":0 h\nVALUE=| extract\n").requirements(),
+        InputRequirements {
+            needs_headers: true,
+            needs_body_contents: false,
+            needs_end_of_message: false,
+        }
+    );
+
+    for source in [":0 b\nVALUE=| extract\n", ":0\nVALUE=| extract\n"] {
+        assert_eq!(
+            compile(source).requirements(),
+            InputRequirements {
+                needs_headers: true,
+                needs_body_contents: true,
+                needs_end_of_message: true,
+            },
+            "source: {source:?}",
+        );
+    }
+}
+
+#[test]
 fn computes_nested_requirements_from_the_compiled_tree() {
     let plan = compile(":0\n* ^List-Id:\n{\n:0 B\n* body-marker\nmaildir:body\n}\n");
 

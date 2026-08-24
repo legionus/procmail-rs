@@ -462,7 +462,7 @@ impl CompiledSequence {
                     decision: RecipeDecision::Selected,
                 });
                 match &recipe.action {
-                    CompiledAction::Pipe { .. } | CompiledAction::Capture => {
+                    CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => {
                         return Err(EvalError::ExternalActionUnsupported { line: recipe.line });
                     }
                     CompiledAction::Headers(action) => {
@@ -719,7 +719,7 @@ impl CompiledNode {
 
     fn delivery_defers_header(&self) -> bool {
         match &self.action {
-            CompiledAction::Pipe { .. } | CompiledAction::Capture => true,
+            CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => true,
             CompiledAction::Deliver { destination, .. } => {
                 destination.needs_runtime_variables()
                     || matches!(destination, Destination::Mbox(_))
@@ -743,7 +743,7 @@ impl CompiledNode {
         context: RcExecutionContext<'_>,
     ) -> Result<SequenceControl, EvalError> {
         match &self.action {
-            CompiledAction::Pipe { .. } | CompiledAction::Capture => {
+            CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => {
                 Err(EvalError::ExternalActionUnsupported { line: self.line })
             }
             CompiledAction::Deliver { .. } => {

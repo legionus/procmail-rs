@@ -8,8 +8,9 @@ use super::explanation::{
 };
 use super::runtime_rc::{CompiledInclude, CompiledSwitch};
 use crate::config::{
-    Assignment, AssignmentTarget, CommandAssignment, ContinuationMode, ControlFlow, Destination,
-    HeaderAction, OutputEnding, PipeAction, Recipe, RecipeAction, RecipeOptions, Statement,
+    ActionInput, Assignment, AssignmentTarget, CommandAssignment, ContinuationMode, ControlFlow,
+    Destination, HeaderAction, OutputEnding, PipeAction, Recipe, RecipeAction, RecipeOptions,
+    Statement,
 };
 use crate::trace::VariableSource as TraceVariableSource;
 
@@ -40,7 +41,9 @@ pub(super) enum CompiledAction {
         action: PipeAction,
         options: RecipeOptions,
     },
-    Capture,
+    Capture {
+        input: ActionInput,
+    },
     Block(CompiledSequence),
     Headers(HeaderAction),
 }
@@ -81,14 +84,42 @@ pub(super) enum ActionExecution {
     Failed,
 }
 
-fn assignment_requires_ordered_message(statement: &CompiledStatement) -> bool {
-    matches!(
-        statement,
-        CompiledStatement::Assignment(assignment)
-            if matches!(assignment.assignment.target, AssignmentTarget::LockFile)
+fn statement_requires_ordered_message(statement: &CompiledStatement) -> bool {
+    match statement {
+        CompiledStatement::CommandAssignment(_) => true,
+        CompiledStatement::Assignment(assignment) => {
+            matches!(assignment.assignment.target, AssignmentTarget::LockFile)
                 || assignment.assignment.target == AssignmentTarget::Trap
                     && !assignment.assignment.value.is_empty()
-    )
+        }
+        CompiledStatement::Host(_)
+        | CompiledStatement::Include(_)
+        | CompiledStatement::Switch(_) => false,
+    }
+}
+
+fn statement_requirements(statement: &CompiledStatement) -> InputRequirements {
+    // Procmail gives every backquoted command the complete current message,
+    // regardless of where the substitution appears in its assignment. Mark
+    // all three needs here so top-level, nested, and trailing statements use
+    // the same conservative staging decision.
+    if matches!(statement, CompiledStatement::CommandAssignment(_)) {
+        InputRequirements {
+            needs_headers: true,
+            needs_body_contents: true,
+            needs_end_of_message: true,
+        }
+    } else {
+        InputRequirements::default()
+    }
+}
+
+fn statements_requirements(statements: &[CompiledStatement]) -> InputRequirements {
+    statements
+        .iter()
+        .fold(InputRequirements::default(), |requirements, statement| {
+            requirements.union(statement_requirements(statement))
+        })
 }
 
 impl CompiledSequence {
@@ -136,23 +167,25 @@ impl CompiledSequence {
     }
 
     pub(super) fn requirements(&self) -> InputRequirements {
-        self.recipes
+        let requirements = self
+            .recipes
             .iter()
             .fold(InputRequirements::default(), |requirements, recipe| {
                 requirements.union(recipe.requirements())
-            })
+            });
+        requirements.union(statements_requirements(&self.trailing_statements))
     }
 
     pub(super) fn requires_ordered_delivery(&self) -> bool {
         self.trailing_statements
             .iter()
-            .any(assignment_requires_ordered_message)
+            .any(statement_requires_ordered_message)
             || self.recipes.iter().enumerate().any(|(index, recipe)| {
                 recipe.requires_ordered_delivery()
                     || recipe
                         .preceding_statements
                         .iter()
-                        .any(assignment_requires_ordered_message)
+                        .any(statement_requires_ordered_message)
                     || (index != 0
                         && matches!(
                             recipe.control,
@@ -168,13 +201,13 @@ impl CompiledSequence {
         // because a later action must observe the edited bytes.
         self.trailing_statements
             .iter()
-            .any(assignment_requires_ordered_message)
+            .any(statement_requires_ordered_message)
             || self.recipes.iter().enumerate().any(|(index, recipe)| {
                 recipe.requires_preemptive_ordered_delivery()
                     || recipe
                         .preceding_statements
                         .iter()
-                        .any(assignment_requires_ordered_message)
+                        .any(statement_requires_ordered_message)
                     || (index != 0
                         && matches!(
                             recipe.control,
@@ -196,6 +229,7 @@ impl CompiledSequence {
             .fold(InputRequirements::default(), |requirements, recipe| {
                 requirements.union(recipe.requirements())
             });
+        let requirements = requirements.union(statements_requirements(&self.trailing_statements));
         if recipes.iter().any(CompiledNode::requires_ordered_delivery) {
             requirements.union(InputRequirements {
                 needs_end_of_message: true,
@@ -223,7 +257,7 @@ impl CompiledSequence {
             conditions.extend(recipe.conditions.iter().map(CompiledCondition::explain));
             let assignment_count = inherited_assignments + recipe.preceding_statements.len();
             match &recipe.action {
-                CompiledAction::Pipe { .. } | CompiledAction::Capture => {
+                CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => {
                     explanations.push(RecipeExplanation {
                         line: recipe.line,
                         assignment_count,
@@ -293,7 +327,9 @@ impl CompiledNode {
                 action: action.clone(),
                 options: recipe.options,
             },
-            RecipeAction::Capture(_) => CompiledAction::Capture,
+            RecipeAction::Capture(_) => CompiledAction::Capture {
+                input: recipe.options.action_input,
+            },
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
                 destination: destination.clone(),
                 continuation: recipe.options.continuation,
@@ -316,10 +352,24 @@ impl CompiledNode {
 
     fn requirements(&self) -> InputRequirements {
         let action = match &self.action {
-            CompiledAction::Pipe { .. } | CompiledAction::Capture => InputRequirements {
+            CompiledAction::Pipe { .. } => InputRequirements {
                 needs_headers: true,
                 needs_body_contents: true,
                 needs_end_of_message: true,
+            },
+            // A capture action only observes the area selected by h/b. A
+            // header capture can finish at the header separator and must not
+            // force an otherwise streamable body into staging.
+            CompiledAction::Capture { input } => match input {
+                ActionInput::Headers => InputRequirements {
+                    needs_headers: true,
+                    ..InputRequirements::default()
+                },
+                ActionInput::Body | ActionInput::Message => InputRequirements {
+                    needs_headers: true,
+                    needs_body_contents: true,
+                    needs_end_of_message: true,
+                },
             },
             CompiledAction::Deliver { .. } => InputRequirements::default(),
             CompiledAction::Block(sequence) => sequence.requirements(),
@@ -328,11 +378,13 @@ impl CompiledNode {
                 ..InputRequirements::default()
             },
         };
-        self.conditions
+        let requirements = self
+            .conditions
             .iter()
             .fold(action, |requirements, condition| {
                 requirements.union(condition.requirements())
-            })
+            });
+        requirements.union(statements_requirements(&self.preceding_statements))
     }
 
     fn requires_ordered_delivery(&self) -> bool {
@@ -342,7 +394,8 @@ impl CompiledNode {
                 .iter()
                 .any(CompiledCondition::requires_ordered_execution)
             || match &self.action {
-                CompiledAction::Pipe { .. } | CompiledAction::Capture => true,
+                CompiledAction::Pipe { .. } => true,
+                CompiledAction::Capture { .. } => true,
                 CompiledAction::Deliver { destination, .. } => {
                     destination.needs_runtime_variables()
                         || matches!(destination, Destination::Mbox(_))
@@ -359,7 +412,8 @@ impl CompiledNode {
                 .iter()
                 .any(CompiledCondition::requires_ordered_execution)
             || match &self.action {
-                CompiledAction::Pipe { .. } | CompiledAction::Capture => true,
+                CompiledAction::Pipe { .. } => true,
+                CompiledAction::Capture { input } => *input != ActionInput::Headers,
                 CompiledAction::Deliver { destination, .. } => {
                     destination.needs_runtime_variables()
                         || matches!(destination, Destination::Mbox(_))
@@ -374,7 +428,8 @@ impl CompiledNode {
             .iter()
             .any(CompiledCondition::needs_message_contents)
             || match &self.action {
-                CompiledAction::Pipe { .. } | CompiledAction::Capture => true,
+                CompiledAction::Pipe { .. } => true,
+                CompiledAction::Capture { input } => *input != ActionInput::Headers,
                 CompiledAction::Deliver { .. } => false,
                 CompiledAction::Block(sequence) => sequence.needs_message_contents(),
                 CompiledAction::Headers(_) => false,

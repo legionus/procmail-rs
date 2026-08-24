@@ -78,7 +78,7 @@ impl CompiledNode {
         execution: &mut SequenceExecution,
     ) -> Result<(ActionExecution, SequenceControl), EvalError> {
         match &self.action {
-            CompiledAction::Pipe { .. } | CompiledAction::Capture => {
+            CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => {
                 Err(EvalError::ExternalActionUnsupported { line: self.line })
             }
             CompiledAction::Headers(action) => {
