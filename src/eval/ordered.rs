@@ -13,6 +13,7 @@ struct OrderedTreeExecution<'a, E, D, T> {
     original_delivered: bool,
     pending_error: Option<E>,
     external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
+    capture: Option<&'a mut CommandCaptureExecutor<'a, E, T>>,
     external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
     global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
     local_lock: Option<&'a mut LocalLockExecutor<'a, E>>,
@@ -37,6 +38,17 @@ type ExternalActionExecutor<'a, E, T> = dyn FnMut(
 type ExternalConditionExecutor<'a, E, T> = dyn FnMut(&str, &[u8], &mut RuntimeVariables, &mut T) -> Result<bool, DeliveryAttemptError<E>>
     + 'a;
 
+type CommandCaptureExecutor<'a, E, T> = dyn FnMut(
+        &str,
+        &[u8],
+        OutputEnding,
+        Option<RecipeOptions>,
+        usize,
+        &mut RuntimeVariables,
+        &mut T,
+    ) -> Result<CapturedCommand, DeliveryAttemptError<E>>
+    + 'a;
+
 type GlobalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + 'a;
 
 type LocalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<E>>
@@ -47,6 +59,7 @@ type CompletionExecutor<'a, E, T> =
 
 struct OptionalOrderedExecutors<'a, E, T> {
     external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
+    capture: Option<&'a mut CommandCaptureExecutor<'a, E, T>>,
     external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
     global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
     local_lock: Option<&'a mut LocalLockExecutor<'a, E>>,
@@ -199,9 +212,62 @@ impl CompiledNode {
         T: TraceSink,
     {
         match &self.action {
-            CompiledAction::Capture { .. } => Err(OrderedExecutionError::Evaluation(
-                EvalError::ExternalActionUnsupported { line: self.line },
-            )),
+            CompiledAction::Capture { action, options } => {
+                let message =
+                    current_ordered_message(context.message, context.replacement.as_ref());
+                let input = message
+                    .action_input(options.action_input)
+                    .ok_or(EvalError::BodyWasNotBuffered)
+                    .map_err(OrderedExecutionError::Evaluation)?;
+                let limit =
+                    active_command_value_limit(context.runtime, action.target, action.line)?;
+                let executor = context.capture.as_deref_mut().ok_or_else(|| {
+                    OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
+                        line: self.line,
+                    })
+                })?;
+                let captured = executor(
+                    &action.command,
+                    input,
+                    options.output_ending,
+                    Some(*options),
+                    limit,
+                    context.runtime,
+                    context.trace,
+                );
+                match captured {
+                    Ok(captured) => {
+                        let mut value = captured.into_output();
+                        if value.last() == Some(&b'\n') {
+                            value.pop();
+                        }
+                        context
+                            .runtime
+                            .set_bytes(action.name.clone(), value.clone());
+                        if let Ok(name) = TraceName::new(&action.name) {
+                            context.trace.record(TraceEvent::VariableAssigned {
+                                line: Some(action.line),
+                                name,
+                                source: TraceVariableSource::RcFile,
+                                value: context
+                                    .trace
+                                    .detail()
+                                    .includes_variable_values()
+                                    .then(|| TraceValue::new(&value)),
+                            });
+                        }
+                        context.pending_error = None;
+                        Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                    }
+                    Err(DeliveryAttemptError::Recoverable(error)) => {
+                        context.pending_error = Some(error);
+                        Ok((ActionExecution::Failed, SequenceControl::Continue))
+                    }
+                    Err(DeliveryAttemptError::Fatal(error)) => {
+                        Err(OrderedExecutionError::Delivery(error))
+                    }
+                }
+            }
             CompiledAction::Headers(action) => {
                 let message =
                     current_ordered_message(context.message, context.replacement.as_ref());
@@ -409,11 +475,7 @@ where
     for statement in statements {
         match statement {
             CompiledStatement::CommandAssignment(assignment) => {
-                return Err(OrderedExecutionError::Evaluation(
-                    EvalError::ExternalActionUnsupported {
-                        line: assignment.line,
-                    },
-                ));
+                execute_command_assignment(assignment, context)?;
             }
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, context.runtime, context.trace)
@@ -492,6 +554,116 @@ where
     Ok(SequenceControl::Continue)
 }
 
+fn execute_command_assignment<E, D, T>(
+    assignment: &crate::config::CommandAssignment,
+    context: &mut OrderedTreeExecution<'_, E, D, T>,
+) -> Result<(), OrderedExecutionError<E>>
+where
+    D: FnMut(
+        &Destination,
+        &[u8],
+        OutputEnding,
+        Option<&str>,
+        &mut RuntimeVariables,
+        &mut T,
+    ) -> Result<(), DeliveryAttemptError<E>>,
+    T: TraceSink,
+{
+    let message = current_ordered_message(context.message, context.replacement.as_ref())
+        .raw()
+        .ok_or(EvalError::BodyWasNotBuffered)
+        .map_err(OrderedExecutionError::Evaluation)?;
+    let limit = active_command_value_limit(context.runtime, assignment.target, assignment.line)?;
+    let mut value = Vec::new();
+
+    // Build the complete replacement privately. Commands can fail, time out,
+    // or exceed the remaining value budget after earlier literal fragments;
+    // none of those cases may expose a partially updated runtime variable.
+    for part in &assignment.parts {
+        let remaining = limit.checked_sub(value.len()).ok_or_else(|| {
+            OrderedExecutionError::Evaluation(EvalError::VariableValueTooLarge {
+                name: assignment.name.clone(),
+                size: value.len(),
+            })
+        })?;
+        let mut bytes = match part {
+            crate::config::CommandAssignmentPart::Literal(source) => context
+                .runtime
+                .expand_bytes(source, assignment.line, remaining)
+                .map_err(EvalError::Expansion)
+                .map_err(OrderedExecutionError::Evaluation)?,
+            crate::config::CommandAssignmentPart::Command(command) => {
+                let executor = context.capture.as_deref_mut().ok_or_else(|| {
+                    OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
+                        line: assignment.line,
+                    })
+                })?;
+                let captured = executor(
+                    command,
+                    message,
+                    OutputEnding::Preserve,
+                    None,
+                    remaining,
+                    context.runtime,
+                    context.trace,
+                )
+                .map_err(|error| match error {
+                    DeliveryAttemptError::Recoverable(error)
+                    | DeliveryAttemptError::Fatal(error) => OrderedExecutionError::Delivery(error),
+                })?;
+                let mut output = captured.into_output();
+                while output.last() == Some(&b'\n') {
+                    output.pop();
+                }
+                output
+            }
+        };
+        if bytes.len() > remaining {
+            return Err(OrderedExecutionError::Evaluation(
+                EvalError::VariableValueTooLarge {
+                    name: assignment.name.clone(),
+                    size: value.len().saturating_add(bytes.len()),
+                },
+            ));
+        }
+        value.append(&mut bytes);
+    }
+
+    context
+        .runtime
+        .set_bytes(assignment.name.clone(), value.clone());
+    if let Ok(name) = TraceName::new(&assignment.name) {
+        context.trace.record(TraceEvent::VariableAssigned {
+            line: Some(assignment.line),
+            name,
+            source: TraceVariableSource::RcFile,
+            value: context
+                .trace
+                .detail()
+                .includes_variable_values()
+                .then(|| TraceValue::new(&value)),
+        });
+    }
+    Ok(())
+}
+
+fn active_command_value_limit<E>(
+    runtime: &RuntimeVariables,
+    target: AssignmentTarget,
+    line: usize,
+) -> Result<usize, OrderedExecutionError<E>> {
+    let linebuf = match runtime.get("LINEBUF") {
+        Some(value) => value.parse::<usize>().map_err(|_| {
+            OrderedExecutionError::Evaluation(EvalError::RuntimeSettingUnavailable {
+                line,
+                name: "LINEBUF",
+            })
+        })?,
+        None => crate::config::DEFAULT_LINEBUF,
+    };
+    Ok(linebuf.min(crate::config::assignment_value_limit(target)))
+}
+
 impl ExecutionPlan {
     pub fn execute_mapped_ordered_with_trace<E, D, T>(
         &self,
@@ -544,6 +716,7 @@ impl ExecutionPlan {
             deliver,
             OptionalOrderedExecutors {
                 external: None,
+                capture: None,
                 external_condition: None,
                 global_lock: None,
                 local_lock: None,
@@ -586,6 +759,7 @@ impl ExecutionPlan {
             deliver,
             OptionalOrderedExecutors {
                 external: Some(external),
+                capture: None,
                 external_condition: None,
                 global_lock: None,
                 local_lock: None,
@@ -594,13 +768,57 @@ impl ExecutionPlan {
         )
     }
 
-    pub fn execute_mapped_ordered_with_processes_trace<E, D, C, X, G, L, T>(
+    pub fn execute_mapped_ordered_with_capture_trace<E, D, K, T>(
         &self,
         message: MappedMessageInput<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut T,
         deliver: &mut D,
-        executors: (&mut C, &mut X, &mut G, &mut L),
+        capture: &mut K,
+    ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
+    where
+        D: FnMut(
+            &Destination,
+            &[u8],
+            OutputEnding,
+            Option<&str>,
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<(), DeliveryAttemptError<E>>,
+        K: FnMut(
+            &str,
+            &[u8],
+            OutputEnding,
+            Option<RecipeOptions>,
+            usize,
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<CapturedCommand, DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        self.execute_mapped_ordered_inner(
+            message,
+            runtime,
+            trace,
+            deliver,
+            OptionalOrderedExecutors {
+                external: None,
+                capture: Some(capture),
+                external_condition: None,
+                global_lock: None,
+                local_lock: None,
+            },
+            None,
+        )
+    }
+
+    pub fn execute_mapped_ordered_with_processes_trace<E, D, C, X, K, G, L, T>(
+        &self,
+        message: MappedMessageInput<'_>,
+        runtime: &mut RuntimeVariables,
+        trace: &mut T,
+        deliver: &mut D,
+        executors: (&mut C, &mut X, &mut K, &mut G, &mut L),
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
         D: FnMut(
@@ -625,6 +843,15 @@ impl ExecutionPlan {
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
+        K: FnMut(
+            &str,
+            &[u8],
+            OutputEnding,
+            Option<RecipeOptions>,
+            usize,
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<CapturedCommand, DeliveryAttemptError<E>>,
         G: FnMut(&str, &mut RuntimeVariables) -> Result<(), E>,
         L: FnMut(
             &str,
@@ -632,7 +859,7 @@ impl ExecutionPlan {
         ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<E>>,
         T: TraceSink,
     {
-        let (external_condition, external, global_lock, local_lock) = executors;
+        let (external_condition, external, capture, global_lock, local_lock) = executors;
         self.execute_mapped_ordered_inner(
             message,
             runtime,
@@ -640,6 +867,7 @@ impl ExecutionPlan {
             deliver,
             OptionalOrderedExecutors {
                 external: Some(external),
+                capture: Some(capture),
                 external_condition: Some(external_condition),
                 global_lock: Some(global_lock),
                 local_lock: Some(local_lock),
@@ -648,13 +876,13 @@ impl ExecutionPlan {
         )
     }
 
-    pub fn execute_mapped_ordered_with_processes_and_completion_trace<E, D, C, X, G, L, F, T>(
+    pub fn execute_mapped_ordered_with_processes_and_completion_trace<E, D, C, X, K, G, L, F, T>(
         &self,
         message: MappedMessageInput<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut T,
         deliver: &mut D,
-        executors: (&mut C, &mut X, &mut G, &mut L),
+        executors: (&mut C, &mut X, &mut K, &mut G, &mut L),
         completion: &mut F,
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
@@ -680,6 +908,15 @@ impl ExecutionPlan {
             &mut RuntimeVariables,
             &mut T,
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
+        K: FnMut(
+            &str,
+            &[u8],
+            OutputEnding,
+            Option<RecipeOptions>,
+            usize,
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<CapturedCommand, DeliveryAttemptError<E>>,
         G: FnMut(&str, &mut RuntimeVariables) -> Result<(), E>,
         L: FnMut(
             &str,
@@ -688,7 +925,7 @@ impl ExecutionPlan {
         F: FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>),
         T: TraceSink,
     {
-        let (external_condition, external, global_lock, local_lock) = executors;
+        let (external_condition, external, capture, global_lock, local_lock) = executors;
         self.execute_mapped_ordered_inner(
             message,
             runtime,
@@ -696,6 +933,7 @@ impl ExecutionPlan {
             deliver,
             OptionalOrderedExecutors {
                 external: Some(external),
+                capture: Some(capture),
                 external_condition: Some(external_condition),
                 global_lock: Some(global_lock),
                 local_lock: Some(local_lock),
@@ -739,6 +977,7 @@ impl ExecutionPlan {
             original_delivered: false,
             pending_error: None,
             external: executors.external,
+            capture: executors.capture,
             external_condition: executors.external_condition,
             global_lock: executors.global_lock,
             local_lock: executors.local_lock,

@@ -42,7 +42,8 @@ pub(super) enum CompiledAction {
         options: RecipeOptions,
     },
     Capture {
-        input: ActionInput,
+        action: crate::config::CaptureAction,
+        options: RecipeOptions,
     },
     Block(CompiledSequence),
     Headers(HeaderAction),
@@ -327,8 +328,9 @@ impl CompiledNode {
                 action: action.clone(),
                 options: recipe.options,
             },
-            RecipeAction::Capture(_) => CompiledAction::Capture {
-                input: recipe.options.action_input,
+            RecipeAction::Capture(action) => CompiledAction::Capture {
+                action: action.clone(),
+                options: recipe.options,
             },
             RecipeAction::Deliver(destination) => CompiledAction::Deliver {
                 destination: destination.clone(),
@@ -360,7 +362,7 @@ impl CompiledNode {
             // A capture action only observes the area selected by h/b. A
             // header capture can finish at the header separator and must not
             // force an otherwise streamable body into staging.
-            CompiledAction::Capture { input } => match input {
+            CompiledAction::Capture { options, .. } => match options.action_input {
                 ActionInput::Headers => InputRequirements {
                     needs_headers: true,
                     ..InputRequirements::default()
@@ -413,7 +415,9 @@ impl CompiledNode {
                 .any(CompiledCondition::requires_ordered_execution)
             || match &self.action {
                 CompiledAction::Pipe { .. } => true,
-                CompiledAction::Capture { input } => *input != ActionInput::Headers,
+                CompiledAction::Capture { options, .. } => {
+                    options.action_input != ActionInput::Headers
+                }
                 CompiledAction::Deliver { destination, .. } => {
                     destination.needs_runtime_variables()
                         || matches!(destination, Destination::Mbox(_))
@@ -429,7 +433,9 @@ impl CompiledNode {
             .any(CompiledCondition::needs_message_contents)
             || match &self.action {
                 CompiledAction::Pipe { .. } => true,
-                CompiledAction::Capture { input } => *input != ActionInput::Headers,
+                CompiledAction::Capture { options, .. } => {
+                    options.action_input != ActionInput::Headers
+                }
                 CompiledAction::Deliver { .. } => false,
                 CompiledAction::Block(sequence) => sequence.needs_message_contents(),
                 CompiledAction::Headers(_) => false,

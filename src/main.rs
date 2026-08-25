@@ -28,15 +28,15 @@ use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{
-    ActionKindExplanation, CompletionState, ConditionKindExplanation, DeliveryAttemptError,
-    DeliveryPlan, ExecutionPlan, ExternalActionInput, FinalMessage, HeaderEvaluation,
-    MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery,
-    RecipeLockGuard,
+    ActionKindExplanation, CapturedCommand, CompletionState, ConditionKindExplanation,
+    DeliveryAttemptError, DeliveryPlan, ExecutionPlan, ExternalActionInput, FinalMessage,
+    HeaderEvaluation, MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation,
+    PlannedDelivery, RecipeLockGuard,
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
 use procmail_rs::external_process::{
-    FilterOptions, parse_process_timeout, process_timeout_from_config, run_filter,
-    run_program_with_timeout, run_trap_with_timeout,
+    CaptureOptions, FilterOptions, parse_process_timeout, process_timeout_from_config,
+    run_capture_with_timeout, run_filter, run_program_with_timeout, run_trap_with_timeout,
 };
 use procmail_rs::hostname::current_hostname;
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
@@ -556,6 +556,16 @@ fn deliver_staged(
                             runtime,
                         )
                     },
+                    &mut |command, input, output_ending, recipe_options, limit, runtime, _| {
+                        execute_command_capture(
+                            command,
+                            input,
+                            output_ending,
+                            recipe_options,
+                            limit,
+                            runtime,
+                        )
+                    },
                     &mut |path, runtime| {
                         // Replacing LOCKFILE first releases the preceding
                         // global lock. If replacement fails, clear the visible
@@ -830,9 +840,9 @@ fn execute_external_condition(
             "cannot build external condition environment: {error}"
         ))
     })?;
-    let configured_shell = environment
-        .get("SHELL")
-        .expect("bounded process environment always contains SHELL");
+    let configured_shell = environment.get("SHELL").ok_or_else(|| {
+        recoverable_external_error("command capture environment does not contain SHELL")
+    })?;
     let shell_policy = ShellPolicy::approve(configured_shell)
         .map_err(|error| recoverable_external_error(error.to_string()))?;
     let stderr = external_stderr(runtime).map_err(|error| {
@@ -853,6 +863,75 @@ fn execute_external_condition(
     )
     .map_err(|error| recoverable_external_error(error.to_string()))?;
     Ok(run.child_exit() == ChildExit::Success)
+}
+
+fn execute_command_capture(
+    command: &str,
+    input: &[u8],
+    output_ending: procmail_rs::config::OutputEnding,
+    recipe_options: Option<procmail_rs::config::RecipeOptions>,
+    limit: usize,
+    runtime: &mut RuntimeVariables,
+) -> Result<CapturedCommand, DeliveryAttemptError<OperationalError>> {
+    let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))
+        .map_err(recoverable_external_error)?;
+    let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
+        recoverable_external_error(format!("cannot build command capture environment: {error}"))
+    })?;
+    let configured_shell = environment
+        .get("SHELL")
+        .expect("bounded process environment always contains SHELL");
+    let shell_policy = ShellPolicy::approve(configured_shell)
+        .map_err(|error| recoverable_external_error(error.to_string()))?;
+    let stderr = external_stderr(runtime).map_err(|error| {
+        recoverable_external_error(format!("cannot open external command log: {error}"))
+    })?;
+    let run = run_capture_with_timeout(
+        &shell_policy,
+        &environment,
+        command,
+        input,
+        CaptureOptions::new(output_ending, limit).with_timeout(timeout),
+        stderr,
+    )
+    .map_err(|error| recoverable_external_error(error.to_string()))?;
+    let input_write = run.input_write();
+    let child_exit = run.child_exit();
+
+    if child_exit == ChildExit::TimedOut {
+        report_external_child_failure(runtime, child_exit).map_err(|error| {
+            recoverable_external_error(format!(
+                "cannot write external command failure diagnostic: {error}"
+            ))
+        })?;
+        return Err(recoverable_external_error(
+            "command assignment exceeded TIMEOUT",
+        ));
+    }
+    if let Some(options) = recipe_options {
+        let decision = decide_program(
+            options.child_status,
+            options.write_errors,
+            input_write,
+            child_exit,
+        );
+        if decision.report_child_failure() {
+            report_external_child_failure(runtime, child_exit).map_err(|error| {
+                recoverable_external_error(format!(
+                    "cannot write external command failure diagnostic: {error}"
+                ))
+            })?;
+        }
+        if !decision.succeeded() {
+            return Err(recoverable_external_error(
+                "command capture did not complete successfully",
+            ));
+        }
+    }
+    let output = run.into_output().map_err(|error| {
+        recoverable_external_error(format!("command returned invalid captured output: {error}"))
+    })?;
+    Ok(CapturedCommand::new(output, input_write, child_exit))
 }
 
 fn execute_external_action(

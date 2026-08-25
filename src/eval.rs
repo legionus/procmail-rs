@@ -46,6 +46,43 @@ use tree::{
     CompiledStatement, SequenceState,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedCommand {
+    output: Vec<u8>,
+    input_write: crate::external_filter::InputWrite,
+    child_exit: crate::external_filter::ChildExit,
+}
+
+impl CapturedCommand {
+    pub fn new(
+        output: Vec<u8>,
+        input_write: crate::external_filter::InputWrite,
+        child_exit: crate::external_filter::ChildExit,
+    ) -> Self {
+        Self {
+            output,
+            input_write,
+            child_exit,
+        }
+    }
+
+    pub fn output(&self) -> &[u8] {
+        &self.output
+    }
+
+    pub fn into_output(self) -> Vec<u8> {
+        self.output
+    }
+
+    pub fn input_write(&self) -> crate::external_filter::InputWrite {
+        self.input_write
+    }
+
+    pub fn child_exit(&self) -> crate::external_filter::ChildExit {
+        self.child_exit
+    }
+}
+
 pub trait Delivery {
     fn deliver(&mut self, destination: &Destination, message: &Message) -> Result<(), String>;
 }

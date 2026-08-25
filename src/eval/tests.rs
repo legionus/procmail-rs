@@ -222,6 +222,81 @@ fn capture_action_requirements_follow_h_and_b_flags() {
 }
 
 #[test]
+fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
+    let config = config::parse("VALUE=pre`first`mid`second`post\n:0\nmaildir:selected\n").unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let raw = b"Subject: test\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = NoTrace;
+    let mut commands = Vec::new();
+
+    plan.execute_mapped_ordered_with_capture_trace(
+        MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
+        &mut runtime,
+        &mut trace,
+        &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+        &mut |command, input, _, options, _, _, _| {
+            commands.push(command.to_owned());
+            assert_eq!(input, raw);
+            assert_eq!(options, None);
+            let output = if command == "first" {
+                b"a\xff\n\n".to_vec()
+            } else {
+                b"z\n".to_vec()
+            };
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                output,
+                crate::external_filter::InputWrite::Complete,
+                crate::external_filter::ChildExit::Failure,
+            ))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(commands, ["first", "second"]);
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"prea\xffmidzpost"[..]));
+}
+
+#[test]
+fn ordered_capture_uses_selected_area_strips_one_lf_and_continues() {
+    let config = config::parse(":0 hW\nVALUE=| capture\n:0\nmaildir:selected\n").unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let raw = b"Subject: test\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = NoTrace;
+    let mut delivered = false;
+
+    let outcome = plan
+        .execute_mapped_ordered_with_capture_trace(
+            MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
+            &mut runtime,
+            &mut trace,
+            &mut |_, _, _, _, _, _| {
+                delivered = true;
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            &mut |command, input, _, options, _, _, _| {
+                assert_eq!(command, "capture");
+                assert_eq!(input, b"Subject: test\n\n");
+                assert_eq!(
+                    options.unwrap().child_status,
+                    crate::config::ChildStatusMode::WaitQuietly
+                );
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                    b"value\n\n\n".to_vec(),
+                    crate::external_filter::InputWrite::Complete,
+                    crate::external_filter::ChildExit::Success,
+                ))
+            },
+        )
+        .unwrap();
+
+    assert!(delivered);
+    assert!(outcome.original_delivered());
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"value\n\n"[..]));
+}
+
+#[test]
 fn computes_nested_requirements_from_the_compiled_tree() {
     let plan = compile(":0\n* ^List-Id:\n{\n:0 B\n* body-marker\nmaildir:body\n}\n");
 
@@ -1243,6 +1318,9 @@ fn program_condition_uses_child_status_before_entering_block() {
                 &mut |_, _, _, _, _, _| {
                     panic!("recipe contains no pipe action");
                 },
+                &mut |_, _, _, _, _, _, _| {
+                    panic!("recipe contains no command capture");
+                },
                 &mut |_, _| Ok::<_, &str>(()),
                 &mut |_, _| {
                     Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(()))
@@ -1300,6 +1378,9 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
             (
                 &mut |_, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(true),
                 &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(None),
+                &mut |_, _, _, _, _, _, _| {
+                    panic!("recipe contains no command capture");
+                },
                 &mut |_, _| Ok::<_, &str>(()),
                 &mut |path, runtime| {
                     assert_eq!(path, "/mail/block.lock");
