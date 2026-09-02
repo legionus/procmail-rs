@@ -83,6 +83,43 @@ impl CapturedCommand {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturedNewlineRule {
+    StripOne,
+    StripAll,
+}
+
+fn validate_captured_value(
+    mut output: Vec<u8>,
+    limit: usize,
+    variable: &str,
+    newline_rule: CapturedNewlineRule,
+) -> Result<Vec<u8>, EvalError> {
+    // Check the bytes returned by the executor independently of the process
+    // runner. Alternate executors and future call paths must not bypass the
+    // allocation ceiling merely because the normal runner enforces it while
+    // reading stdout.
+    if output.len() > limit {
+        return Err(EvalError::VariableValueTooLarge {
+            name: variable.to_owned(),
+            size: output.len(),
+        });
+    }
+    match newline_rule {
+        CapturedNewlineRule::StripOne => {
+            if output.last() == Some(&b'\n') {
+                output.pop();
+            }
+        }
+        CapturedNewlineRule::StripAll => {
+            while output.last() == Some(&b'\n') {
+                output.pop();
+            }
+        }
+    }
+    Ok(output)
+}
+
 pub trait Delivery {
     fn deliver(&mut self, destination: &Destination, message: &Message) -> Result<(), String>;
 }

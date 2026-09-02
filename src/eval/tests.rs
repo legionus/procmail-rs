@@ -370,6 +370,120 @@ fn failed_header_capture_preserves_value_and_selects_error_handler() {
 }
 
 #[test]
+fn header_capture_validates_output_limit_before_replacing_value() {
+    let config =
+        config::parse("VALUE=old\nLINEBUF=128\n:0 h\nVALUE=| capture\n:0\nmaildir:selected\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+
+    for length in [127, 128, 129] {
+        let mut head = head(b"Subject: test\n\nbody-not-read");
+        let mut runtime = RuntimeVariables::default();
+        let result = plan.evaluate_headers_editing_with_capture_trace(
+            &mut head,
+            &mut runtime,
+            &mut NoTrace,
+            &mut |_, _, _, _, limit, _, _| {
+                assert_eq!(limit, 128);
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                    vec![b'x'; length],
+                    crate::external_filter::InputWrite::Complete,
+                    crate::external_filter::ChildExit::Success,
+                ))
+            },
+        );
+
+        if length <= 128 {
+            assert!(matches!(result, Ok(HeaderEvaluation::Decided(_))));
+            assert_eq!(runtime.get_bytes("VALUE"), Some(&vec![b'x'; length][..]));
+        } else {
+            assert!(matches!(
+                result,
+                Err(OrderedExecutionError::Evaluation(
+                    EvalError::VariableValueTooLarge { size: 129, .. }
+                ))
+            ));
+            assert_eq!(runtime.get_bytes("VALUE"), Some(&b"old"[..]));
+        }
+    }
+}
+
+#[test]
+fn failed_backquoted_fragment_does_not_publish_a_partial_value() {
+    let config =
+        config::parse("VALUE=old\nVALUE=pre`first`middle`second`post\n:0\nmaildir:selected\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let raw = b"Subject: test\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+
+    let result = plan.execute_mapped_ordered_with_capture_trace(
+        MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
+        &mut runtime,
+        &mut NoTrace,
+        &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+        &mut |command, _, _, _, _, _, _| {
+            if command == "first" {
+                Ok(CapturedCommand::new(
+                    b"first-output".to_vec(),
+                    crate::external_filter::InputWrite::Complete,
+                    crate::external_filter::ChildExit::Success,
+                ))
+            } else {
+                Err(DeliveryAttemptError::Recoverable("second failed"))
+            }
+        },
+    );
+
+    assert_eq!(
+        result,
+        Err(OrderedExecutionError::Delivery("second failed"))
+    );
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"old"[..]));
+}
+
+#[test]
+fn metadata_trace_excludes_capture_command_output_and_message_values() {
+    let config = config::parse(":0 h\nCAPTURED=| command-secret\n:0\nmaildir:selected\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let mut head = head(b"X-Secret: header-secret\n\nbody-secret");
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = BoundedTraceWriter::new(Vec::new());
+
+    let result = plan.evaluate_headers_editing_with_capture_trace(
+        &mut head,
+        &mut runtime,
+        &mut trace,
+        &mut |_, _, _, _, _, _, _| {
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                b"output-secret".to_vec(),
+                crate::external_filter::InputWrite::Complete,
+                crate::external_filter::ChildExit::Success,
+            ))
+        },
+    );
+    assert!(matches!(result, Ok(HeaderEvaluation::Decided(_))));
+
+    let rendered = String::from_utf8(trace.into_inner()).unwrap();
+    for private in [
+        "command-secret",
+        "output-secret",
+        "header-secret",
+        "body-secret",
+    ] {
+        assert!(!rendered.contains(private), "leaked {private:?}");
+    }
+    assert!(rendered.contains("name=\"CAPTURED\""));
+}
+
+#[test]
 fn computes_nested_requirements_from_the_compiled_tree() {
     let plan = compile(":0\n* ^List-Id:\n{\n:0 B\n* body-marker\nmaildir:body\n}\n");
 

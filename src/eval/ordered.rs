@@ -237,10 +237,13 @@ impl CompiledNode {
                 );
                 match captured {
                     Ok(captured) => {
-                        let mut value = captured.into_output();
-                        if value.last() == Some(&b'\n') {
-                            value.pop();
-                        }
+                        let value = validate_captured_value(
+                            captured.into_output(),
+                            limit,
+                            &action.name,
+                            CapturedNewlineRule::StripOne,
+                        )
+                        .map_err(OrderedExecutionError::Evaluation)?;
                         context
                             .runtime
                             .set_bytes(action.name.clone(), value.clone());
@@ -611,11 +614,13 @@ where
                     DeliveryAttemptError::Recoverable(error)
                     | DeliveryAttemptError::Fatal(error) => OrderedExecutionError::Delivery(error),
                 })?;
-                let mut output = captured.into_output();
-                while output.last() == Some(&b'\n') {
-                    output.pop();
-                }
-                output
+                validate_captured_value(
+                    captured.into_output(),
+                    remaining,
+                    &assignment.name,
+                    CapturedNewlineRule::StripAll,
+                )
+                .map_err(OrderedExecutionError::Evaluation)?
             }
         };
         if bytes.len() > remaining {

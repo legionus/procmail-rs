@@ -571,10 +571,12 @@ impl CompiledSequence {
                             trace,
                         ) {
                             Ok(captured) => {
-                                let mut value = captured.into_output();
-                                if value.last() == Some(&b'\n') {
-                                    value.pop();
-                                }
+                                let value = validate_captured_value(
+                                    captured.into_output(),
+                                    limit,
+                                    &action.name,
+                                    CapturedNewlineRule::StripOne,
+                                )?;
                                 runtime.set_bytes(action.name.clone(), value.clone());
                                 record_command_assignment(action.line, &action.name, &value, trace);
                                 planning.pending_error = None;
