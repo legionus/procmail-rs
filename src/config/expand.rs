@@ -239,7 +239,9 @@ impl Destination {
 
     pub fn needs_runtime_variables(&self) -> bool {
         match self {
-            Self::Maildir(expression) | Self::Mbox(expression) => expression.runtime_dependent,
+            Self::Maildir(expression) | Self::Mbox(expression) => {
+                expression.runtime_dependent || expression.runtime_base
+            }
         }
     }
 }
@@ -372,10 +374,18 @@ fn expand_config(
             text: super::DEFAULT_LOCK_EXT.to_owned(),
             depth: 0,
         });
+    let mut dynamic = BTreeSet::new();
 
     for statement in &mut config.statements {
         match statement {
             Statement::Assignment(assignment) => {
+                let parsed = parse_expression(&assignment.value, assignment.line)?;
+                if expression_references_any(&parsed, &dynamic) {
+                    validate_runtime_references(&parsed, assignment.line, &variables, &dynamic)?;
+                    assignment.expansion = Some(parsed);
+                    dynamic.insert(assignment.name.clone());
+                    continue;
+                }
                 let hard_limit = assignment_value_limit(assignment.target);
                 let limit = hard_limit.min(linebuf);
                 let expanded =
@@ -436,22 +446,20 @@ fn expand_config(
                 );
             }
             Statement::CommandAssignment(assignment) => {
-                return Err(ExpansionError::new(
-                    assignment.line,
-                    "backquoted command assignments are not executable yet",
-                ));
+                prepare_command_assignment(assignment, &variables, &dynamic)?;
+                dynamic.insert(assignment.name.clone());
             }
             Statement::Recipe(recipe) => {
-                expand_recipe(recipe, &variables, maildir.as_deref())?;
+                if dynamic.is_empty() {
+                    expand_recipe(recipe, &variables, maildir.as_deref())?;
+                } else {
+                    prepare_runtime_recipe(recipe, &variables, &dynamic, maildir.as_deref())?;
+                }
+                record_recipe_dynamic_names(recipe, &mut dynamic);
             }
             Statement::Include(expression) | Statement::Switch(expression) => {
                 let parsed = parse_expression(&expression.value, expression.line)?;
-                validate_runtime_references(
-                    &parsed,
-                    expression.line,
-                    &variables,
-                    &BTreeSet::new(),
-                )?;
+                validate_runtime_references(&parsed, expression.line, &variables, &dynamic)?;
                 expression.expansion = Some(parsed);
             }
         }
@@ -602,12 +610,7 @@ fn expand_recipe(
             }
         }
         RecipeAction::Pipe(_) => {}
-        RecipeAction::Capture(action) => {
-            return Err(ExpansionError::new(
-                action.line,
-                "command capture actions are not executable yet",
-            ));
-        }
+        RecipeAction::Capture(_) => {}
         RecipeAction::Headers(action) => {
             prepare_header_action(action, variables, &BTreeSet::new())?;
         }
@@ -707,13 +710,12 @@ fn prepare_runtime_statements(
                 dynamic.insert(assignment.name.clone());
             }
             Statement::CommandAssignment(assignment) => {
-                return Err(ExpansionError::new(
-                    assignment.line,
-                    "backquoted command assignments are not executable yet",
-                ));
+                prepare_command_assignment(assignment, known, dynamic)?;
+                dynamic.insert(assignment.name.clone());
             }
             Statement::Recipe(recipe) => {
                 prepare_runtime_recipe(recipe, known, dynamic, maildir)?;
+                record_recipe_dynamic_names(recipe, dynamic);
             }
             Statement::Include(expression) | Statement::Switch(expression) => {
                 let parsed = parse_expression(&expression.value, expression.line)?;
@@ -750,17 +752,13 @@ fn prepare_runtime_recipe(
             validate_runtime_references(&parsed, recipe.action_line, known, dynamic)?;
             expression.base = maildir.map(str::to_owned);
             expression.line = recipe.action_line;
-            expression.runtime_dependent = true;
-            expression.runtime_base = true;
+            expression.runtime_dependent = expression_references_any(&parsed, dynamic)
+                || expression_needs_runtime(&parsed, known);
+            expression.runtime_base = dynamic.contains("MAILDIR");
             expression.expansion = Some(parsed);
         }
         RecipeAction::Pipe(_) => {}
-        RecipeAction::Capture(action) => {
-            return Err(ExpansionError::new(
-                action.line,
-                "command capture actions are not executable yet",
-            ));
-        }
+        RecipeAction::Capture(_) => {}
         RecipeAction::Headers(action) => {
             prepare_header_action(action, known, dynamic)?;
         }
@@ -770,6 +768,44 @@ fn prepare_runtime_recipe(
         }
     }
     Ok(())
+}
+
+fn prepare_command_assignment(
+    assignment: &super::CommandAssignment,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+) -> Result<(), ExpansionError> {
+    for part in &assignment.parts {
+        let super::CommandAssignmentPart::Literal(source) = part else {
+            continue;
+        };
+        let expression = parse_expression(source, assignment.line)?;
+        validate_runtime_references(&expression, assignment.line, known, dynamic)?;
+    }
+    Ok(())
+}
+
+fn record_recipe_dynamic_names(recipe: &Recipe, dynamic: &mut BTreeSet<String>) {
+    match &recipe.action {
+        RecipeAction::Capture(action) => {
+            dynamic.insert(action.name.clone());
+        }
+        RecipeAction::Block(statements) => {
+            for statement in statements {
+                match statement {
+                    Statement::Assignment(assignment) => {
+                        dynamic.insert(assignment.name.clone());
+                    }
+                    Statement::CommandAssignment(assignment) => {
+                        dynamic.insert(assignment.name.clone());
+                    }
+                    Statement::Recipe(child) => record_recipe_dynamic_names(child, dynamic),
+                    Statement::Include(_) | Statement::Switch(_) => {}
+                }
+            }
+        }
+        RecipeAction::Deliver(_) | RecipeAction::Pipe(_) | RecipeAction::Headers(_) => {}
+    }
 }
 
 fn prepare_header_action(

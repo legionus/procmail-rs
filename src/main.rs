@@ -282,9 +282,23 @@ fn run() -> Result<u8, OperationalError> {
             let mut head = Message::read_headers(&mut stdin, limits).map_err(|error| {
                 OperationalError::Input(format!("cannot read message headers from stdin: {error}"))
             })?;
-            let delivery_result =
-                match plan.evaluate_headers_editing_with_trace(&mut head, &mut runtime, &mut trace)
-                {
+            let header_evaluation = plan.evaluate_headers_editing_with_capture_trace(
+                &mut head,
+                &mut runtime,
+                &mut trace,
+                &mut |command, input, output_ending, recipe_options, limit, runtime, _| {
+                    execute_command_capture(
+                        command,
+                        input,
+                        output_ending,
+                        recipe_options,
+                        limit,
+                        runtime,
+                    )
+                },
+            );
+            let delivery_result = match header_evaluation {
+                Ok(evaluation) => match evaluation {
                     HeaderEvaluation::Decided(delivery) => deliver_decided(
                         head,
                         &mut stdin,
@@ -322,7 +336,14 @@ fn run() -> Result<u8, OperationalError> {
                     HeaderEvaluation::Error(error) => Err(OperationalError::PermanentDestination(
                         format!("cannot evaluate message: {error}"),
                     )),
-                };
+                },
+                Err(OrderedExecutionError::Evaluation(error)) => {
+                    Err(OperationalError::PermanentDestination(format!(
+                        "cannot evaluate message: {error}"
+                    )))
+                }
+                Err(OrderedExecutionError::Delivery(error)) => Err(error),
+            };
 
             // EXITCODE is resolved after recipe processing because a failure
             // handler may assign it using values produced while filtering.

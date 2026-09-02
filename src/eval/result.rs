@@ -34,6 +34,12 @@ pub enum OrderedExecutionError<E> {
     Delivery(E),
 }
 
+impl<E> From<EvalError> for OrderedExecutionError<E> {
+    fn from(error: EvalError) -> Self {
+        Self::Evaluation(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum CompletionState<'a, E> {
     Completed(DeliveryOutcome),

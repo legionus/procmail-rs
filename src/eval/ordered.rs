@@ -647,7 +647,7 @@ where
     Ok(())
 }
 
-fn active_command_value_limit<E>(
+pub(super) fn active_command_value_limit<E>(
     runtime: &RuntimeVariables,
     target: AssignmentTarget,
     line: usize,

@@ -297,6 +297,79 @@ fn ordered_capture_uses_selected_area_strips_one_lf_and_continues() {
 }
 
 #[test]
+fn header_capture_runs_without_body_staging_and_updates_later_paths() {
+    let config = config::parse(":0 h\nVALUE=| capture\nNEXT=$VALUE\n:0\nmaildir:selected\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let mut head = head(b"Subject: test\n\nbody-not-read");
+    let mut runtime = RuntimeVariables::default();
+    let mut called = false;
+
+    assert!(!plan.requirements().needs_end_of_message);
+    let result = plan
+        .evaluate_headers_editing_with_capture_trace(
+            &mut head,
+            &mut runtime,
+            &mut NoTrace,
+            &mut |command, input, _, _, _, _, _| {
+                called = true;
+                assert_eq!(command, "capture");
+                assert_eq!(input, b"Subject: test\n\n");
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                    b"selected\n".to_vec(),
+                    crate::external_filter::InputWrite::Complete,
+                    crate::external_filter::ChildExit::Success,
+                ))
+            },
+        )
+        .unwrap();
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected a header-only decision");
+    };
+
+    assert!(called);
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"selected"[..]));
+    assert_eq!(runtime.get_bytes("NEXT"), Some(&b"selected"[..]));
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+}
+
+#[test]
+fn failed_header_capture_preserves_value_and_selects_error_handler() {
+    let config = config::parse("VALUE=old\n:0 hW\nVALUE=| capture\n:0 e\nmaildir:recovered\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let mut head = head(b"Subject: test\n\nbody-not-read");
+    let mut runtime = RuntimeVariables::default();
+
+    let result = plan
+        .evaluate_headers_editing_with_capture_trace(
+            &mut head,
+            &mut runtime,
+            &mut NoTrace,
+            &mut |_, _, _, _, _, _, _| {
+                Err::<CapturedCommand, _>(DeliveryAttemptError::Recoverable("failed"))
+            },
+        )
+        .unwrap();
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected the error handler to recover the capture failure");
+    };
+
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"old"[..]));
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("recovered".into())]
+    );
+}
+
+#[test]
 fn computes_nested_requirements_from_the_compiled_tree() {
     let plan = compile(":0\n* ^List-Id:\n{\n:0 B\n* body-marker\nmaildir:body\n}\n");
 

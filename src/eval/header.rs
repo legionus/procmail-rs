@@ -3,18 +3,48 @@
 
 use super::*;
 
+type HeaderCaptureExecutor<'a, E, T> = dyn FnMut(
+        &str,
+        &[u8],
+        OutputEnding,
+        Option<RecipeOptions>,
+        usize,
+        &mut RuntimeVariables,
+        &mut T,
+    ) -> Result<CapturedCommand, DeliveryAttemptError<E>>
+    + 'a;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct FanoutPlanState {
     pub(super) deliveries: Vec<PlannedDelivery>,
     pub(super) original_delivered: bool,
 }
 
-#[derive(Debug, Default)]
-pub(super) struct HeaderPlanState {
+#[derive(Debug)]
+pub(super) struct HeaderPlanState<E> {
     pub(super) execution: FanoutPlanState,
     pub(super) frames: Vec<ContinuationFrame>,
     pub(super) requirements: InputRequirements,
     pub(super) restart: bool,
+    pub(super) pending_error: Option<E>,
+}
+
+impl<E> Default for HeaderPlanState<E> {
+    fn default() -> Self {
+        Self {
+            execution: FanoutPlanState::default(),
+            frames: Vec::new(),
+            requirements: InputRequirements::default(),
+            restart: false,
+            pending_error: None,
+        }
+    }
+}
+
+struct HeaderPlanRoute<'a, 'executor, E, T> {
+    following: InputRequirements,
+    rc: RcExecutionContext<'a>,
+    capture: &'a mut Option<&'executor mut HeaderCaptureExecutor<'executor, E, T>>,
 }
 
 // A resumed sequence must move its position and prior-recipe state together.
@@ -82,13 +112,54 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> HeaderEvaluation {
+        match self.evaluate_headers_editing_inner::<std::convert::Infallible, _>(
+            head, runtime, trace, None,
+        ) {
+            Ok(evaluation) => evaluation,
+            Err(OrderedExecutionError::Evaluation(error)) => HeaderEvaluation::Error(error),
+            Err(OrderedExecutionError::Delivery(error)) => match error {},
+        }
+    }
+
+    pub fn evaluate_headers_editing_with_capture_trace<E, K, T>(
+        &self,
+        head: &mut MessageHead,
+        runtime: &mut RuntimeVariables,
+        trace: &mut T,
+        capture: &mut K,
+    ) -> Result<HeaderEvaluation, OrderedExecutionError<E>>
+    where
+        K: FnMut(
+            &str,
+            &[u8],
+            OutputEnding,
+            Option<RecipeOptions>,
+            usize,
+            &mut RuntimeVariables,
+            &mut T,
+        ) -> Result<CapturedCommand, DeliveryAttemptError<E>>,
+        T: TraceSink,
+    {
+        self.evaluate_headers_editing_inner(head, runtime, trace, Some(capture))
+    }
+
+    fn evaluate_headers_editing_inner<'a, E, T>(
+        &self,
+        head: &mut MessageHead,
+        runtime: &mut RuntimeVariables,
+        trace: &mut T,
+        mut capture: Option<&'a mut HeaderCaptureExecutor<'a, E, T>>,
+    ) -> Result<HeaderEvaluation, OrderedExecutionError<E>>
+    where
+        T: TraceSink,
+    {
         let initial_runtime = runtime.clone();
         // Actions such as pipes and locked delivery need the complete message
         // before any recipe is executed. Header editing is deliberately not
         // included here: it can safely update the bounded MessageHead and let
         // the existing streaming path forward the untouched body afterwards.
         if self.requires_preemptive_ordered_delivery {
-            return HeaderEvaluation::NeedsMessage(Continuation {
+            return Ok(HeaderEvaluation::NeedsMessage(Continuation {
                 frames: vec![ContinuationFrame {
                     recipe_index: 0,
                     state: SequenceState::default(),
@@ -99,7 +170,7 @@ impl ExecutionPlan {
                 runtime: runtime.clone(),
                 requirements: self.requirements(),
                 restart: false,
-            });
+            }));
         }
         let mut planning = HeaderPlanState::default();
         match self.root.plan_headers(
@@ -107,10 +178,13 @@ impl ExecutionPlan {
             runtime,
             trace,
             &mut planning,
-            InputRequirements::default(),
-            self.rc_context(),
+            HeaderPlanRoute {
+                following: InputRequirements::default(),
+                rc: self.rc_context(),
+                capture: &mut capture,
+            },
         ) {
-            Ok(HeaderControl::Deferred) => HeaderEvaluation::NeedsMessage(Continuation {
+            Ok(HeaderControl::Deferred) => Ok(HeaderEvaluation::NeedsMessage(Continuation {
                 frames: planning.frames,
                 execution: if planning.restart {
                     FanoutPlanState::default()
@@ -124,14 +198,17 @@ impl ExecutionPlan {
                 },
                 requirements: planning.requirements,
                 restart: planning.restart,
-            }),
+            })),
             Ok(HeaderControl::Continue | HeaderControl::Stop | HeaderControl::EndRcFile) => {
-                HeaderEvaluation::Decided(DeliveryPlan {
+                if let Some(error) = planning.pending_error {
+                    return Err(OrderedExecutionError::Delivery(error));
+                }
+                Ok(HeaderEvaluation::Decided(DeliveryPlan {
                     deliveries: planning.execution.deliveries,
                     original_delivered: planning.execution.original_delivered,
-                })
+                }))
             }
-            Err(error) => HeaderEvaluation::Error(error),
+            Err(error) => Err(error),
         }
     }
 
@@ -393,27 +470,32 @@ impl CompiledSequence {
         Ok(SequenceControl::Continue)
     }
 
-    fn plan_headers(
+    fn plan_headers<E, T>(
         &self,
         head: &mut MessageHead,
         runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-        planning: &mut HeaderPlanState,
-        following: InputRequirements,
-        context: RcExecutionContext<'_>,
-    ) -> Result<HeaderControl, EvalError> {
+        trace: &mut T,
+        planning: &mut HeaderPlanState<E>,
+        route: HeaderPlanRoute<'_, '_, E, T>,
+    ) -> Result<HeaderControl, OrderedExecutionError<E>>
+    where
+        T: TraceSink,
+    {
         let mut state = SequenceState::default();
 
         for (index, recipe) in self.recipes.iter().enumerate() {
-            let statement_following = self.requirements_from(index).union(following);
+            let statement_following = self.requirements_from(index).union(route.following);
             let statement_control = plan_statements_headers(
                 &recipe.preceding_statements,
                 head,
                 runtime,
                 trace,
                 planning,
-                statement_following,
-                context,
+                HeaderPlanRoute {
+                    following: statement_following,
+                    rc: route.rc,
+                    capture: route.capture,
+                },
             )?;
             if statement_control != HeaderControl::Continue {
                 return Ok(statement_control);
@@ -435,14 +517,14 @@ impl CompiledSequence {
                     condition_results,
                     assignments_applied: true,
                 });
-                planning.requirements = self.requirements_from(index).union(following);
+                planning.requirements = self.requirements_from(index).union(route.following);
                 return Ok(HeaderControl::Deferred);
             }
 
             let conditions_matched = matched == PartialMatch::True;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let has_error_handler = self.has_error_handler(index);
-            if conditions_matched && recipe.delivery_defers_header() {
+            if conditions_matched && recipe.delivery_defers_header(route.capture.is_some()) {
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Deferred,
@@ -453,17 +535,60 @@ impl CompiledSequence {
                     condition_results,
                     assignments_applied: true,
                 });
-                planning.requirements = self.requirements_from(index).union(following);
+                planning.requirements = self.requirements_from(index).union(route.following);
                 return Ok(HeaderControl::Deferred);
             }
+            let mut action_execution = ActionExecution::NotAttempted;
             let control = if conditions_matched {
+                action_execution = ActionExecution::Succeeded;
                 trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
                 match &recipe.action {
-                    CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => {
-                        return Err(EvalError::ExternalActionUnsupported { line: recipe.line });
+                    CompiledAction::Pipe { .. } => {
+                        return Err(
+                            EvalError::ExternalActionUnsupported { line: recipe.line }.into()
+                        );
+                    }
+                    CompiledAction::Capture { action, options } => {
+                        let limit = super::ordered::active_command_value_limit::<E>(
+                            runtime,
+                            action.target,
+                            action.line,
+                        )?;
+                        let executor = route
+                            .capture
+                            .as_deref_mut()
+                            .ok_or(EvalError::ExternalActionUnsupported { line: recipe.line })?;
+                        match executor(
+                            &action.command,
+                            head.as_bytes(),
+                            options.output_ending,
+                            Some(*options),
+                            limit,
+                            runtime,
+                            trace,
+                        ) {
+                            Ok(captured) => {
+                                let mut value = captured.into_output();
+                                if value.last() == Some(&b'\n') {
+                                    value.pop();
+                                }
+                                runtime.set_bytes(action.name.clone(), value.clone());
+                                record_command_assignment(action.line, &action.name, &value, trace);
+                                planning.pending_error = None;
+                                HeaderControl::Continue
+                            }
+                            Err(DeliveryAttemptError::Recoverable(error)) => {
+                                planning.pending_error = Some(error);
+                                action_execution = ActionExecution::Failed;
+                                HeaderControl::Continue
+                            }
+                            Err(DeliveryAttemptError::Fatal(error)) => {
+                                return Err(OrderedExecutionError::Delivery(error));
+                            }
+                        }
                     }
                     CompiledAction::Headers(action) => {
                         let action = action
@@ -500,14 +625,18 @@ impl CompiledSequence {
                             condition_results: Vec::new(),
                             assignments_applied: true,
                         });
-                        let child_following = self.requirements_from(index + 1).union(following);
+                        let child_following =
+                            self.requirements_from(index + 1).union(route.following);
                         let child = children.plan_headers(
                             head,
                             runtime,
                             trace,
                             planning,
-                            child_following,
-                            context,
+                            HeaderPlanRoute {
+                                following: child_following,
+                                rc: route.rc,
+                                capture: route.capture,
+                            },
                         )?;
                         if child != HeaderControl::Deferred {
                             planning.frames.pop();
@@ -525,10 +654,13 @@ impl CompiledSequence {
             if control == HeaderControl::Deferred {
                 return Ok(control);
             }
+            if action_execution == ActionExecution::Succeeded {
+                planning.pending_error = None;
+            }
             state.record(
                 recipe.control,
                 conditions_matched,
-                ActionExecution::Succeeded,
+                action_execution,
                 else_handled,
             );
             if control != HeaderControl::Continue {
@@ -542,8 +674,11 @@ impl CompiledSequence {
             runtime,
             trace,
             planning,
-            following,
-            context,
+            HeaderPlanRoute {
+                following: route.following,
+                rc: route.rc,
+                capture: route.capture,
+            },
         )?;
         if statement_control != HeaderControl::Continue {
             return Ok(statement_control);
@@ -645,6 +780,25 @@ impl CompiledSequence {
     }
 }
 
+fn record_command_assignment(
+    line: usize,
+    variable: &str,
+    value: &[u8],
+    trace: &mut impl TraceSink,
+) {
+    if let Ok(name) = TraceName::new(variable) {
+        trace.record(TraceEvent::VariableAssigned {
+            line: Some(line),
+            name,
+            source: TraceVariableSource::RcFile,
+            value: trace
+                .detail()
+                .includes_variable_values()
+                .then(|| TraceValue::new(value)),
+        });
+    }
+}
+
 impl CompiledNode {
     fn matches_headers(
         &self,
@@ -703,30 +857,30 @@ impl CompiledNode {
     }
 
     fn planning_gate(&self, state: SequenceState) -> bool {
-        // Fan-out planning never observes a publication result. Treat a/e as
-        // reachable after a matching predecessor so header analysis can
-        // defer before either branch is discarded; ordered execution later
-        // selects the branch from the real action result.
+        // Paths whose result is unavailable are moved to ordered execution
+        // before reaching this function. Header capture is different: its
+        // process has already finished, so a/e must use that actual result.
         match self.control {
             ControlFlow::Independent => true,
             ControlFlow::AfterChainMatch => state.chain_base_matched.unwrap_or(false),
-            ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError => state
-                .previous
-                .is_some_and(|result| result.conditions_matched),
+            ControlFlow::AfterPreviousSuccess => state.previous.is_some_and(|result| {
+                result.conditions_matched && result.action == ActionExecution::Succeeded
+            }),
+            ControlFlow::AfterPreviousError => state.previous.is_some_and(|result| {
+                result.conditions_matched && result.action == ActionExecution::Failed
+            }),
             ControlFlow::Else => state.previous.is_none_or(|result| !result.else_handled),
         }
     }
 
-    fn delivery_defers_header(&self) -> bool {
+    fn delivery_defers_header(&self, capture_available: bool) -> bool {
         match &self.action {
-            CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => true,
+            CompiledAction::Pipe { .. } => true,
+            CompiledAction::Capture { options, .. } => {
+                !capture_available || options.action_input != ActionInput::Headers
+            }
             CompiledAction::Deliver { destination, .. } => {
-                destination.needs_runtime_variables()
-                    || matches!(destination, Destination::Mbox(_))
-                    || matches!(
-                        self.control,
-                        ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
-                    )
+                destination.needs_runtime_variables() || matches!(destination, Destination::Mbox(_))
             }
             CompiledAction::Block(_) => false,
             CompiledAction::Headers(_) => false,
@@ -869,21 +1023,24 @@ fn plan_statements_complete(
     Ok(SequenceControl::Continue)
 }
 
-fn plan_statements_headers(
+fn plan_statements_headers<E, T>(
     statements: &[CompiledStatement],
     head: &mut MessageHead,
     runtime: &mut RuntimeVariables,
-    trace: &mut impl TraceSink,
-    planning: &mut HeaderPlanState,
-    following: InputRequirements,
-    context: RcExecutionContext<'_>,
-) -> Result<HeaderControl, EvalError> {
+    trace: &mut T,
+    planning: &mut HeaderPlanState<E>,
+    route: HeaderPlanRoute<'_, '_, E, T>,
+) -> Result<HeaderControl, OrderedExecutionError<E>>
+where
+    T: TraceSink,
+{
     for statement in statements {
         match statement {
             CompiledStatement::CommandAssignment(assignment) => {
                 return Err(EvalError::ExternalActionUnsupported {
                     line: assignment.line,
-                });
+                }
+                .into());
             }
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, runtime, trace)?;
@@ -895,19 +1052,18 @@ fn plan_statements_headers(
                 }
             }
             CompiledStatement::Include(include) => {
-                include.ensure_loaded(runtime, context)?;
+                include.ensure_loaded(runtime, route.rc)?;
                 if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded() {
                     if sequence.requires_preemptive_ordered_delivery() {
                         planning.frames.clear();
                         planning.restart = true;
-                        planning.requirements =
-                            sequence
-                                .requirements()
-                                .union(following)
-                                .union(InputRequirements {
-                                    needs_end_of_message: true,
-                                    ..InputRequirements::default()
-                                });
+                        planning.requirements = sequence
+                            .requirements()
+                            .union(route.following)
+                            .union(InputRequirements {
+                                needs_end_of_message: true,
+                                ..InputRequirements::default()
+                            });
                         return Ok(HeaderControl::Deferred);
                     }
                     let child = sequence.plan_headers(
@@ -915,8 +1071,11 @@ fn plan_statements_headers(
                         runtime,
                         trace,
                         planning,
-                        following,
-                        context.descend()?,
+                        HeaderPlanRoute {
+                            following: route.following,
+                            rc: route.rc.descend()?,
+                            capture: route.capture,
+                        },
                     )?;
                     if child == HeaderControl::Deferred {
                         // Continuation frames point into the static root tree.
@@ -928,7 +1087,7 @@ fn plan_statements_headers(
                         planning.requirements = planning
                             .requirements
                             .union(sequence.requirements())
-                            .union(following);
+                            .union(route.following);
                         return Ok(HeaderControl::Deferred);
                     }
                     if child == HeaderControl::Stop {
@@ -940,7 +1099,7 @@ fn plan_statements_headers(
                 // Requirements after this statement are unreachable after a
                 // successful switch. If the dynamic target needs the body,
                 // restart from the private root plan after staging it.
-                switch.ensure_loaded(runtime, context)?;
+                switch.ensure_loaded(runtime, route.rc)?;
                 match &*switch.loaded() {
                     LoadedRuntimeRc::Unloaded => unreachable!(),
                     LoadedRuntimeRc::Failed => {}
@@ -961,8 +1120,11 @@ fn plan_statements_headers(
                             runtime,
                             trace,
                             planning,
-                            InputRequirements::default(),
-                            context.descend()?,
+                            HeaderPlanRoute {
+                                following: InputRequirements::default(),
+                                rc: route.rc.descend()?,
+                                capture: route.capture,
+                            },
                         )?;
                         if child == HeaderControl::Deferred {
                             // Replaying from the root reconstructs the dynamic

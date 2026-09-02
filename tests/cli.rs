@@ -99,6 +99,44 @@ fn bare_host_stops_processing_as_a_successful_fake_delivery() {
 }
 
 #[test]
+fn header_capture_runs_before_body_streaming_without_maildir_setting() {
+    let path = config_file("");
+    let selected = path.parent().unwrap().join("selected");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            ":0 hW\nHEADER_SIZE=| wc -c\n:0\n* HEADER_SIZE ?? 15\nmaildir:{}/\n",
+            selected.display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: test\n\nbody remains streamed\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(
+        delivered_messages(&selected),
+        [b"Subject: test\n\nbody remains streamed\n".to_vec()]
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn matching_host_continues_processing() {
     let path = config_file("");
     fs::write(

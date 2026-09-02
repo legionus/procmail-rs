@@ -2,8 +2,8 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use crate::config::{
-    Assignment, AssignmentTarget, ConditionInput, Config, ContinuationMode, ControlFlow,
-    Destination, OutputEnding, PipeAction, RecipeOptions,
+    ActionInput, Assignment, AssignmentTarget, ConditionInput, Config, ContinuationMode,
+    ControlFlow, Destination, OutputEnding, PipeAction, RecipeOptions,
 };
 use crate::limits::MessageLimits;
 use crate::message::{Message, MessageHead, StreamedMessage};

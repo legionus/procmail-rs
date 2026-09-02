@@ -203,17 +203,18 @@ impl CompiledSequence {
         self.trailing_statements
             .iter()
             .any(statement_requires_ordered_message)
-            || self.recipes.iter().enumerate().any(|(index, recipe)| {
+            || self.recipes.iter().any(|recipe| {
                 recipe.requires_preemptive_ordered_delivery()
                     || recipe
                         .preceding_statements
                         .iter()
                         .any(statement_requires_ordered_message)
-                    || (index != 0
-                        && matches!(
-                            recipe.control,
-                            ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
-                        ))
+            })
+            || self.recipes.windows(2).any(|pair| {
+                matches!(
+                    pair[1].control,
+                    ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
+                ) && !pair[0].header_action_result_is_known()
             })
     }
 
@@ -321,6 +322,14 @@ impl CompiledSequence {
 }
 
 impl CompiledNode {
+    fn header_action_result_is_known(&self) -> bool {
+        matches!(
+            &self.action,
+            CompiledAction::Capture { options, .. }
+                if options.action_input == ActionInput::Headers
+        ) || matches!(&self.action, CompiledAction::Headers(_))
+    }
+
     fn compile(recipe: &Recipe, preceding_statements: Vec<CompiledStatement>) -> Self {
         let conditions = compile_conditions(recipe);
         let action = match &recipe.action {
