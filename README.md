@@ -179,6 +179,39 @@ copy and staging file receive the same input pass but remain private until the
 body has been read and validated. An input-limit or write failure therefore
 cannot publish that early copy.
 
+## Command output assignments
+
+External command output can be assigned in the two forms supported by
+procmail 3.22:
+
+```text
+VALUE="prefix-`command`-suffix"
+
+:0 hW
+VALUE=| command
+```
+
+Backquoted substitutions each receive the complete current message, remove all
+trailing LF bytes from stdout, and ignore an ordinary nonzero exit status. A
+`NAME=| command` recipe uses the selected `h`, `b`, or complete-message input,
+removes exactly one trailing LF, and observes child failure when `w` or `W` is
+present. `i` applies only to a failed stdin write. Failed recipe capture leaves
+the previous value untouched and can activate a following `e` recipe.
+
+Both forms run through the configured `SHELL` and pass `SHELLFLAGS` as one
+argument before the command text. The child receives a fresh bounded
+environment made from rc variables rather than the ambient process
+environment. Its stderr goes to `LOGFILE`, or to procmail-rs stderr when no
+log is selected.
+
+Raw stdout is limited to the smaller of the active `LINEBUF` and the fixed
+ceiling for the assigned variable. Overflow and `TIMEOUT` fail the assignment
+without exposing a partial value; timeout is an error even when a capture
+recipe omits `w` and `W`. `check` and `explain` never execute these commands or
+display their text and values. See
+[Documentation/Compatibility.md](Documentation/Compatibility.md) for complete
+input, newline, status, and compatibility details.
+
 ## External command timeout
 
 `TIMEOUT` defaults to 960 seconds and accepts decimal values from 1 through

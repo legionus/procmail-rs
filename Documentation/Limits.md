@@ -66,6 +66,14 @@ Fixed ceilings that cannot be raised by an rc file are:
 | One trace event / detailed value prefix | 1024 / 256 bytes |
 | Maildir or staging name attempts | 128 |
 
+Command-output assignments apply two limits at once. Raw stdout is rejected
+before newline removal when it exceeds the smaller of the active `LINEBUF` and
+the fixed ceiling for the destination variable: 4096 bytes for `MAILDIR`,
+`LOGFILE`, `LOCKFILE`, `LOCKEXT`, `SHELL`, `SHELLFLAGS`, and `PATH`, and 64 KiB
+for other assignable variables. Literal and expanded fragments in a backquoted
+assignment share that same final-value budget. The implementation does not
+truncate command output or retain a partial assignment.
+
 `TIMEOUT` defaults to 960 seconds and `LOCKTIMEOUT` to 1024 seconds. Both
 accept decimal values from 1 through 86400; zero is rejected because waits
 must be finite. `UMASK` accepts octal `0000` through `0777` and defaults to

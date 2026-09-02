@@ -30,13 +30,13 @@ rejected explicitly or is an ordinary user variable assignment.
 
 | Syntax area | Supported forms |
 | --- | --- |
-| Statements | `NAME=value`, `INCLUDERC=expression`, `SWITCHRC=expression`, recipes, and nested recipe blocks |
+| Statements | `NAME=value`, assignments containing backquoted commands, `INCLUDERC=expression`, `SWITCHRC=expression`, recipes, and nested recipe blocks |
 | Variable references | `$NAME`, `${NAME}`, and `${NAME:-expression}` with bounded nesting; one outer pair of double quotes may surround an assignment value |
 | Recipe header | `:0` followed by flags and an optional `: lockfile` |
 | Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
 | Conditions | Byte regex, leading `!` negation, `? shell command`, `< size`, `> size`, `H ?? regex`, `B ?? regex`, and `$NAME ?? regex` |
-| Actions | Explicit Maildir or mbox delivery, trusted shell pipe action, `{ ... }` block, and the procmail-rs `headers { ... }` extension |
+| Actions | Explicit Maildir or mbox delivery, trusted shell pipe action, command-output capture with `NAME=| command`, `{ ... }` block, and the procmail-rs `headers { ... }` extension |
 | Regex additions | Procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `\+`, `\?`, `\|`, capture assignment with `\/`, and numbered `MATCH1` through the configured capture ceiling |
 | Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
 | External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
@@ -49,6 +49,64 @@ environment-prefix assignments, quoting, expansion, redirection, and pipelines
 therefore follow that shell rather than an internal command tokenizer. Rc
 variable expansion remains the limited syntax listed above and does not become
 general shell evaluation.
+
+## Command output assignments
+
+Two procmail-compatible forms assign the stdout of a trusted shell command to
+an rc variable. They execute only during `filter`; `check` and `explain`
+validate and report the presence of shell execution without running it or
+showing command text or assigned values.
+
+A backquoted command may appear among literal and expanded fragments in an
+ordinary assignment:
+
+```text
+LABEL="prefix-`printf '%s\n' "$MATCH1"`-suffix"
+```
+
+Each substitution receives the complete current message independently on
+stdin. All trailing LF bytes are removed from its stdout before the next
+fragment is appended. A normal nonzero child status does not suppress the
+captured bytes. Every fragment is assembled privately, and the variable is
+changed only after all commands and expansions succeed. Reaching this form
+requires complete replayable input and therefore private staging under the
+active `MAILDIR`.
+
+A recipe action captures stdout with different newline and status behavior:
+
+```text
+:0 hW
+FIELD=| extract-field
+```
+
+The `h` flag selects the header section including its terminating empty line,
+`b` selects only the body, and neither flag selects the complete current
+message. Without `r`, one LF is appended to the selected input when it lacks
+one; `r` preserves the selected ending. Header-only capture can execute before
+the body is read, while body and complete-message capture require staging.
+Exactly one trailing LF is removed from successful stdout.
+
+Without `w` or `W`, a normal nonzero child status is ignored. With either flag
+it makes the action fail and preserves the variable's previous value; `W`
+only suppresses the child-failure diagnostic. The `i` flag ignores only a
+failure while writing the selected input. A failed capture can select a
+following `e` recipe, while a successful one can select `a` or `A`, and the
+recipe sequence continues after a successful assignment.
+
+For both forms, stdout is read concurrently with stdin and is bounded before
+allocation grows past the active limit. The raw captured output, before LF
+removal, may not exceed the smaller of the active `LINEBUF` and the fixed
+ceiling for the destination variable. Exceeding that limit terminates the
+process group and fails the assignment. `TIMEOUT` also covers input, output,
+and child termination; a timeout always fails a command-output assignment,
+even without `w` or `W`. Stderr is appended to `LOGFILE`, or inherits
+procmail-rs stderr when no log is selected.
+
+Commands run as `SHELL SHELLFLAGS command`, where `SHELLFLAGS` is passed as one
+argument. The child environment is rebuilt only from bounded runtime rc
+variables and the defaults `SHELL=/bin/sh`, `SHELLFLAGS=-c`, and
+`PATH=/usr/bin:/bin`; the ambient process environment is not inherited. The
+shell path must be absolute and may not contain empty, `.` or `..` components.
 
 ## Native header editing extension
 
@@ -127,6 +185,8 @@ instead of silently assigning it another meaning.
 | Unsupported reserved variables | Variables such as `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` retain their original special meanings. | Rejects these names explicitly in assignments, `--set`, and expansion references. Unknown names remain ordinary user variables. |
 | `LOGABSTRACT` | Defaults to a final abstract containing `From`, `Subject`, destination, and message size; `no` suppresses it and `all` logs every successful delivery. | Accepts only the exact value `no`, including after bounded variable expansion. Abstract logging remains disabled because other modes could expose sensitive header values. A statically known unsupported value is rejected before message input; a runtime-derived value is rejected when its selected assignment executes. |
 | Pipe command parsing | Uses a hybrid direct-command and shell parser. | Runs every trusted pipe command through the configured, policy-checked shell. |
+| Captured NUL bytes | A NUL from a backquoted command terminates the assigned value. | Preserves NUL as variable data. A later external command cannot receive such a value because operating-system environment entries cannot contain NUL. |
+| Command-output bounds | `LINEBUF` overflow may truncate data and set `PROCMAIL_OVERFLOW`; waits may be unbounded under compatible settings. | Rejects raw stdout beyond the active `LINEBUF` or destination-variable ceiling and always applies finite `TIMEOUT` supervision. No partial value is assigned. |
 | mbox in general-filter mode | A bare output file does not gain a generated postmark. | Explicit `mbox:` delivery always writes a complete mboxrd record with a generated postmark. |
 | `i` on mbox or Maildir | May ignore a failed write and report success after a partial append or publish a truncated Maildir file. | Rejected before message input. Filesystem publication must complete successfully. |
 | `i` on a recipe block | Ignored with a warning. | Ignored with a source-located warning; filesystem delivery still rejects `i`. |
