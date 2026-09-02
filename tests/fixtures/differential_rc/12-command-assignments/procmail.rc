@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+MAILDIR=.
+HEADER=old
+SUFFIX=old
+
+:0 hW
+HEADER=| sed -n 's/^Subject: //p'
+
+:0 A
+{
+  SUFFIX=`printf 'captured\n\n'`
+}
+
+:0
+$OUT/$HEADER-$SUFFIX

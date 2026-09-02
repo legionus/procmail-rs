@@ -31,3 +31,7 @@ The TRAP case records that the command receives the final message after an
 `fw` replacement and that procmail appends one LF to the command input. Its
 `expected.trap` file is compared byte for byte and is not treated as a
 delivery destination.
+
+The command-assignments case records header-only capture, a following success
+recipe, a backquoted assignment inside its block, and the distinct trailing
+newline removal rules before the resulting values select the destination.

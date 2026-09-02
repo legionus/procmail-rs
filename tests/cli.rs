@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn config_file(contents: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -134,6 +134,112 @@ fn header_capture_runs_before_body_streaming_without_maildir_setting() {
         [b"Subject: test\n\nbody remains streamed\n".to_vec()]
     );
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn command_assignments_cross_runtime_include_and_switch_boundaries() {
+    let path = config_file("");
+    let directory = path.parent().unwrap();
+    let include = directory.join("include.rc");
+    let switched = directory.join("switched.rc");
+    let output = directory.join("result");
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nBASE={}\nOUT={}\n:0 hW\nRC_NAME=| printf include\nINCLUDERC=$BASE/$RC_NAME.rc\n:0\nmbox:$OUT-wrong\n",
+            directory.display(),
+            directory.display(),
+            output.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &include,
+        "SWITCH_NAME=`printf 'switched\\n\\n'`\nSWITCHRC=$BASE/$SWITCH_NAME.rc\n",
+    )
+    .unwrap();
+    fs::write(
+        &switched,
+        ":0\n{\n  :0 hW\n  SUBJECT=| sed -n 's/^Subject: //p'\n}\n:0\nmbox:$OUT-$SUBJECT\n",
+    )
+    .unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: selected\n\nbody\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(0), "{:?}", result.stderr);
+    assert!(directory.join("result-selected").is_file());
+    assert!(!directory.join("result-wrong").exists());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn check_and_explain_hide_command_assignment_details() {
+    let path = config_file(
+        "PRIVATE=`printf output-secret`\n:0 h\nCAPTURED=| command-secret\n:0\nmaildir:selected\n",
+    );
+
+    for action in ["check", "explain"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args([action, "--config"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_message_contents_absent(
+            &output.stdout,
+            &["command-secret", "output-secret", "PRIVATE"],
+        );
+        assert_message_contents_absent(
+            &output.stderr,
+            &["command-secret", "output-secret", "PRIVATE"],
+        );
+    }
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn capture_timeout_and_infinite_output_fail_within_finite_time() {
+    for command in ["sleep 30", "while :; do printf 0123456789abcdef; done"] {
+        let path = config_file(&format!(
+            "TIMEOUT=1\nLINEBUF=128\n:0 hW\nVALUE=| {command}\n"
+        ));
+        let started = Instant::now();
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(b"Subject: test\n\nbody\n")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(75), "{:?}", output.stderr);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }
 
 #[test]

@@ -370,6 +370,40 @@ fn failed_header_capture_preserves_value_and_selects_error_handler() {
 }
 
 #[test]
+fn successful_header_capture_selects_success_handler() {
+    let config = config::parse(":0 hW\nVALUE=| capture\n:0 a\nmaildir:succeeded\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let mut head = head(b"Subject: test\n\nbody-not-read");
+    let mut runtime = RuntimeVariables::default();
+
+    let result = plan
+        .evaluate_headers_editing_with_capture_trace(
+            &mut head,
+            &mut runtime,
+            &mut NoTrace,
+            &mut |_, _, _, _, _, _, _| {
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                    b"value".to_vec(),
+                    crate::external_filter::InputWrite::Complete,
+                    crate::external_filter::ChildExit::Success,
+                ))
+            },
+        )
+        .unwrap();
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected the success handler to finish header evaluation");
+    };
+
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("succeeded".into())]
+    );
+}
+
+#[test]
 fn header_capture_validates_output_limit_before_replacing_value() {
     let config =
         config::parse("VALUE=old\nLINEBUF=128\n:0 h\nVALUE=| capture\n:0\nmaildir:selected\n")
