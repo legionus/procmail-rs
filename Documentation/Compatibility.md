@@ -8,9 +8,12 @@ a drop-in local delivery agent, and compatibility never permits partial
 delivery, implicit mailbox selection, unbounded input, or ambient environment
 imports.
 
-An unsupported construct is rejected with its rc source line before stdin is
-read whenever it can be identified during configuration loading. Runtime rc
-files are checked when their `INCLUDERC` or `SWITCHRC` statement executes.
+An unsupported construct is intended to be rejected with its rc source line
+before stdin is read whenever it can be identified during configuration
+loading. Runtime rc files are checked when their `INCLUDERC` or `SWITCHRC`
+statement executes. The audit below identifies remaining syntax that can still
+be accepted with a different meaning; until those cases are fixed, a successful
+`check` does not by itself establish compatibility with procmail 3.22.
 
 ## Implemented compatibility
 
@@ -25,8 +28,9 @@ ceilings and supported recipe subset.
 
 ## Supported rc subset
 
-The accepted syntax is intentionally closed: syntax not listed here is either
-rejected explicitly or is an ordinary user variable assignment.
+The intended accepted syntax is closed. The reference audit below records the
+remaining places where syntax outside this table is not yet distinguished from
+a supported regex, assignment value, or destination.
 
 | Syntax area | Supported forms |
 | --- | --- |
@@ -37,12 +41,90 @@ rejected explicitly or is an ordinary user variable assignment.
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
 | Conditions | Byte regex, leading `!` negation, `? shell command`, `< size`, `> size`, `H ?? regex`, `B ?? regex`, and `$NAME ?? regex` |
 | Actions | Explicit Maildir or mbox delivery, explicit discard through an unmarked `/dev/null`, trusted shell pipe action, command-output capture with `NAME=| command`, `{ ... }` block, and the procmail-rs `headers { ... }` extension |
-| Regex additions | Procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `\+`, `\?`, `\|`, capture assignment with `\/`, and numbered `MATCH1` through the configured capture ceiling |
+| Regex additions | Procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `^^`, capture assignment with `\/`, and numbered `MATCH1` through the configured capture ceiling |
 | Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
 | External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
 | Logging | `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, and `LOGDETAIL=values`; metadata mode omits sensitive values by default |
 | Process settings | `SHELL`, `SHELLFLAGS`, `PATH`, `TIMEOUT`, `TRAP`, `EXITCODE`, and `UMASK` |
 | Delivery settings | `MAILDIR`, `DURABILITY`, `LOCKMETHOD`, `LOCKFILE`, `LOCKEXT`, and `LOCKTIMEOUT` |
+
+## Reference audit
+
+This section compares the accepted language with `procmailrc(5)`, the
+practical recipes in `procmailex(5)`, the scoring rules in `procmailsc(5)`,
+and the corresponding procmail 3.22 parser and evaluator. `external/` is only
+a review source; installed procmail-rs tests do not depend on it.
+
+### Rc language
+
+| Documented procmail behavior | Current status | Compatibility consequence |
+| --- | --- | --- |
+| Ordinary regex, `!`, `?`, `<`, `>`, and `NAME ??` conditions | Supported within the limits described above. | Program conditions use the configured trusted shell and finite `TIMEOUT`. |
+| A condition beginning with `$` is expanded using shell substitution rules inside double quotes and then reparsed as a condition. | Not implemented or explicitly recognized. | The line is currently compiled as a regex and can silently make a different decision. This is a high-priority parser fix. |
+| `w^x` weighted regex, program, and length conditions; final score in `$=` | Not implemented or explicitly recognized. | A scoring prefix can currently be compiled as part of a regex. The recipe can silently behave differently. All scoring forms must first be rejected as a unit, then implemented together with bounded match counting, checked numeric handling, and `$=`. |
+| A trailing backslash continues a condition; shell-expanded conditions retain continuation whitespace. | Not implemented. | The first physical line can become a complete regex and the next physical line can be taken as the action. Detect and reject this form before adding bounded continuation support. |
+| Procmail ERE operators and its `^`, `$`, `^^`, `\<`, `\>`, and `\/` extensions | Partly supported through the Rust byte-regex engine and explicit translations. | Procmail chooses the leftmost shortest match except while computing `MATCH`; the Rust engine has different disambiguation. Procmail treats `{` as an ordinary byte and does not support named character classes, while the Rust engine accepts counted repetition and POSIX classes. These differences can change both decisions and captures and need differential fixtures or explicit rejection. |
+| Shell-style assignments, including single and double quotes, escapes, unsetting with bare `NAME`, field splitting, and all documented parameter forms | Only the bounded subset in the supported table is implemented. | Unsupported `$` forms are rejected, but single quotes, backslash escapes, inline comment boundaries, and some unquoted shell syntax can remain literal and therefore change values silently. Assignment tokenization should reject every unimplemented form before broader expansion is added. |
+| Backquoted commands in assignments and in mailbox names | Implemented only in assignments. | A backquoted mailbox component such as `` `date +%y-%m`/meeting `` is currently a literal destination expression. Destination command substitution needs either compatible bounded execution or an explicit parse error. |
+| `| command`, `NAME=| command`, and a sole `|` that writes the selected input to stdout | Command and capture forms are supported; an empty command is rejected. | Filter configurations using `DEFAULT=|` remain outside project scope, but an explicit pipe-to-stdout recipe could be implemented without selecting an implicit destination. |
+| A pipe without `w` or `W` may continue without waiting after its input has been accepted. | procmail-rs supervises and reaps every shell even when its normal exit status is ignored. | Side-effect timing and lock lifetime differ. Preserving process supervision is safer; compatibility may require a documented asynchronous mode rather than weakening the default silently. |
+| `c` on a nesting block clones processing and lets the parent skip the block. | Explicitly rejected. | Supporting it requires two bounded execution branches and clear publication/error ordering; it must not be approximated as an ordinary block. |
+| `h` or `b` on file delivery writes only the selected part and may discard the other part. | Explicitly rejected for filesystem delivery. | This is a deliberate data-loss prevention measure. Keep it as an explicit difference unless partial-message delivery becomes an opt-in feature. |
+| Mailbox actions may contain several directory destinations, ordinary directory folders, MH folders ending in `/.`, or Maildir folders ending in `/`. | Only one mbox or Maildir target is accepted; ordinary directory folders, MH folders, and multi-folder hardlink delivery are absent. | A space-separated destination list can currently become one filename or one Maildir path. Reject multiple destination words until their parsing and all-or-partial publication behavior are defined. |
+| Existing directories can select directory delivery even without a suffix. | Deliberately not inferred from filesystem state. | Use `maildir:PATH` or a trailing `/`; every other bare path deterministically selects mbox. |
+| `INCLUDERC` and `SWITCHRC` execute in statement order; empty `SWITCHRC` ends the current rc file; `/dev/null` is a valid switch target. | Ordered include, switch, and empty switch are supported with bounded runtime loading. `/dev/null` is rejected by the regular-file policy. | The file ownership and mode checks are deliberate. A special empty `/dev/null` switch could improve compatibility without reading a device, but must retain explicit transition accounting. |
+| Old `:n` recipe headers and unlimited nesting | Only `:0` and bounded nesting are accepted. | Both differences fail explicitly and do not risk a different delivery. |
+
+### Documented variables
+
+| Status | Variables | Notes |
+| --- | --- | --- |
+| Supported or intentionally narrowed | `HOME`, `LOGNAME`, `PATH`, `SHELL`, `SHELLFLAGS`, `MAILDIR`, `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, `LOCKFILE`, `LOCKEXT`, `LOCKTIMEOUT`, `TIMEOUT`, `HOST`, `UMASK`, `TRAP`, `EXITCODE`, `LASTFOLDER`, `MATCH`, `INCLUDERC`, `SWITCHRC`, `PROCMAIL_VERSION`, and `LINEBUF` | Exact restrictions are recorded in this document and in the limits documentation. `MATCH1`, `MATCH2`, and later numbered captures are procmail-rs additions. |
+| Explicitly rejected | `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` | These names cannot accidentally act as ordinary variables. |
+| Not yet recognized as reserved | `LOCKSLEEP` and `DROPPRIVS` | They are currently accepted as ordinary variables and have no documented effect. They must be rejected explicitly; implementing `DROPPRIVS` is outside project scope, while a bounded `LOCKSLEEP` could later control lock retry intervals. |
+| Original startup environment behavior | `IFS`, `ENV`, and `PWD` are cleared or preset, and other ambient variables are generally imported. | procmail-rs instead builds a bounded child environment from its runtime variable table. This is deliberate, but rc assignments with these names remain ordinary exported variables. |
+
+### Coverage of `procmailex(5)` patterns
+
+The common examples using regex selection, mbox delivery, Maildir delivery,
+copy recipes, `A`/`a`/`E`/`e`, program conditions, external filters,
+command-output assignments, `MATCH`, `TRAP`, and `EXITCODE` have corresponding
+implementation paths. The manual's forwarding and autoreply examples remain
+outside project scope. Its scoring, destination-backquote, directory-folder,
+MH, multi-folder, pipe-to-stdout, `$`-condition, and block-copy examples expose
+the gaps listed above.
+
+The stored differential fixtures cover only a selected subset of syntax and
+evaluation. They do not yet constitute a systematic example-by-example suite
+for all supported manual constructs, nor do they compare regex match spans and
+`MATCH` values across ambiguous expressions.
+
+### Compatibility improvement order
+
+1. Make dangerous ambiguity fail closed: recognize scoring prefixes, `$`
+   conditions, continued conditions, destination backquotes, multiple
+   destination words, and the two missing reserved variables. Add a parser
+   test showing that each is rejected before stdin is read.
+2. Add differential fixtures for the complete supported flag matrix, condition
+   search areas, folded headers, malformed headers, shell status handling,
+   capture values, and regex match spans. Generate and review the reference
+   results once with procmail 3.22, then keep tests independent of `external/`.
+3. Align the regex dialect where it can be done without weakening bounds:
+   reject or translate counted repetition and named character classes, then
+   investigate leftmost-shortest matching and `MATCH` selection separately.
+4. Implement the shell-expanded `$` condition with bounded intermediate text
+   and reparsing. This is broadly used in `procmailex(5)` for safely inserting
+   variable text into a condition.
+5. Decide whether weighted scoring is needed by real migration rc files. If it
+   is, implement all three scoring categories and `$=` together; partial
+   scoring support would make mixed recipes misleading.
+6. Add bounded destination command substitution and explicit pipe-to-stdout if
+   migration configurations require them. Keep implicit `DEFAULT` delivery,
+   forwarding, privilege changes, and sendmail integration outside scope.
+7. Consider ordinary directory folders, MH folders, and multi-folder delivery
+   only after their naming, locking, rollback, hardlink, and partial-publication
+   behavior has dedicated tests. Do not recover compatibility by inspecting a
+   bare path and choosing a backend from mutable filesystem metadata.
 
 Shell command text is passed to the selected trusted shell. Shell parsing,
 environment-prefix assignments, quoting, expansion, redirection, and pipelines
