@@ -465,6 +465,51 @@ fn rejects_recipe_without_action() {
 }
 
 #[test]
+fn rejects_conditions_that_would_otherwise_change_meaning() {
+    for (source, message) in [
+        (
+            ":0\n* $^To:.*$LOGNAME\nmailbox\n",
+            "shell-expanded recipe conditions are not supported",
+        ),
+        (
+            ":0\n* ! 20^1 ^From:\nmailbox\n",
+            "weighted recipe conditions are not supported",
+        ),
+        (
+            ":0\n* ^Subject: one\\\n  two\nmailbox\n",
+            "continued recipe conditions are not supported",
+        ),
+    ] {
+        let error = parse(source).unwrap_err();
+        assert_eq!(error.line, 2, "{source:?}");
+        assert_eq!(error.message, message, "{source:?}");
+    }
+
+    assert!(parse(":0\n* 20^subject\nmailbox\n").is_ok());
+}
+
+#[test]
+fn rejects_ambiguous_destination_actions() {
+    for (action, message) in [
+        (
+            "`date +%y-%m`/meeting",
+            "command substitution in a destination is not supported",
+        ),
+        (
+            "first second/",
+            "multiple unmarked mailbox destinations are not supported",
+        ),
+    ] {
+        let error = parse(&format!(":0\n{action}\n")).unwrap_err();
+        assert_eq!(error.line, 2, "{action:?}");
+        assert_eq!(error.message, message, "{action:?}");
+    }
+
+    assert!(parse(":0\nmbox:path with spaces\n").is_ok());
+    assert!(parse(":0\nmaildir:path with spaces\n").is_ok());
+}
+
+#[test]
 fn rejects_unsupported_flag() {
     let error = parse(":0 q\ninbox/\n").unwrap_err();
 

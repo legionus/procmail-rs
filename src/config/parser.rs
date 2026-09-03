@@ -454,6 +454,9 @@ fn parse_recipe(
     let is_pipe = action.starts_with('|');
     let is_command_action = is_pipe || capture.is_some();
     let is_headers = action == "headers {";
+    if !is_command_action && !is_headers && action != "{" {
+        validate_destination_syntax(action, index + 1)?;
+    }
     if is_headers {
         // Header edits are internal transformations rather than deliveries or
         // child processes. Reject options whose meaning depends on either,
@@ -568,6 +571,7 @@ fn parse_recipe(
                 line: index + 1,
                 runtime_dependent: false,
                 runtime_base: false,
+                typed_destination: true,
                 expansion: None,
             })),
             index + 1,
@@ -580,6 +584,7 @@ fn parse_recipe(
                 line: index + 1,
                 runtime_dependent: false,
                 runtime_base: false,
+                typed_destination: true,
                 expansion: None,
             })),
             index + 1,
@@ -592,6 +597,7 @@ fn parse_recipe(
                 line: index + 1,
                 runtime_dependent: false,
                 runtime_base: false,
+                typed_destination: false,
                 expansion: None,
             })),
             index + 1,
@@ -604,6 +610,7 @@ fn parse_recipe(
                 line: index + 1,
                 runtime_dependent: false,
                 runtime_base: false,
+                typed_destination: false,
                 expansion: None,
             })),
             index + 1,
@@ -619,6 +626,25 @@ fn parse_recipe(
         action,
     };
     Ok((recipe, next))
+}
+
+fn validate_destination_syntax(action: &str, line: usize) -> Result<(), ParseError> {
+    if action.contains('`') {
+        return Err(ParseError::new(
+            line,
+            "command substitution in a destination is not supported",
+        ));
+    }
+    if !action.starts_with("mbox:")
+        && !action.starts_with("maildir:")
+        && action.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(ParseError::new(
+            line,
+            "multiple unmarked mailbox destinations are not supported",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_capture_action_prefix(
@@ -1085,6 +1111,12 @@ fn parse_condition(
     regex_limit: usize,
 ) -> Result<(Condition, bool), ParseError> {
     let mut input = input.trim();
+    if input.ends_with('\\') {
+        return Err(ParseError::new(
+            line,
+            "continued recipe conditions are not supported",
+        ));
+    }
     let mut negated = false;
     while let Some(rest) = input.strip_prefix('!') {
         negated = !negated;
@@ -1093,6 +1125,18 @@ fn parse_condition(
 
     if input.is_empty() {
         return Err(ParseError::new(line, "condition is empty"));
+    }
+    if input.starts_with('$') {
+        return Err(ParseError::new(
+            line,
+            "shell-expanded recipe conditions are not supported",
+        ));
+    }
+    if has_scoring_prefix(input) {
+        return Err(ParseError::new(
+            line,
+            "weighted recipe conditions are not supported",
+        ));
     }
 
     let (kind, is_regex) = if let Some(value) = input.strip_prefix('<') {
@@ -1185,6 +1229,31 @@ fn parse_condition(
         },
         is_regex,
     ))
+}
+
+fn has_scoring_prefix(input: &str) -> bool {
+    let Some((weight, rest)) = input.split_once('^') else {
+        return false;
+    };
+    let exponent = rest.split_ascii_whitespace().next().unwrap_or_default();
+    is_scoring_number(weight.trim_end()) && is_scoring_number(exponent)
+}
+
+fn is_scoring_number(input: &str) -> bool {
+    let input = input
+        .strip_prefix('+')
+        .or_else(|| input.strip_prefix('-'))
+        .unwrap_or(input);
+    let mut has_digit = false;
+    let mut has_point = false;
+    for byte in input.bytes() {
+        match byte {
+            b'0'..=b'9' => has_digit = true,
+            b'.' if !has_point => has_point = true,
+            _ => return false,
+        }
+    }
+    has_digit
 }
 
 fn expand_reserved_procmail_regex_forms(

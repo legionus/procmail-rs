@@ -491,6 +491,40 @@ fn runtime_bare_path_is_classified_after_variable_expansion() {
 }
 
 #[test]
+fn rejects_unmarked_destination_lists_after_expansion() {
+    let error = parse("BOX=first second\n:0\n$BOX\n")
+        .unwrap()
+        .expand()
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "multiple unmarked mailbox destinations are not supported"
+    );
+
+    let config = parse(":0\n${LASTFOLDER}/\n").unwrap().expand().unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let RecipeAction::Deliver(destination) = &recipe.action else {
+        panic!("expected delivery recipe");
+    };
+    let error = destination
+        .resolve_with(|name| (name == "LASTFOLDER").then(|| "first second".to_owned()))
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "multiple unmarked mailbox destinations are not supported"
+    );
+
+    assert!(
+        parse("BOX=path with spaces\n:0\nmbox:$BOX\n")
+            .unwrap()
+            .expand()
+            .is_ok()
+    );
+}
+
+#[test]
 fn rejects_undefined_forward_references() {
     let error = parse("A=$B\nB=value\n").unwrap().expand().unwrap_err();
     assert_eq!(error.message, "variable B is not defined");

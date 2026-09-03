@@ -85,9 +85,11 @@ fn registry_classifies_every_unsupported_procmail_variable() {
 fn special_procmail_names_never_fall_through_to_user_policy() {
     for name in [
         "LOCKEXT",
+        "LOCKSLEEP",
         "LOGABSTRACT",
         "LOG",
         "DELIVERED",
+        "DROPPRIVS",
         "SHELLMETAS",
         "PROCMAIL_VERSION",
         "PROCMAIL_OVERFLOW",

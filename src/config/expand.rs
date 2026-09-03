@@ -186,6 +186,7 @@ impl Destination {
             line: expression.line,
             runtime_dependent: expression_has_runtime(&expansion),
             runtime_base: expression.runtime_base,
+            typed_destination: expression.typed_destination,
             expansion: Some(expansion),
         };
         Ok(match self {
@@ -220,6 +221,16 @@ impl Destination {
             &mut lookup,
         )?
         .text;
+        // Procmail splits an unmarked mailbox action into directory targets,
+        // so whitespace introduced by a runtime value cannot safely mean one
+        // filename here. Explicit backend syntax supplies that missing
+        // distinction and may therefore retain whitespace as path data.
+        if !expression.typed_destination && source.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            return Err(ExpansionError::new(
+                expression.line,
+                "multiple unmarked mailbox destinations are not supported",
+            ));
+        }
         let runtime_base = expression.runtime_base.then(|| lookup("MAILDIR")).flatten();
         let base = runtime_base.as_deref().or(expression.base.as_deref());
         let path = resolve_relative_path(&source, base, expression.line)?;
@@ -230,6 +241,7 @@ impl Destination {
             line: expression.line,
             runtime_dependent: false,
             runtime_base: false,
+            typed_destination: expression.typed_destination,
             expansion: None,
         };
         let destination = match self {

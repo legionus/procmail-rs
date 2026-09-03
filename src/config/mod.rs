@@ -507,6 +507,7 @@ pub struct PathExpression {
     pub(crate) line: usize,
     pub(crate) runtime_dependent: bool,
     pub(crate) runtime_base: bool,
+    pub(crate) typed_destination: bool,
     pub(crate) expansion: Option<ExpansionExpression>,
 }
 
@@ -540,6 +541,7 @@ impl From<&str> for PathExpression {
             line: 0,
             runtime_dependent: false,
             runtime_base: false,
+            typed_destination: false,
             expansion: None,
         }
     }
@@ -553,6 +555,7 @@ impl From<String> for PathExpression {
             line: 0,
             runtime_dependent: false,
             runtime_base: false,
+            typed_destination: false,
             expansion: None,
         }
     }

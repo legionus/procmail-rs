@@ -15,6 +15,8 @@ pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "COMSAT",
     "DELIVERED",
     "LOG",
+    "LOCKSLEEP",
+    "DROPPRIVS",
     "MSGPREFIX",
     "NORESRETRY",
     "PROCMAIL_OVERFLOW",

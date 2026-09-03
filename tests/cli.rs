@@ -2175,6 +2175,28 @@ fn known_unsupported_constructs_fail_check_before_message_input() {
         ":0\n! user@example.test\n".to_owned(),
         "rules.rc:line 2: forward actions are not supported".to_owned(),
     ));
+    cases.extend([
+        (
+            ":0\n* $^To:.*$LOGNAME\nmaildir:unused\n".to_owned(),
+            "rules.rc:line 2: shell-expanded recipe conditions are not supported".to_owned(),
+        ),
+        (
+            ":0\n* 20^1 ^From:\nmaildir:unused\n".to_owned(),
+            "rules.rc:line 2: weighted recipe conditions are not supported".to_owned(),
+        ),
+        (
+            ":0\n* ^Subject: one\\\n two\nmaildir:unused\n".to_owned(),
+            "rules.rc:line 2: continued recipe conditions are not supported".to_owned(),
+        ),
+        (
+            ":0\n`date +%y-%m`/meeting\n".to_owned(),
+            "rules.rc:line 2: command substitution in a destination is not supported".to_owned(),
+        ),
+        (
+            ":0\nfirst second/\n".to_owned(),
+            "rules.rc:line 2: multiple unmarked mailbox destinations are not supported".to_owned(),
+        ),
+    ]);
 
     for (rules, expected) in cases {
         let config = config_file(&rules);
