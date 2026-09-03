@@ -381,15 +381,45 @@ impl CompiledNode {
                 continuation,
                 output_ending,
             } => {
-                let destination = destination
-                    .bind_with(|name| context.runtime.get(name).map(str::to_owned))
-                    .map_err(EvalError::Expansion)
-                    .map_err(OrderedExecutionError::Evaluation)?;
                 let message =
                     current_ordered_message(context.message, context.replacement.as_ref())
                         .raw()
                         .ok_or(EvalError::BodyWasNotBuffered)
                         .map_err(OrderedExecutionError::Evaluation)?;
+                let destination = if let Some(parts) = destination.command_parts() {
+                    let limit = active_command_value_limit(
+                        context.runtime,
+                        AssignmentTarget::User,
+                        destination.command_line(),
+                    )?
+                    .min(crate::config::MAX_PATH_EXPRESSION_LEN);
+                    let bytes = execute_command_parts(
+                        CommandPartsInput {
+                            parts,
+                            line: destination.command_line(),
+                            value_name: "destination",
+                            message,
+                            limit,
+                        },
+                        context.runtime,
+                        context.trace,
+                        &mut context.capture,
+                    )?;
+                    let source = String::from_utf8(bytes)
+                        .map_err(|_| EvalError::DestinationCommandOutputIsNotUtf8 {
+                            line: destination.command_line(),
+                        })
+                        .map_err(OrderedExecutionError::Evaluation)?;
+                    destination
+                        .resolve_command_output(source, context.runtime.get("MAILDIR"))
+                        .map_err(EvalError::Expansion)
+                        .map_err(OrderedExecutionError::Evaluation)?
+                } else {
+                    destination
+                        .bind_with(|name| context.runtime.get(name).map(str::to_owned))
+                        .map_err(EvalError::Expansion)
+                        .map_err(OrderedExecutionError::Evaluation)?
+                };
                 let lock = self
                     .resolve_lock(context.runtime)
                     .map_err(EvalError::Expansion)
@@ -577,62 +607,18 @@ where
         .ok_or(EvalError::BodyWasNotBuffered)
         .map_err(OrderedExecutionError::Evaluation)?;
     let limit = active_command_value_limit(context.runtime, assignment.target, assignment.line)?;
-    let mut value = Vec::new();
-
-    // Build the complete replacement privately. Commands can fail, time out,
-    // or exceed the remaining value budget after earlier literal fragments;
-    // none of those cases may expose a partially updated runtime variable.
-    for part in &assignment.parts {
-        let remaining = limit.checked_sub(value.len()).ok_or_else(|| {
-            OrderedExecutionError::Evaluation(EvalError::VariableValueTooLarge {
-                name: assignment.name.clone(),
-                size: value.len(),
-            })
-        })?;
-        let mut bytes = match part {
-            crate::config::CommandAssignmentPart::Literal(source) => context
-                .runtime
-                .expand_bytes(source, assignment.line, remaining)
-                .map_err(EvalError::Expansion)
-                .map_err(OrderedExecutionError::Evaluation)?,
-            crate::config::CommandAssignmentPart::Command(command) => {
-                let executor = context.capture.as_deref_mut().ok_or_else(|| {
-                    OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
-                        line: assignment.line,
-                    })
-                })?;
-                let captured = executor(
-                    command,
-                    message,
-                    OutputEnding::Preserve,
-                    None,
-                    remaining,
-                    context.runtime,
-                    context.trace,
-                )
-                .map_err(|error| match error {
-                    DeliveryAttemptError::Recoverable(error)
-                    | DeliveryAttemptError::Fatal(error) => OrderedExecutionError::Delivery(error),
-                })?;
-                validate_captured_value(
-                    captured.into_output(),
-                    remaining,
-                    &assignment.name,
-                    CapturedNewlineRule::StripAll,
-                )
-                .map_err(OrderedExecutionError::Evaluation)?
-            }
-        };
-        if bytes.len() > remaining {
-            return Err(OrderedExecutionError::Evaluation(
-                EvalError::VariableValueTooLarge {
-                    name: assignment.name.clone(),
-                    size: value.len().saturating_add(bytes.len()),
-                },
-            ));
-        }
-        value.append(&mut bytes);
-    }
+    let value = execute_command_parts(
+        CommandPartsInput {
+            parts: &assignment.parts,
+            line: assignment.line,
+            value_name: &assignment.name,
+            message,
+            limit,
+        },
+        context.runtime,
+        context.trace,
+        &mut context.capture,
+    )?;
 
     context
         .runtime
@@ -650,6 +636,81 @@ where
         });
     }
     Ok(())
+}
+
+struct CommandPartsInput<'a> {
+    parts: &'a [crate::config::CommandAssignmentPart],
+    line: usize,
+    value_name: &'a str,
+    message: &'a [u8],
+    limit: usize,
+}
+
+fn execute_command_parts<E, T>(
+    input: CommandPartsInput<'_>,
+    runtime: &mut RuntimeVariables,
+    trace: &mut T,
+    capture: &mut Option<&mut CommandCaptureExecutor<'_, E, T>>,
+) -> Result<Vec<u8>, OrderedExecutionError<E>>
+where
+    T: TraceSink,
+{
+    let mut value = Vec::new();
+
+    // Build the complete result privately. Commands can fail, time out, or
+    // exceed the remaining budget after earlier literal fragments; callers
+    // must never observe a partial variable or destination path.
+    for part in input.parts {
+        let remaining = input.limit.checked_sub(value.len()).ok_or_else(|| {
+            OrderedExecutionError::Evaluation(EvalError::VariableValueTooLarge {
+                name: input.value_name.to_owned(),
+                size: value.len(),
+            })
+        })?;
+        let mut bytes = match part {
+            crate::config::CommandAssignmentPart::Literal(source) => runtime
+                .expand_bytes(source, input.line, remaining)
+                .map_err(EvalError::Expansion)
+                .map_err(OrderedExecutionError::Evaluation)?,
+            crate::config::CommandAssignmentPart::Command(command) => {
+                let executor = capture.as_deref_mut().ok_or_else(|| {
+                    OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
+                        line: input.line,
+                    })
+                })?;
+                let captured = executor(
+                    command,
+                    input.message,
+                    OutputEnding::Preserve,
+                    None,
+                    remaining,
+                    runtime,
+                    trace,
+                )
+                .map_err(|error| match error {
+                    DeliveryAttemptError::Recoverable(error)
+                    | DeliveryAttemptError::Fatal(error) => OrderedExecutionError::Delivery(error),
+                })?;
+                validate_captured_value(
+                    captured.into_output(),
+                    remaining,
+                    input.value_name,
+                    CapturedNewlineRule::StripAll,
+                )
+                .map_err(OrderedExecutionError::Evaluation)?
+            }
+        };
+        if bytes.len() > remaining {
+            return Err(OrderedExecutionError::Evaluation(
+                EvalError::VariableValueTooLarge {
+                    name: input.value_name.to_owned(),
+                    size: value.len().saturating_add(bytes.len()),
+                },
+            ));
+        }
+        value.append(&mut bytes);
+    }
+    Ok(value)
 }
 
 pub(super) fn active_command_value_limit<E>(

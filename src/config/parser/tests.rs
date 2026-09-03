@@ -443,7 +443,6 @@ fn bounds_and_validates_pipe_command_text() {
     );
 
     for (source, message) in [
-        (":0\n|\n", "pipe command is empty"),
         (
             ":0\n| command \\\n",
             "pipe command continuation is incomplete",
@@ -490,23 +489,51 @@ fn rejects_conditions_that_would_otherwise_change_meaning() {
 
 #[test]
 fn rejects_ambiguous_destination_actions() {
-    for (action, message) in [
-        (
-            "`date +%y-%m`/meeting",
-            "command substitution in a destination is not supported",
-        ),
-        (
-            "first second/",
-            "multiple unmarked mailbox destinations are not supported",
-        ),
-    ] {
-        let error = parse(&format!(":0\n{action}\n")).unwrap_err();
-        assert_eq!(error.line, 2, "{action:?}");
-        assert_eq!(error.message, message, "{action:?}");
-    }
+    let error = parse(":0\nfirst second/\n").unwrap_err();
+    assert_eq!(error.line, 2);
+    assert_eq!(
+        error.message,
+        "multiple unmarked mailbox destinations are not supported"
+    );
 
     assert!(parse(":0\nmbox:path with spaces\n").is_ok());
     assert!(parse(":0\nmaildir:path with spaces\n").is_ok());
+    assert!(parse(":0\n`date +%y-%m`/meeting\n").is_ok());
+}
+
+#[test]
+fn parses_destination_command_substitution_and_stdout_delivery() {
+    let config = parse(":0\nmbox:archive/`date +%Y`-$BOX\n:0 br\n|\n").unwrap();
+    let Statement::Recipe(destination) = &config.statements[0] else {
+        panic!("expected destination recipe");
+    };
+    let RecipeAction::Deliver(destination) = &destination.action else {
+        panic!("expected delivery action");
+    };
+    assert_eq!(
+        destination.command_parts(),
+        Some(
+            &[
+                CommandAssignmentPart::Literal("archive/".into()),
+                CommandAssignmentPart::Command("date +%Y".into()),
+                CommandAssignmentPart::Literal("-$BOX".into()),
+            ][..]
+        )
+    );
+
+    let Statement::Recipe(stdout) = &config.statements[1] else {
+        panic!("expected stdout recipe");
+    };
+    let RecipeAction::Pipe(pipe) = &stdout.action else {
+        panic!("expected pipe action");
+    };
+    assert!(pipe.command.is_empty());
+    assert_eq!(stdout.options.action_input, ActionInput::Body);
+    assert_eq!(stdout.options.output_ending, OutputEnding::Preserve);
+
+    let error = parse(":0 f\n|\n").unwrap_err();
+    assert_eq!(error.line, 2);
+    assert_eq!(error.message, "recipe flag 'f' requires a pipe command");
 }
 
 #[test]

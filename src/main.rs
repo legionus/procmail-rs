@@ -968,6 +968,30 @@ fn execute_external_action(
     input: ExternalActionInput<'_>,
     runtime: &mut RuntimeVariables,
 ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
+    if command.is_empty() {
+        // A sole pipe action is procmail's explicit stdout delivery. Write the
+        // already selected and fully validated message area here so an empty
+        // shell command cannot silently consume it, and include final-buffer
+        // errors in the recipe's normal `i` handling.
+        let mut stdout = io::stdout().lock();
+        let result = stdout.write_all(input.selected()).and_then(|()| {
+            if options.output_ending == procmail_rs::config::OutputEnding::Normalize
+                && !input.selected().ends_with(b"\n")
+            {
+                stdout.write_all(b"\n")?;
+            }
+            stdout.flush()
+        });
+        if let Err(error) = result
+            && options.write_errors == procmail_rs::config::WriteErrorMode::Fail
+        {
+            return Err(recoverable_external_error(format!(
+                "cannot write message to stdout: {error}"
+            )));
+        }
+        runtime.set("LASTFOLDER", "|");
+        return Ok(None);
+    }
     let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))
         .map_err(recoverable_external_error)?;
     let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {

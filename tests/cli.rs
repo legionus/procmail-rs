@@ -929,6 +929,113 @@ fn regular_pipe_delivers_to_program_and_discards_stdout() {
 }
 
 #[test]
+fn sole_pipe_delivers_selected_message_area_to_stdout() {
+    for (flags, expected) in [
+        ("b", &b"body\n"[..]),
+        ("br", &b"body"[..]),
+        ("h", &b"Subject: stdout\n\n"[..]),
+    ] {
+        let path = config_file("");
+        let base = path.parent().unwrap();
+        fs::write(
+            &path,
+            format!("MAILDIR={}\n:0 {flags}\n|\n", base.display()),
+        )
+        .unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(b"Subject: stdout\n\nbody")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_eq!(output.stdout, expected, "flags {flags}");
+        fs::remove_dir_all(base).unwrap();
+    }
+}
+
+#[test]
+fn sole_pipe_honors_ignore_write_errors() {
+    for (flags, status) in [("", 75), ("i", 0)] {
+        let path = config_file("");
+        let base = path.parent().unwrap();
+        fs::write(
+            &path,
+            format!("MAILDIR={}\n:0 {flags}\n|\n", base.display()),
+        )
+        .unwrap();
+        let failing_stdout = fs::File::options().write(true).open("/dev/full").unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(failing_stdout))
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(b"Subject: stdout\n\nbody")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(status), "{:?}", output.stderr);
+        fs::remove_dir_all(base).unwrap();
+    }
+}
+
+#[test]
+fn destination_command_substitution_selects_bounded_mbox_path() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbox = base.join("selected");
+    fs::write(
+        &path,
+        format!("MAILDIR={}\n:0\nmbox:`printf selected`\n", base.display()),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: selected\n\nbody\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let stored = fs::read_to_string(mailbox).unwrap();
+    assert!(stored.contains("Subject: selected\n\nbody\n"), "{stored:?}");
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn failed_regular_pipe_allows_error_recipe_to_deliver_original() {
     let path = config_file("");
     let base = path.parent().unwrap();
@@ -2187,10 +2294,6 @@ fn known_unsupported_constructs_fail_check_before_message_input() {
         (
             ":0\n* ^Subject: one\\\n two\nmaildir:unused\n".to_owned(),
             "rules.rc:line 2: continued recipe conditions are not supported".to_owned(),
-        ),
-        (
-            ":0\n`date +%y-%m`/meeting\n".to_owned(),
-            "rules.rc:line 2: command substitution in a destination is not supported".to_owned(),
         ),
         (
             ":0\nfirst second/\n".to_owned(),

@@ -384,6 +384,15 @@ impl CompiledNode {
                     needs_end_of_message: true,
                 },
             },
+            CompiledAction::Deliver { destination, .. }
+                if destination.command_parts().is_some() =>
+            {
+                InputRequirements {
+                    needs_headers: true,
+                    needs_body_contents: true,
+                    needs_end_of_message: true,
+                }
+            }
             CompiledAction::Deliver { .. } => InputRequirements::default(),
             CompiledAction::Block(sequence) => sequence.requirements(),
             CompiledAction::Headers(_) => InputRequirements {
@@ -447,7 +456,9 @@ impl CompiledNode {
                 CompiledAction::Capture { options, .. } => {
                     options.action_input != ActionInput::Headers
                 }
-                CompiledAction::Deliver { .. } => false,
+                CompiledAction::Deliver { destination, .. } => {
+                    destination.command_parts().is_some()
+                }
                 CompiledAction::Block(sequence) => sequence.needs_message_contents(),
                 CompiledAction::Headers(_) => false,
             }

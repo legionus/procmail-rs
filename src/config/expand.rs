@@ -162,6 +162,79 @@ impl HeaderAction {
 }
 
 impl Destination {
+    pub(crate) fn command_parts(&self) -> Option<&[super::CommandAssignmentPart]> {
+        match self {
+            Self::Maildir(expression)
+            | Self::Mbox(expression)
+            | Self::File(expression)
+            | Self::Discard(expression) => expression.command_parts.as_deref(),
+        }
+    }
+
+    pub(crate) fn command_line(&self) -> usize {
+        match self {
+            Self::Maildir(expression)
+            | Self::Mbox(expression)
+            | Self::File(expression)
+            | Self::Discard(expression) => expression.line,
+        }
+    }
+
+    pub(crate) fn resolve_command_output(
+        &self,
+        source: String,
+        runtime_maildir: Option<&str>,
+    ) -> Result<Self, ExpansionError> {
+        let (expression, description, allows_trailing_slash) = match self {
+            Self::Maildir(expression) => (expression, "Maildir destination", true),
+            Self::Mbox(expression) => (expression, "mbox destination", false),
+            Self::File(expression) => (expression, "file destination", false),
+            Self::Discard(expression) => (expression, "discard destination", false),
+        };
+        if expression.command_parts.is_none() {
+            return Err(ExpansionError::new(
+                expression.line,
+                "destination has no command substitution",
+            ));
+        }
+        if !expression.typed_destination && source.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            return Err(ExpansionError::new(
+                expression.line,
+                "multiple unmarked mailbox destinations are not supported",
+            ));
+        }
+        let base = if expression.runtime_base {
+            runtime_maildir
+        } else {
+            expression.base.as_deref()
+        };
+        let path = resolve_relative_path(&source, base, expression.line)?;
+        validate_filesystem_path(&path, expression.line, description, allows_trailing_slash)?;
+        let resolved = PathExpression {
+            source: path,
+            base: None,
+            line: expression.line,
+            runtime_dependent: false,
+            runtime_base: false,
+            typed_destination: expression.typed_destination,
+            command_parts: None,
+            expansion: None,
+        };
+        Ok(match self {
+            Self::Maildir(_) => Self::Maildir(resolved),
+            Self::Mbox(_) => Self::Mbox(resolved),
+            Self::File(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
+            Self::File(_) => Self::Mbox(resolved),
+            Self::Discard(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
+            Self::Discard(_) => {
+                return Err(ExpansionError::new(
+                    expression.line,
+                    "discard destination must resolve exactly to /dev/null",
+                ));
+            }
+        })
+    }
+
     pub fn bind_with(
         &self,
         mut lookup: impl FnMut(&str) -> Option<String>,
@@ -172,6 +245,12 @@ impl Destination {
             | Self::File(expression)
             | Self::Discard(expression) => expression,
         };
+        if expression.command_parts.is_some() {
+            return Err(ExpansionError::new(
+                expression.line,
+                "destination command substitution has not executed",
+            ));
+        }
         let parsed;
         let compiled = if let Some(compiled) = expression.expansion.as_ref() {
             compiled
@@ -187,6 +266,7 @@ impl Destination {
             runtime_dependent: expression_has_runtime(&expansion),
             runtime_base: expression.runtime_base,
             typed_destination: expression.typed_destination,
+            command_parts: expression.command_parts.clone(),
             expansion: Some(expansion),
         };
         Ok(match self {
@@ -207,6 +287,12 @@ impl Destination {
             Self::File(expression) => (expression, "file destination", false),
             Self::Discard(expression) => (expression, "discard destination", false),
         };
+        if expression.command_parts.is_some() {
+            return Err(ExpansionError::new(
+                expression.line,
+                "destination command substitution has not executed",
+            ));
+        }
         let parsed;
         let compiled = if let Some(compiled) = expression.expansion.as_ref() {
             compiled
@@ -242,6 +328,7 @@ impl Destination {
             runtime_dependent: false,
             runtime_base: false,
             typed_destination: expression.typed_destination,
+            command_parts: None,
             expansion: None,
         };
         let destination = match self {
@@ -625,10 +712,16 @@ fn expand_recipe(
                 Destination::File(expression) => (expression, "file destination", false),
                 Destination::Discard(expression) => (expression, "discard destination", false),
             };
-            let parsed = parse_expression(&expression.source, recipe.action_line)?;
-            validate_path_references(&parsed, recipe.action_line, variables)?;
             expression.base = maildir.map(str::to_owned);
             expression.line = recipe.action_line;
+            if let Some(parts) = expression.command_parts.as_ref() {
+                validate_command_parts(parts, recipe.action_line, variables, &BTreeSet::new())?;
+                expression.runtime_dependent = true;
+                expression.expansion = None;
+                return Ok(());
+            }
+            let parsed = parse_expression(&expression.source, recipe.action_line)?;
+            validate_path_references(&parsed, recipe.action_line, variables)?;
             let has_runtime_reference = expression_needs_runtime(&parsed, variables);
             expression.runtime_dependent = has_runtime_reference;
             expression.expansion = Some(parsed);
@@ -792,10 +885,17 @@ fn prepare_runtime_recipe(
                 | Destination::File(expression)
                 | Destination::Discard(expression) => expression,
             };
-            let parsed = parse_expression(&expression.source, recipe.action_line)?;
-            validate_runtime_references(&parsed, recipe.action_line, known, dynamic)?;
             expression.base = maildir.map(str::to_owned);
             expression.line = recipe.action_line;
+            if let Some(parts) = expression.command_parts.as_ref() {
+                validate_command_parts(parts, recipe.action_line, known, dynamic)?;
+                expression.runtime_dependent = true;
+                expression.runtime_base = dynamic.contains("MAILDIR");
+                expression.expansion = None;
+                return Ok(());
+            }
+            let parsed = parse_expression(&expression.source, recipe.action_line)?;
+            validate_runtime_references(&parsed, recipe.action_line, known, dynamic)?;
             expression.runtime_dependent = expression_references_any(&parsed, dynamic)
                 || expression_needs_runtime(&parsed, known);
             expression.runtime_base = dynamic.contains("MAILDIR");
@@ -819,12 +919,21 @@ fn prepare_command_assignment(
     known: &BTreeMap<String, ExpandedValue>,
     dynamic: &BTreeSet<String>,
 ) -> Result<(), ExpansionError> {
-    for part in &assignment.parts {
+    validate_command_parts(&assignment.parts, assignment.line, known, dynamic)
+}
+
+fn validate_command_parts(
+    parts: &[super::CommandAssignmentPart],
+    line: usize,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+) -> Result<(), ExpansionError> {
+    for part in parts {
         let super::CommandAssignmentPart::Literal(source) = part else {
             continue;
         };
-        let expression = parse_expression(source, assignment.line)?;
-        validate_runtime_references(&expression, assignment.line, known, dynamic)?;
+        let expression = parse_expression(source, line)?;
+        validate_runtime_references(&expression, line, known, dynamic)?;
     }
     Ok(())
 }

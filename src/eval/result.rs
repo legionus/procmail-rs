@@ -148,6 +148,9 @@ pub enum EvalError {
         size: usize,
     },
     MatchValueIsNotUtf8,
+    DestinationCommandOutputIsNotUtf8 {
+        line: usize,
+    },
     MatchValuesTooLarge {
         size: usize,
     },
@@ -201,6 +204,12 @@ impl fmt::Display for EvalError {
             ),
             Self::MatchValueIsNotUtf8 => {
                 formatter.write_str("regular expression capture is not valid UTF-8")
+            }
+            Self::DestinationCommandOutputIsNotUtf8 { line } => {
+                write!(
+                    formatter,
+                    "line {line}: destination command output is not valid UTF-8"
+                )
             }
             Self::MatchValuesTooLarge { size } => write!(
                 formatter,

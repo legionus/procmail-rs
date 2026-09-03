@@ -258,6 +258,127 @@ fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
 }
 
 #[test]
+fn destination_command_substitution_uses_complete_message_and_runtime_values() {
+    let config = config::parse("MAILDIR=/mail\nBOX=archive\n:0\nmbox:`choose`-$BOX\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    assert_eq!(
+        plan.requirements(),
+        InputRequirements {
+            needs_headers: true,
+            needs_body_contents: true,
+            needs_end_of_message: true,
+        }
+    );
+    let raw = b"Subject: test\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+    let mut delivered = None;
+
+    plan.execute_mapped_ordered_with_capture_trace(
+        MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
+        &mut runtime,
+        &mut NoTrace,
+        &mut |destination, _, _, _, _, _| {
+            delivered = Some(destination.path().to_owned());
+            Ok::<_, DeliveryAttemptError<&str>>(())
+        },
+        &mut |command, input, _, options, limit, _, _| {
+            assert_eq!(command, "choose");
+            assert_eq!(input, raw);
+            assert_eq!(options, None);
+            assert_eq!(limit, crate::config::DEFAULT_LINEBUF);
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                b"selected\n\n".to_vec(),
+                crate::external_filter::InputWrite::Complete,
+                crate::external_filter::ChildExit::Success,
+            ))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(delivered.as_deref(), Some("/mail/selected-archive"));
+}
+
+#[test]
+fn destination_command_output_obeys_active_linebuf() {
+    for length in [127, 128, 129] {
+        let config = config::parse("MAILDIR=/mail\nLINEBUF=128\n:0\nmbox:`choose`\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+        let plan = ExecutionPlan::compile(&config);
+        let mut runtime = RuntimeVariables::default();
+        let mut delivered = false;
+        let result = plan.execute_mapped_ordered_with_capture_trace(
+            MappedMessageInput::new(b"X: y\n\nbody", 6, None),
+            &mut runtime,
+            &mut NoTrace,
+            &mut |_, _, _, _, _, _| {
+                delivered = true;
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            &mut |_, _, _, _, limit, _, _| {
+                assert_eq!(limit, 128);
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                    vec![b'x'; length],
+                    crate::external_filter::InputWrite::Complete,
+                    crate::external_filter::ChildExit::Success,
+                ))
+            },
+        );
+
+        if length <= 128 {
+            assert!(result.is_ok(), "length {length}: {result:?}");
+            assert!(delivered);
+        } else {
+            assert!(matches!(
+                result,
+                Err(OrderedExecutionError::Evaluation(
+                    EvalError::VariableValueTooLarge { size: 129, .. }
+                ))
+            ));
+            assert!(!delivered);
+        }
+    }
+}
+
+#[test]
+fn destination_command_rejects_non_utf8_output_before_delivery() {
+    let config = config::parse("MAILDIR=/mail\n:0\nmbox:`choose`\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let mut delivered = false;
+    let result = plan.execute_mapped_ordered_with_capture_trace(
+        MappedMessageInput::new(b"X: y\n\nbody", 6, None),
+        &mut RuntimeVariables::default(),
+        &mut NoTrace,
+        &mut |_, _, _, _, _, _| {
+            delivered = true;
+            Ok::<_, DeliveryAttemptError<&str>>(())
+        },
+        &mut |_, _, _, _, _, _, _| {
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
+                b"bad-\xff-path".to_vec(),
+                crate::external_filter::InputWrite::Complete,
+                crate::external_filter::ChildExit::Success,
+            ))
+        },
+    );
+
+    assert_eq!(
+        result,
+        Err(OrderedExecutionError::Evaluation(
+            EvalError::DestinationCommandOutputIsNotUtf8 { line: 3 }
+        ))
+    );
+    assert!(!delivered);
+}
+
+#[test]
 fn ordered_capture_uses_selected_area_strips_one_lf_and_continues() {
     let config = config::parse(":0 hW\nVALUE=| capture\n:0\nmaildir:selected\n").unwrap();
     let plan = ExecutionPlan::compile(&config);

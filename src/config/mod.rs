@@ -244,9 +244,11 @@ fn statements_have_external_commands(statements: &[Statement]) -> bool {
                 .iter()
                 .any(|condition| matches!(condition.kind, ConditionKind::Program(_)))
                 || match &recipe.action {
-                    RecipeAction::Pipe(_) | RecipeAction::Capture(_) => true,
+                    RecipeAction::Pipe(action) => !action.command.is_empty(),
+                    RecipeAction::Capture(_) => true,
                     RecipeAction::Block(children) => statements_have_external_commands(children),
-                    RecipeAction::Deliver(_) | RecipeAction::Headers(_) => false,
+                    RecipeAction::Deliver(destination) => destination.command_parts().is_some(),
+                    RecipeAction::Headers(_) => false,
                 }
         }
         Statement::Assignment(assignment) => assignment.target == AssignmentTarget::Trap,
@@ -508,6 +510,7 @@ pub struct PathExpression {
     pub(crate) runtime_dependent: bool,
     pub(crate) runtime_base: bool,
     pub(crate) typed_destination: bool,
+    pub(crate) command_parts: Option<Vec<CommandAssignmentPart>>,
     pub(crate) expansion: Option<ExpansionExpression>,
 }
 
@@ -542,6 +545,7 @@ impl From<&str> for PathExpression {
             runtime_dependent: false,
             runtime_base: false,
             typed_destination: false,
+            command_parts: None,
             expansion: None,
         }
     }
@@ -556,6 +560,7 @@ impl From<String> for PathExpression {
             runtime_dependent: false,
             runtime_base: false,
             typed_destination: false,
+            command_parts: None,
             expansion: None,
         }
     }

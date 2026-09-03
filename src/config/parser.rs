@@ -527,6 +527,12 @@ fn parse_recipe(
         )
     } else if is_pipe {
         let (command, next) = parse_pipe_command(lines, index, state.limits.linebuf)?;
+        if command.is_empty() && options.action_mode == ActionMode::Filter {
+            return Err(ParseError::new(
+                index + 1,
+                "recipe flag 'f' requires a pipe command",
+            ));
+        }
         (RecipeAction::Pipe(PipeAction { command }), next)
     } else if is_headers {
         let (action, next) = parse_header_action(lines, index, state.limits.linebuf)?;
@@ -565,54 +571,38 @@ fn parse_recipe(
         ));
     } else if let Some(path) = action.strip_prefix("mbox:") {
         (
-            RecipeAction::Deliver(Destination::Mbox(PathExpression {
-                source: required_path(path, index + 1, "destination path")?,
-                base: None,
-                line: index + 1,
-                runtime_dependent: false,
-                runtime_base: false,
-                typed_destination: true,
-                expansion: None,
-            })),
+            RecipeAction::Deliver(Destination::Mbox(destination_path_expression(
+                required_path(path, index + 1, "destination path")?,
+                index + 1,
+                true,
+            )?)),
             index + 1,
         )
     } else if let Some(path) = action.strip_prefix("maildir:") {
         (
-            RecipeAction::Deliver(Destination::Maildir(PathExpression {
-                source: required_path(path, index + 1, "destination path")?,
-                base: None,
-                line: index + 1,
-                runtime_dependent: false,
-                runtime_base: false,
-                typed_destination: true,
-                expansion: None,
-            })),
+            RecipeAction::Deliver(Destination::Maildir(destination_path_expression(
+                required_path(path, index + 1, "destination path")?,
+                index + 1,
+                true,
+            )?)),
             index + 1,
         )
     } else if action.ends_with('/') {
         (
-            RecipeAction::Deliver(Destination::Maildir(PathExpression {
-                source: required_path(action, index + 1, "destination path")?,
-                base: None,
-                line: index + 1,
-                runtime_dependent: false,
-                runtime_base: false,
-                typed_destination: false,
-                expansion: None,
-            })),
+            RecipeAction::Deliver(Destination::Maildir(destination_path_expression(
+                required_path(action, index + 1, "destination path")?,
+                index + 1,
+                false,
+            )?)),
             index + 1,
         )
     } else {
         (
-            RecipeAction::Deliver(Destination::File(PathExpression {
-                source: required_path(action, index + 1, "destination path")?,
-                base: None,
-                line: index + 1,
-                runtime_dependent: false,
-                runtime_base: false,
-                typed_destination: false,
-                expansion: None,
-            })),
+            RecipeAction::Deliver(Destination::File(destination_path_expression(
+                required_path(action, index + 1, "destination path")?,
+                index + 1,
+                false,
+            )?)),
             index + 1,
         )
     };
@@ -629,15 +619,9 @@ fn parse_recipe(
 }
 
 fn validate_destination_syntax(action: &str, line: usize) -> Result<(), ParseError> {
-    if action.contains('`') {
-        return Err(ParseError::new(
-            line,
-            "command substitution in a destination is not supported",
-        ));
-    }
     if !action.starts_with("mbox:")
         && !action.starts_with("maildir:")
-        && action.bytes().any(|byte| byte.is_ascii_whitespace())
+        && destination_has_literal_whitespace(action)
     {
         return Err(ParseError::new(
             line,
@@ -645,6 +629,43 @@ fn validate_destination_syntax(action: &str, line: usize) -> Result<(), ParseErr
         ));
     }
     Ok(())
+}
+
+fn destination_has_literal_whitespace(action: &str) -> bool {
+    let mut in_command = false;
+    let mut escaped = false;
+    for byte in action.bytes() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'`' {
+            in_command = !in_command;
+        } else if !in_command && byte.is_ascii_whitespace() {
+            return true;
+        }
+    }
+    false
+}
+
+fn destination_path_expression(
+    source: String,
+    line: usize,
+    typed_destination: bool,
+) -> Result<PathExpression, ParseError> {
+    let command_parts = parse_command_substitutions(&source, line)?;
+    Ok(PathExpression {
+        source,
+        base: None,
+        line,
+        runtime_dependent: command_parts.is_some(),
+        runtime_base: false,
+        typed_destination,
+        command_parts,
+        expansion: None,
+    })
 }
 
 fn parse_capture_action_prefix(
@@ -893,6 +914,9 @@ fn parse_pipe_command(
         .strip_prefix('|')
         .expect("pipe command starts with '|'")
         .trim_start();
+    if physical.is_empty() {
+        return Ok((String::new(), start + 1));
+    }
     parse_command_continuation(lines, start, physical, linebuf, "pipe command")
 }
 

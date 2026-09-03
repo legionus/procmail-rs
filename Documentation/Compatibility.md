@@ -40,7 +40,7 @@ a supported regex, assignment value, or destination.
 | Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
 | Conditions | Byte regex, leading `!` negation, `? shell command`, `< size`, `> size`, `H ?? regex`, `B ?? regex`, and `$NAME ?? regex` |
-| Actions | Explicit Maildir or mbox delivery, explicit discard through an unmarked `/dev/null`, trusted shell pipe action, command-output capture with `NAME=| command`, `{ ... }` block, and the procmail-rs `headers { ... }` extension |
+| Actions | Explicit Maildir or mbox delivery, including bounded backquoted destination commands; explicit discard through an unmarked `/dev/null`; trusted shell pipe action; a sole `|` for stdout delivery; command-output capture with `NAME=| command`; `{ ... }` block; and the procmail-rs `headers { ... }` extension |
 | Regex additions | Procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `^^`, capture assignment with `\/`, and numbered `MATCH1` through the configured capture ceiling |
 | Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
 | External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
@@ -65,8 +65,8 @@ a review source; installed procmail-rs tests do not depend on it.
 | A trailing backslash continues a condition; shell-expanded conditions retain continuation whitespace. | Explicitly rejected. | Bounded continuation support must preserve the distinct whitespace rule for shell-expanded conditions. |
 | Procmail ERE operators and its `^`, `$`, `^^`, `\<`, `\>`, and `\/` extensions | Partly supported through the Rust byte-regex engine and explicit translations. | Procmail chooses the leftmost shortest match except while computing `MATCH`; the Rust engine has different disambiguation. Procmail treats `{` as an ordinary byte and does not support named character classes, while the Rust engine accepts counted repetition and POSIX classes. These differences can change both decisions and captures and need differential fixtures or explicit rejection. |
 | Shell-style assignments, including single and double quotes, escapes, unsetting with bare `NAME`, field splitting, and all documented parameter forms | Only the bounded subset in the supported table is implemented. | Unsupported `$` forms are rejected, but single quotes, backslash escapes, inline comment boundaries, and some unquoted shell syntax can remain literal and therefore change values silently. Assignment tokenization should reject every unimplemented form before broader expansion is added. |
-| Backquoted commands in assignments and in mailbox names | Implemented only in assignments; a backquote in a destination is explicitly rejected. | Destination command substitution needs compatible bounded execution before the `procmailex(5)` monthly-folder form can be accepted. |
-| `| command`, `NAME=| command`, and a sole `|` that writes the selected input to stdout | Command and capture forms are supported; an empty command is rejected. | Filter configurations using `DEFAULT=|` remain outside project scope, but an explicit pipe-to-stdout recipe could be implemented without selecting an implicit destination. |
+| Backquoted commands in assignments and in mailbox names | Supported. Each command receives the complete current message and its stdout participates in bounded path construction. | Destination output must be UTF-8 and obeys both active `LINEBUF` and the fixed path ceiling. It is resolved only after every fragment succeeds. |
+| `| command`, `NAME=| command`, and a sole `|` that writes the selected input to stdout | All three explicit recipe forms are supported. | A sole `|` writes the area selected by `h`/`b` directly, applies `r` and `i`, and does not start a shell. `DEFAULT=|` remains outside project scope because implicit fallback delivery is absent. |
 | A pipe without `w` or `W` may continue without waiting after its input has been accepted. | procmail-rs supervises and reaps every shell even when its normal exit status is ignored. | Side-effect timing and lock lifetime differ. Preserving process supervision is safer; compatibility may require a documented asynchronous mode rather than weakening the default silently. |
 | `c` on a nesting block clones processing and lets the parent skip the block. | Explicitly rejected. | Supporting it requires two bounded execution branches and clear publication/error ordering; it must not be approximated as an ordinary block. |
 | `h` or `b` on file delivery writes only the selected part and may discard the other part. | Explicitly rejected for filesystem delivery. | This is a deliberate data-loss prevention measure. Keep it as an explicit difference unless partial-message delivery becomes an opt-in feature. |
@@ -87,10 +87,11 @@ a review source; installed procmail-rs tests do not depend on it.
 
 The common examples using regex selection, mbox delivery, Maildir delivery,
 copy recipes, `A`/`a`/`E`/`e`, program conditions, external filters,
-command-output assignments, `MATCH`, `TRAP`, and `EXITCODE` have corresponding
+command-output assignments, destination command substitution, pipe-to-stdout,
+`MATCH`, `TRAP`, and `EXITCODE` have corresponding
 implementation paths. The manual's forwarding and autoreply examples remain
-outside project scope. Its scoring, destination-backquote, directory-folder,
-MH, multi-folder, pipe-to-stdout, `$`-condition, and block-copy examples expose
+outside project scope. Its scoring, directory-folder, MH, multi-folder,
+`$`-condition, and block-copy examples expose
 the gaps listed above.
 
 The stored differential fixtures cover only a selected subset of syntax and
@@ -113,10 +114,7 @@ for all supported manual constructs, nor do they compare regex match spans and
 4. Decide whether weighted scoring is needed by real migration rc files. If it
    is, implement all three scoring categories and `$=` together; partial
    scoring support would make mixed recipes misleading.
-5. Add bounded destination command substitution and explicit pipe-to-stdout if
-   migration configurations require them. Keep implicit `DEFAULT` delivery,
-   forwarding, privilege changes, and sendmail integration outside scope.
-6. Consider ordinary directory folders, MH folders, and multi-folder delivery
+5. Consider ordinary directory folders, MH folders, and multi-folder delivery
    only after their naming, locking, rollback, hardlink, and partial-publication
    behavior has dedicated tests. Do not recover compatibility by inspecting a
    bare path and choosing a backend from mutable filesystem metadata.
@@ -173,7 +171,7 @@ recipe sequence continues after a successful assignment.
 For both forms, stdout is read concurrently with stdin and is bounded before
 allocation grows past the active limit. The raw captured output, before LF
 removal, may not exceed the smaller of the active `LINEBUF` and the fixed
-ceiling for the destination variable. Exceeding that limit terminates the
+ceiling for the assigned variable. Exceeding that limit terminates the
 process group and fails the assignment. `TIMEOUT` also covers input, output,
 and child termination; a timeout always fails a command-output assignment,
 even without `w` or `W`. Stderr is appended to `LOGFILE`, or inherits
@@ -184,6 +182,36 @@ argument. The child environment is rebuilt only from bounded runtime rc
 variables and the defaults `SHELL=/bin/sh`, `SHELLFLAGS=-c`, and
 `PATH=/usr/bin:/bin`; the ambient process environment is not inherited. The
 shell path must be absolute and may not contain empty, `.` or `..` components.
+
+Backquoted commands are also accepted in an explicit recipe destination:
+
+```text
+:0
+maildir:`date +%Y-%m`/
+```
+
+As with assignment backquotes, each command receives the complete current
+message, all trailing LF bytes are removed from its stdout, and the complete
+result is kept private until every literal expansion and command succeeds.
+The raw captured output is limited by the smaller of active `LINEBUF` and the
+4096-byte path-expression ceiling. The result must be UTF-8 and pass the normal
+path checks; relative results use the `MAILDIR` active when the recipe executes.
+Bytes emitted by a command are inserted literally and are not scanned again as
+variable references. `TIMEOUT`, the bounded child environment, and `LOGFILE`
+stderr handling are identical to assignment backquotes.
+
+## Explicit stdout delivery
+
+A recipe whose complete action is `|` delivers its selected input directly to
+procmail-rs stdout without starting a shell. The `h` and `b` flags select the
+header or body; neither selects the complete message. Without `r`, a missing
+final LF is added, while `r` preserves the exact ending. A stdout write or flush
+failure makes the recipe fail unless `i` is present. The ordinary `c`, `A`,
+`a`, `E`, and `e` flow rules continue to apply. The filter form `:0 f` followed
+by a sole `|` is rejected because stdout does not provide a replacement message.
+
+This action is evaluated only after the selected message bytes have passed all
+input limits. It does not enable `DEFAULT=|` or any other implicit delivery.
 
 ## Native header editing extension
 
