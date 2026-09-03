@@ -278,6 +278,8 @@ impl CompiledSequence {
                     let action = match destination {
                         Destination::Maildir(_) => ActionKindExplanation::Maildir,
                         Destination::Mbox(_) => ActionKindExplanation::Mbox,
+                        Destination::File(_) => ActionKindExplanation::File,
+                        Destination::Discard(_) => ActionKindExplanation::Discard,
                     };
                     explanations.push(RecipeExplanation {
                         line: recipe.line,
@@ -409,7 +411,7 @@ impl CompiledNode {
                 CompiledAction::Capture { .. } => true,
                 CompiledAction::Deliver { destination, .. } => {
                     destination.needs_runtime_variables()
-                        || matches!(destination, Destination::Mbox(_))
+                        || matches!(destination, Destination::Mbox(_) | Destination::File(_))
                 }
                 CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
                 CompiledAction::Headers(_) => true,
@@ -429,7 +431,7 @@ impl CompiledNode {
                 }
                 CompiledAction::Deliver { destination, .. } => {
                     destination.needs_runtime_variables()
-                        || matches!(destination, Destination::Mbox(_))
+                        || matches!(destination, Destination::Mbox(_) | Destination::File(_))
                 }
                 CompiledAction::Block(sequence) => sequence.requires_preemptive_ordered_delivery(),
                 CompiledAction::Headers(_) => false,

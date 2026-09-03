@@ -453,6 +453,44 @@ fn resolves_paths_against_maildir_active_at_each_recipe() {
 }
 
 #[test]
+fn bare_paths_resolve_to_mbox_except_for_the_null_device() {
+    let mbox = parse("MAILDIR=/srv/mail\n:0\ninbox\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    assert_eq!(
+        resolved_destination(&mbox, 1),
+        Destination::Mbox("/srv/mail/inbox".into())
+    );
+
+    let discard = parse("MAILDIR=/dev\n:0\nnull\n").unwrap().expand().unwrap();
+    assert_eq!(
+        resolved_destination(&discard, 1),
+        Destination::Discard("/dev/null".into())
+    );
+}
+
+#[test]
+fn runtime_bare_path_is_classified_after_variable_expansion() {
+    let config = parse("MAILDIR=/mail\n:0\n${LASTFOLDER}\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let Statement::Recipe(recipe) = &config.statements[1] else {
+        panic!("expected recipe");
+    };
+    let RecipeAction::Deliver(destination) = &recipe.action else {
+        panic!("expected delivery recipe");
+    };
+    assert_eq!(
+        destination
+            .resolve_with(|name| (name == "LASTFOLDER").then(|| "/dev/null".to_owned()))
+            .unwrap(),
+        Destination::Discard("/dev/null".into())
+    );
+}
+
+#[test]
 fn rejects_undefined_forward_references() {
     let error = parse("A=$B\nB=value\n").unwrap().expand().unwrap_err();
     assert_eq!(error.message, "variable B is not defined");

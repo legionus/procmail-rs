@@ -2119,7 +2119,6 @@ fn invalid_configuration_does_not_consume_stdin() {
         "LIMIT_MSG_BODY=10KB\n:0\ninbox/\n",
         ":0 B\n* body\ninbox/\n",
         ":0\nmaildir:$UNDEFINED\n",
-        ":0\nambiguous\n",
         ":0\nmaildir:../escape\n",
         ":0\nmaildir:one//two\n",
         "MAILDIR=\n:0\nmaildir:inbox\n",
@@ -2172,16 +2171,10 @@ fn known_unsupported_constructs_fail_check_before_message_input() {
             )
         })
         .collect::<Vec<_>>();
-    cases.extend([
-        (
-            ":0\n! user@example.test\n".to_owned(),
-            "rules.rc:line 2: forward actions are not supported".to_owned(),
-        ),
-        (
-            ":0\nambiguous-path\n".to_owned(),
-            "rules.rc:line 2: destination type is ambiguous".to_owned(),
-        ),
-    ]);
+    cases.push((
+        ":0\n! user@example.test\n".to_owned(),
+        "rules.rc:line 2: forward actions are not supported".to_owned(),
+    ));
 
     for (rules, expected) in cases {
         let config = config_file(&rules);
@@ -3028,7 +3021,7 @@ fn non_utf8_command_line_value_does_not_consume_stdin() {
 }
 
 #[test]
-fn check_rejects_unresolved_destination_types() {
+fn check_accepts_bare_file_destination() {
     let path = config_file(":0\nambiguous\n");
     let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["check", "--config"])
@@ -3036,10 +3029,8 @@ fn check_rejects_unresolved_destination_types() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    assert!(String::from_utf8(output.stderr).unwrap().contains(
-        "line 2: destination type is ambiguous; use an explicit maildir: or mbox: prefix, or a trailing '/' for Maildir"
-    ));
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(output.stderr.is_empty());
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
@@ -3260,6 +3251,105 @@ fn filter_delivers_mboxrd_record() {
     assert!(stored.starts_with(b"From MAILER-DAEMON "));
     assert!(stored.ends_with(b">From hostile header\nX: value\n\n>From body\n>>From quoted\n\n"));
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn bare_file_destination_delivers_mboxrd() {
+    let path = config_file("");
+    let mailbox = path.parent().unwrap().join("bare-mailbox");
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n{}\n",
+            path.parent().unwrap().display(),
+            mailbox.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: bare mbox\n\nbody\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    let stored = fs::read(&mailbox).unwrap();
+    assert!(stored.starts_with(b"From MAILER-DAEMON "));
+    assert!(stored.ends_with(b"Subject: bare mbox\n\nbody\n\n"));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn resolved_null_device_discards_without_opening_a_device() {
+    let cases = [
+        "MAILDIR={base}\n:0\n/dev/null\n".to_owned(),
+        "MAILDIR=/dev\n:0\nnull\n".to_owned(),
+        "MAILDIR={base}\n:0\n* ^X-Target: (.*)$\n$MATCH1\n".to_owned(),
+    ];
+    for source in cases {
+        let path = config_file("");
+        let source = source.replace("{base}", &path.parent().unwrap().display().to_string());
+        fs::write(&path, source).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"X-Target: /dev/null\n\nbody\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn null_like_and_other_device_paths_are_not_discard_actions() {
+    for destination in ["/dev/null/", "/dev/zero", "mbox:/dev/null"] {
+        let path = config_file("");
+        fs::write(
+            &path,
+            format!(
+                "MAILDIR={}\n:0\n{destination}\n",
+                path.parent().unwrap().display()
+            ),
+        )
+        .unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Subject: test\n\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert!(!output.status.success(), "{destination}");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }
 
 #[test]

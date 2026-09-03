@@ -833,6 +833,18 @@ fn explains_header_operation_kinds_without_private_fields() {
 }
 
 #[test]
+fn explains_static_null_destination_as_discard() {
+    let config = config::parse(":0\n/dev/null\n").unwrap().expand().unwrap();
+    let explanation = ExecutionPlan::compile(&config).explain();
+    let [recipe] = explanation.recipes() else {
+        panic!("expected one recipe");
+    };
+
+    assert_eq!(recipe.action(), ActionKindExplanation::Discard);
+    assert!(!recipe.defers_destination());
+}
+
+#[test]
 fn header_match_decides_before_body() {
     let plan = compile(":0\n* ^Subject: wanted$\nmaildir:wanted\n\n:0 B\n* needle\nmaildir:body\n");
     let result = plan.evaluate_headers(&head(b"Subject: wanted\n\nbody"));

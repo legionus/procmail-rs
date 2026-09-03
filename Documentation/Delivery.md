@@ -5,9 +5,16 @@
 
 ## Destination syntax and path resolution
 
-`maildir:PATH` and a recipe path ending in `/` select Maildir. `mbox:PATH`
-selects mboxrd. An unmarked non-directory path is rejected as ambiguous; the
-program never inspects current filesystem type to choose a backend.
+`maildir:PATH` and a recipe path ending in `/` select Maildir. `mbox:PATH` and
+an unmarked path select mboxrd. This choice comes only from syntax; the program
+never inspects the current filesystem type to choose a backend.
+
+For compatibility with documented procmail discard recipes, an unmarked path
+which resolves exactly to `/dev/null` is an explicit discard destination. The
+message is still read and checked against every active input limit, but the
+program does not open or write the device. Explicit `mbox:/dev/null`, paths to
+other devices, and lookalike paths such as `/dev/null/` are not discard
+destinations and continue through their selected backend's normal checks.
 
 Absolute paths remain absolute. A relative path is resolved against `MAILDIR`
 active when that statement executes, or against the process working directory

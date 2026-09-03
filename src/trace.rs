@@ -430,6 +430,8 @@ fn destination_kind_name(kind: DestinationKind) -> &'static str {
     match kind {
         DestinationKind::Maildir => "maildir",
         DestinationKind::Mbox => "mbox",
+        DestinationKind::File => "file",
+        DestinationKind::Discard => "discard",
     }
 }
 
@@ -620,6 +622,8 @@ pub enum RecipeDecision {
 pub enum DestinationKind {
     Maildir,
     Mbox,
+    File,
+    Discard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -496,6 +496,8 @@ impl Eq for RegexCondition {}
 pub enum Destination {
     Mbox(PathExpression),
     Maildir(PathExpression),
+    File(PathExpression),
+    Discard(PathExpression),
 }
 
 #[derive(Debug, Clone)]

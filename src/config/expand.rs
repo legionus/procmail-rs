@@ -167,7 +167,10 @@ impl Destination {
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, ExpansionError> {
         let expression = match self {
-            Self::Maildir(expression) | Self::Mbox(expression) => expression,
+            Self::Maildir(expression)
+            | Self::Mbox(expression)
+            | Self::File(expression)
+            | Self::Discard(expression) => expression,
         };
         let parsed;
         let compiled = if let Some(compiled) = expression.expansion.as_ref() {
@@ -188,6 +191,8 @@ impl Destination {
         Ok(match self {
             Self::Maildir(_) => Self::Maildir(bound),
             Self::Mbox(_) => Self::Mbox(bound),
+            Self::File(_) => Self::File(bound),
+            Self::Discard(_) => Self::Discard(bound),
         })
     }
 
@@ -198,6 +203,8 @@ impl Destination {
         let (expression, description, allows_trailing_slash) = match self {
             Self::Maildir(expression) => (expression, "Maildir destination", true),
             Self::Mbox(expression) => (expression, "mbox destination", false),
+            Self::File(expression) => (expression, "file destination", false),
+            Self::Discard(expression) => (expression, "discard destination", false),
         };
         let parsed;
         let compiled = if let Some(compiled) = expression.expansion.as_ref() {
@@ -225,23 +232,37 @@ impl Destination {
             runtime_base: false,
             expansion: None,
         };
-        Ok(match self {
+        let destination = match self {
             Self::Maildir(_) => Self::Maildir(resolved),
             Self::Mbox(_) => Self::Mbox(resolved),
-        })
+            Self::File(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
+            Self::File(_) => Self::Mbox(resolved),
+            Self::Discard(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
+            Self::Discard(_) => {
+                return Err(ExpansionError::new(
+                    expression.line,
+                    "discard destination must resolve exactly to /dev/null",
+                ));
+            }
+        };
+        Ok(destination)
     }
 
     pub fn path(&self) -> &str {
         match self {
-            Self::Maildir(expression) | Self::Mbox(expression) => expression.source(),
+            Self::Maildir(expression)
+            | Self::Mbox(expression)
+            | Self::File(expression)
+            | Self::Discard(expression) => expression.source(),
         }
     }
 
     pub fn needs_runtime_variables(&self) -> bool {
         match self {
-            Self::Maildir(expression) | Self::Mbox(expression) => {
-                expression.runtime_dependent || expression.runtime_base
-            }
+            Self::Maildir(expression)
+            | Self::Mbox(expression)
+            | Self::File(expression)
+            | Self::Discard(expression) => expression.runtime_dependent || expression.runtime_base,
         }
     }
 }
@@ -589,6 +610,8 @@ fn expand_recipe(
             let (expression, description, allows_trailing_slash) = match destination {
                 Destination::Maildir(expression) => (expression, "Maildir destination", true),
                 Destination::Mbox(expression) => (expression, "mbox destination", false),
+                Destination::File(expression) => (expression, "file destination", false),
+                Destination::Discard(expression) => (expression, "discard destination", false),
             };
             let parsed = parse_expression(&expression.source, recipe.action_line)?;
             validate_path_references(&parsed, recipe.action_line, variables)?;
@@ -607,6 +630,12 @@ fn expand_recipe(
                     description,
                     allows_trailing_slash,
                 )?;
+                if matches!(resolved, Destination::Discard(_))
+                    && let Destination::File(expression) = destination
+                {
+                    let expression = expression.clone();
+                    *destination = Destination::Discard(expression);
+                }
             }
         }
         RecipeAction::Pipe(_) => {}
@@ -746,7 +775,10 @@ fn prepare_runtime_recipe(
     match &mut recipe.action {
         RecipeAction::Deliver(destination) => {
             let expression = match destination {
-                Destination::Maildir(expression) | Destination::Mbox(expression) => expression,
+                Destination::Maildir(expression)
+                | Destination::Mbox(expression)
+                | Destination::File(expression)
+                | Destination::Discard(expression) => expression,
             };
             let parsed = parse_expression(&expression.source, recipe.action_line)?;
             validate_runtime_references(&parsed, recipe.action_line, known, dynamic)?;

@@ -36,7 +36,7 @@ rejected explicitly or is an ordinary user variable assignment.
 | Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
 | Conditions | Byte regex, leading `!` negation, `? shell command`, `< size`, `> size`, `H ?? regex`, `B ?? regex`, and `$NAME ?? regex` |
-| Actions | Explicit Maildir or mbox delivery, trusted shell pipe action, command-output capture with `NAME=| command`, `{ ... }` block, and the procmail-rs `headers { ... }` extension |
+| Actions | Explicit Maildir or mbox delivery, explicit discard through an unmarked `/dev/null`, trusted shell pipe action, command-output capture with `NAME=| command`, `{ ... }` block, and the procmail-rs `headers { ... }` extension |
 | Regex additions | Procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `\+`, `\?`, `\|`, capture assignment with `\/`, and numbered `MATCH1` through the configured capture ceiling |
 | Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
 | External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
@@ -174,7 +174,7 @@ instead of silently assigning it another meaning.
 | Area | procmail 3.22 | procmail-rs |
 | --- | --- | --- |
 | Native header editing | Requires an external filter such as `formail`; there is no `headers { ... }` action. | Provides the bounded `headers` extension described above. Rc files using it are intentionally not accepted by procmail 3.22. |
-| Destination type and directory delivery | May infer a directory or mailbox from the current filesystem. | Never infers a backend from the filesystem. Requires `maildir:PATH` or a trailing `/` for a Maildir containing `tmp`, `new`, and `cur`, and requires `mbox:PATH` for mbox delivery. |
+| Destination type and directory delivery | May infer a directory or mailbox from the current filesystem. | Never infers a backend from the filesystem. Requires `maildir:PATH` or a trailing `/` for a Maildir containing `tmp`, `new`, and `cur`; `mbox:PATH` and every other unmarked path select mbox. An unmarked path resolving exactly to `/dev/null` is discarded internally after complete input validation. |
 | Default delivery | Can fall back to `DEFAULT`, `ORGMAIL`, or the system mailbox. | Never selects an implicit destination. An undelivered original is an error. |
 | Forwarding | A `!` action forwards through the configured sendmail command. | Rejected before message input; procmail-rs never forwards or invokes sendmail implicitly. |
 | Comsat notification | `COMSAT` may enable notification after delivery. | `COMSAT` is rejected as an unsupported reserved variable; delivery has no notification side effect. |

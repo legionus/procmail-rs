@@ -96,6 +96,8 @@ pub enum ConditionKindExplanation {
 pub enum ActionKindExplanation {
     Maildir,
     Mbox,
+    File,
+    Discard,
     ExternalProgram,
     Headers,
 }

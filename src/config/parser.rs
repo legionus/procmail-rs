@@ -597,11 +597,17 @@ fn parse_recipe(
             index + 1,
         )
     } else {
-        check_path_length(action, index + 1, "destination path")?;
-        return Err(ParseError::new(
+        (
+            RecipeAction::Deliver(Destination::File(PathExpression {
+                source: required_path(action, index + 1, "destination path")?,
+                base: None,
+                line: index + 1,
+                runtime_dependent: false,
+                runtime_base: false,
+                expansion: None,
+            })),
             index + 1,
-            "destination type is ambiguous; use an explicit maildir: or mbox: prefix, or a trailing '/' for Maildir",
-        ));
+        )
     };
 
     let recipe = Recipe {

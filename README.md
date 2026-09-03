@@ -54,6 +54,10 @@ See [Documentation/Limits.md](Documentation/Limits.md) for resource settings
 and [Documentation/Delivery.md](Documentation/Delivery.md) for destination,
 locking, and durability behavior.
 
+An unmarked recipe path selects mboxrd, while a trailing `/` selects Maildir.
+The conventional unmarked `/dev/null` destination explicitly discards a fully
+validated message without opening the device.
+
 ## Commands
 
 ```text

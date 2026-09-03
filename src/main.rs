@@ -19,6 +19,7 @@ use std::process::{ExitCode, Stdio};
 use procmail_rs::config::{
     self, ActionMode, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable, parse_umask,
 };
+use procmail_rs::delivery::discard::DiscardSink;
 use procmail_rs::delivery::local_lock::{
     LocalLock, LockMethod, lock_timeout_from_config, parse_lock_timeout,
 };
@@ -408,6 +409,8 @@ fn write_plan_explanation(
         let action = match recipe.action() {
             ActionKindExplanation::Maildir => "maildir",
             ActionKindExplanation::Mbox => "mbox",
+            ActionKindExplanation::File => "file",
+            ActionKindExplanation::Discard => "discard",
             ActionKindExplanation::ExternalProgram => "external-program",
             ActionKindExplanation::Headers => "headers",
         };
@@ -535,8 +538,11 @@ fn deliver_staged(
                     let _local_lock =
                         acquire_recipe_lock(lock, Some(destination), runtime, staging_options.uid)
                             .map_err(DeliveryAttemptError::Recoverable)?;
-                    let result = if matches!(destination, Destination::Mbox(_)) {
-                        deliver_mbox(
+                    let result = if matches!(
+                        destination,
+                        Destination::Mbox(_) | Destination::File(_) | Destination::Discard(_)
+                    ) {
+                        deliver_file_destination(
                             destination,
                             message,
                             output_ending,
@@ -1238,7 +1244,7 @@ fn deliver_one_maildir(
     Ok(())
 }
 
-fn deliver_mbox(
+fn deliver_file_destination(
     unresolved: &Destination,
     message: &[u8],
     output_ending: procmail_rs::config::OutputEnding,
@@ -1246,7 +1252,6 @@ fn deliver_mbox(
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
 ) -> Result<(), OrderedStepError> {
-    record_delivery(unresolved, DeliveryStage::Preparing, trace);
     let destination = unresolved
         .resolve_with(|name| runtime.get(name).map(str::to_owned))
         .map_err(|error| {
@@ -1258,10 +1263,27 @@ fn deliver_mbox(
             OperationalError::PermanentDestination(error.to_string())
         })
         .map_err(OrderedStepError::before_publication)?;
-    let Destination::Mbox(expression) = destination else {
+    record_delivery(&destination, DeliveryStage::Preparing, trace);
+
+    // Treat the resolved null device as a semantic discard instead of opening
+    // a hostile filesystem object. The complete message has already passed
+    // input validation, while avoiding device writes also keeps mbox locking,
+    // rollback, and durability assumptions limited to regular files.
+    if let Destination::Discard(expression) = &destination {
+        record_delivery(&destination, DeliveryStage::Published, trace);
+        runtime
+            .record_delivery_with_trace(
+                &procmail_rs::delivery::PublishedDelivery::new(PathBuf::from(expression.source())),
+                trace,
+            )
+            .map_err(OperationalError::Internal)
+            .map_err(OrderedStepError::after_publication)?;
+        return Ok(());
+    }
+    let Destination::Mbox(expression) = &destination else {
         return Err(OrderedStepError::before_publication(
             OperationalError::Internal(
-                "internal error: mbox delivery resolved to another destination type".to_owned(),
+                "internal error: file delivery resolved to another destination type".to_owned(),
             ),
         ));
     };
@@ -1275,7 +1297,7 @@ fn deliver_mbox(
         .map_err(|error| {
             let class = DeliveryFailureClass::from_io_error(&error);
             record_delivery(
-                unresolved,
+                &destination,
                 DeliveryStage::Failed(trace_failure_class(class)),
                 trace,
             );
@@ -1287,7 +1309,7 @@ fn deliver_mbox(
         .map_err(OrderedStepError::before_publication)?;
     match locked.append(message, output_ending, durability) {
         Ok(published) => {
-            record_delivery(unresolved, DeliveryStage::Published, trace);
+            record_delivery(&destination, DeliveryStage::Published, trace);
             runtime
                 .record_delivery_with_trace(&published, trace)
                 .map_err(OperationalError::Internal)
@@ -1296,7 +1318,7 @@ fn deliver_mbox(
         Err(error) => {
             let class = error.class();
             if error.published() {
-                record_delivery(unresolved, DeliveryStage::Published, trace);
+                record_delivery(&destination, DeliveryStage::Published, trace);
                 runtime
                     .record_delivery_with_trace(
                         &procmail_rs::delivery::PublishedDelivery::new(path.to_owned()),
@@ -1306,7 +1328,7 @@ fn deliver_mbox(
                     .map_err(OrderedStepError::after_publication)?;
             } else {
                 record_delivery(
-                    unresolved,
+                    &destination,
                     DeliveryStage::Failed(trace_failure_class(class)),
                     trace,
                 );
@@ -1438,6 +1460,18 @@ fn open_sink(
                 expression.source()
             )))
         }
+        Destination::Discard(_) => Ok(Box::new(DiscardSink::null())),
+        Destination::File(expression) => {
+            record_delivery(
+                unresolved,
+                DeliveryStage::Failed(FailureClass::Permanent),
+                trace,
+            );
+            Err(OperationalError::Internal(format!(
+                "internal error: ordered destination reached streaming delivery: {}",
+                expression.source()
+            )))
+        }
     }
 }
 
@@ -1445,6 +1479,8 @@ fn record_delivery(destination: &Destination, stage: DeliveryStage, trace: &mut 
     let (line, destination) = match destination {
         Destination::Maildir(expression) => (expression.line(), TraceDestinationKind::Maildir),
         Destination::Mbox(expression) => (expression.line(), TraceDestinationKind::Mbox),
+        Destination::File(expression) => (expression.line(), TraceDestinationKind::File),
+        Destination::Discard(expression) => (expression.line(), TraceDestinationKind::Discard),
     };
     trace.record(TraceEvent::Delivery {
         recipe_line: line,

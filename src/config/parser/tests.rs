@@ -71,13 +71,14 @@ fn trailing_slash_selects_maildir() {
 }
 
 #[test]
-fn rejects_destination_without_a_stable_type() {
-    let error = parse(":0\ninbox\n").unwrap_err();
-
-    assert_eq!(error.line, 2);
+fn bare_path_selects_file_delivery_without_filesystem_inspection() {
+    let config = parse(":0\ninbox\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
     assert_eq!(
-        error.message,
-        "destination type is ambiguous; use an explicit maildir: or mbox: prefix, or a trailing '/' for Maildir"
+        recipe.action,
+        RecipeAction::Deliver(Destination::File("inbox".into()))
     );
 }
 

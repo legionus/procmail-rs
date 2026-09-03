@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use crate::message::{Message, MessageHead, MessageReadError, StreamedMessage};
 
 #[cfg(target_os = "linux")]
+pub mod discard;
+#[cfg(target_os = "linux")]
 pub mod local_lock;
 #[cfg(target_os = "linux")]
 pub mod maildir;
