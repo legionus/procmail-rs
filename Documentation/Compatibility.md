@@ -88,30 +88,26 @@ a review source; installed procmail-rs tests do not depend on it.
 The common examples using regex selection, mbox delivery, Maildir delivery,
 copy recipes, `A`/`a`/`E`/`e`, program conditions, external filters,
 command-output assignments, destination command substitution, pipe-to-stdout,
-`MATCH`, `TRAP`, and `EXITCODE` have corresponding
+shell-expanded conditions, `MATCH`, `TRAP`, and `EXITCODE` have corresponding
 implementation paths. The manual's forwarding and autoreply examples remain
 outside project scope. Its scoring, directory-folder, MH, multi-folder,
-`$`-condition, and block-copy examples expose
-the gaps listed above.
+and block-copy examples expose the gaps listed above.
 
-The stored differential fixtures cover only a selected subset of syntax and
-evaluation. They do not yet constitute a systematic example-by-example suite
-for all supported manual constructs, nor do they compare regex match spans and
-`MATCH` values across ambiguous expressions.
+The stored differential fixtures cover every supported recipe flag, condition
+search areas, folded and malformed header lines, waited and quiet child
+failures, literal shell-expanded text, and unambiguous `MATCH` spans. They do
+not yet constitute a systematic example-by-example suite for all supported
+manual constructs or compare captures across ambiguous expressions.
 
 ### Compatibility improvement order
 
-1. Add differential fixtures for the complete supported flag matrix, condition
-   search areas, folded headers, malformed headers, shell status handling,
-   capture values, and regex match spans. Generate and review the reference
-   results once with procmail 3.22, then keep tests independent of `external/`.
-2. Align the regex dialect where it can be done without weakening bounds:
+1. Align the regex dialect where it can be done without weakening bounds:
    reject or translate counted repetition and named character classes, then
    investigate leftmost-shortest matching and `MATCH` selection separately.
-3. Decide whether weighted scoring is needed by real migration rc files. If it
+2. Decide whether weighted scoring is needed by real migration rc files. If it
    is, implement all three scoring categories and `$=` together; partial
    scoring support would make mixed recipes misleading.
-4. Consider ordinary directory folders, MH folders, and multi-folder delivery
+3. Consider ordinary directory folders, MH folders, and multi-folder delivery
    only after their naming, locking, rollback, hardlink, and partial-publication
    behavior has dedicated tests. Do not recover compatibility by inspecting a
    bare path and choosing a backend from mutable filesystem metadata.
@@ -187,10 +183,12 @@ FIELD=| extract-field
 
 The `h` flag selects the header section including its terminating empty line,
 `b` selects only the body, and neither flag selects the complete current
-message. Without `r`, one LF is appended to the selected input when it lacks
-one; `r` preserves the selected ending. Header-only capture can execute before
-the body is read, while body and complete-message capture require staging.
-Exactly one trailing LF is removed from successful stdout.
+message. Without `r`, one LF is appended when header or complete-message input
+lacks a final LF. Body-only input receives one LF unless it already ends in two
+LF bytes, matching original procmail's representation of that selected area;
+`r` preserves the selected ending. Header-only capture can execute before the
+body is read, while body and complete-message capture require staging. Exactly
+one trailing LF is removed from successful stdout.
 
 Without `w` or `W`, a normal nonzero child status is ignored. With either flag
 it makes the action fail and preserves the variable's previous value; `W`

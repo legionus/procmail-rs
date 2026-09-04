@@ -69,6 +69,7 @@ struct ProgramIoOptions {
     stdout: Stdio,
     stderr: Stdio,
     append_lf: bool,
+    body_input: bool,
 }
 
 // These settings jointly describe how one filter invocation consumes and
@@ -87,6 +88,29 @@ pub struct CaptureOptions {
     output_ending: OutputEnding,
     timeout: Duration,
     output_limit: usize,
+    action_input: ActionInput,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProgramOptions {
+    output_ending: OutputEnding,
+    action_input: ActionInput,
+    timeout: Duration,
+}
+
+impl ProgramOptions {
+    pub fn new(output_ending: OutputEnding, action_input: ActionInput) -> Self {
+        Self {
+            output_ending,
+            action_input,
+            timeout: DEFAULT_PROCESS_TIMEOUT,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
 }
 
 impl CaptureOptions {
@@ -95,11 +119,17 @@ impl CaptureOptions {
             output_ending,
             timeout: DEFAULT_PROCESS_TIMEOUT,
             output_limit,
+            action_input: ActionInput::Message,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_action_input(mut self, action_input: ActionInput) -> Self {
+        self.action_input = action_input;
         self
     }
 }
@@ -237,7 +267,13 @@ pub fn run_filter(
     // wait forever for procmail-rs.
     let (input_write, output, status) = std::thread::scope(|scope| {
         let writer = scope.spawn(move || {
-            write_action_input(&mut child_stdin, input, options.output_ending, false)
+            write_action_input(
+                &mut child_stdin,
+                input,
+                options.output_ending,
+                false,
+                options.action_input == ActionInput::Body,
+            )
         });
         let waiter = scope.spawn(move || wait_for_process_group(&mut child, options.timeout));
         // Body-only output has no header separator. Prefix a private separator
@@ -281,18 +317,10 @@ pub fn run_program(
     environment: &ProcessEnvironment,
     command: &str,
     input: &[u8],
-    output_ending: OutputEnding,
+    options: ProgramOptions,
     stderr: Stdio,
 ) -> Result<ProgramRun, ExternalProcessError> {
-    run_program_with_timeout(
-        policy,
-        environment,
-        command,
-        input,
-        output_ending,
-        DEFAULT_PROCESS_TIMEOUT,
-        stderr,
-    )
+    run_program_with_timeout(policy, environment, command, input, options, stderr)
 }
 
 pub fn run_program_with_timeout(
@@ -300,8 +328,7 @@ pub fn run_program_with_timeout(
     environment: &ProcessEnvironment,
     command: &str,
     input: &[u8],
-    output_ending: OutputEnding,
-    timeout: Duration,
+    options: ProgramOptions,
     stderr: Stdio,
 ) -> Result<ProgramRun, ExternalProcessError> {
     // Original procmail closes stdout for a regular pipe delivery. The safe
@@ -313,11 +340,12 @@ pub fn run_program_with_timeout(
         command,
         input,
         ProgramIoOptions {
-            output_ending,
-            timeout,
+            output_ending: options.output_ending,
+            timeout: options.timeout,
             stdout: Stdio::null(),
             stderr,
             append_lf: false,
+            body_input: options.action_input == ActionInput::Body,
         },
     )
 }
@@ -362,7 +390,13 @@ pub fn run_capture_with_timeout(
     // otherwise wait forever without reaching the process-group timeout.
     let (input_write, output, status, timed_out) = thread::scope(|scope| {
         let writer = scope.spawn(move || {
-            write_action_input(&mut child_stdin, input, options.output_ending, false)
+            write_action_input(
+                &mut child_stdin,
+                input,
+                options.output_ending,
+                false,
+                options.action_input == ActionInput::Body,
+            )
         });
         let started = Instant::now();
         let output = read_bounded_output_until(
@@ -473,6 +507,7 @@ pub fn run_trap_with_timeout(
             stdout,
             stderr,
             append_lf: true,
+            body_input: false,
         },
     )
 }
@@ -490,6 +525,7 @@ fn run_program_with_streams(
         stdout,
         stderr,
         append_lf,
+        body_input,
     } = options;
     let invocation = policy
         .authorize(environment)
@@ -516,11 +552,16 @@ fn run_program_with_streams(
     // the timeout code that is supposed to terminate it.
     let (input_write, waited) = thread::scope(|scope| {
         let waiter = scope.spawn(move || wait_for_process_group(&mut child, timeout));
-        let input_write =
-            match write_action_input(&mut child_stdin, input, output_ending, append_lf) {
-                Ok(()) => InputWrite::Complete,
-                Err(_) => InputWrite::Failed,
-            };
+        let input_write = match write_action_input(
+            &mut child_stdin,
+            input,
+            output_ending,
+            append_lf,
+            body_input,
+        ) {
+            Ok(()) => InputWrite::Complete,
+            Err(_) => InputWrite::Failed,
+        };
         drop(child_stdin);
         (input_write, waiter.join())
     });
@@ -611,9 +652,15 @@ fn write_action_input(
     input: &[u8],
     output_ending: OutputEnding,
     append_lf: bool,
+    body_input: bool,
 ) -> std::io::Result<()> {
     writer.write_all(input)?;
-    if append_lf || output_ending == OutputEnding::Normalize && !input.ends_with(b"\n") {
+    let needs_normalized_lf = if body_input {
+        !input.ends_with(b"\n\n")
+    } else {
+        !input.ends_with(b"\n")
+    };
+    if append_lf || output_ending == OutputEnding::Normalize && needs_normalized_lf {
         writer.write_all(b"\n")?;
     }
     Ok(())

@@ -36,8 +36,9 @@ use procmail_rs::eval::{
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
 use procmail_rs::external_process::{
-    CaptureOptions, FilterOptions, parse_process_timeout, process_timeout_from_config,
-    run_capture_with_timeout, run_filter, run_program_with_timeout, run_trap_with_timeout,
+    CaptureOptions, FilterOptions, ProgramOptions, parse_process_timeout,
+    process_timeout_from_config, run_capture_with_timeout, run_filter, run_program_with_timeout,
+    run_trap_with_timeout,
 };
 use procmail_rs::hostname::current_hostname;
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
@@ -885,8 +886,11 @@ fn execute_external_condition(
         &environment,
         command,
         input,
-        procmail_rs::config::OutputEnding::Preserve,
-        timeout,
+        ProgramOptions::new(
+            procmail_rs::config::OutputEnding::Preserve,
+            procmail_rs::config::ActionInput::Message,
+        )
+        .with_timeout(timeout),
         stderr,
     )
     .map_err(|error| recoverable_external_error(error.to_string()))?;
@@ -919,7 +923,13 @@ fn execute_command_capture(
         &environment,
         command,
         input,
-        CaptureOptions::new(output_ending, limit).with_timeout(timeout),
+        CaptureOptions::new(output_ending, limit)
+            .with_timeout(timeout)
+            .with_action_input(
+                recipe_options.map_or(procmail_rs::config::ActionInput::Message, |options| {
+                    options.action_input
+                }),
+            ),
         stderr,
     )
     .map_err(|error| recoverable_external_error(error.to_string()))?;
@@ -1014,8 +1024,7 @@ fn execute_external_action(
             &environment,
             command,
             input.selected(),
-            options.output_ending,
-            timeout,
+            ProgramOptions::new(options.output_ending, options.action_input).with_timeout(timeout),
             stderr,
         )
         .map_err(|error| recoverable_external_error(error.to_string()))?;

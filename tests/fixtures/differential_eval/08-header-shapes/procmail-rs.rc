@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+:0 c
+* ^X-Folded: first  second value$
+mbox:01-folded
+
+:0 c
+* ^Broken header line$
+mbox:02-malformed
+
+:0 c
+* ^X-After: yes$
+mbox:03-after
+
+:0 Bc
+* ^body$
+mbox:04-body
+
+:0
+mbox:99-final

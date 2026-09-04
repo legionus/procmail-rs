@@ -363,15 +363,18 @@ pub fn write_record_with_ending(
         offset = end;
     }
 
-    // Even raw-mode records need the next postmark to begin on a fresh line.
-    // Add only that structural LF in preserve mode; the normal mode adds one
-    // more LF so adjacent records retain the project's documented separator.
-    if !message.ends_with(b"\n")
-        && (output_ending == OutputEnding::Normalize || !message.is_empty())
-    {
-        writer.write_all(b"\n")?;
-    }
+    // Add only the bytes needed for the next postmark and the normal empty-line
+    // separator. Unconditionally appending a separator would turn an existing
+    // empty line into three LF bytes and diverge from original procmail.
     if output_ending == OutputEnding::Normalize {
+        if message.ends_with(b"\n\n") {
+            return Ok(());
+        }
+        if !message.ends_with(b"\n") {
+            writer.write_all(b"\n")?;
+        }
+        writer.write_all(b"\n")?;
+    } else if !message.is_empty() && !message.ends_with(b"\n") {
         writer.write_all(b"\n")?;
     }
     Ok(())

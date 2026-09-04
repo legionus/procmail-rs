@@ -96,10 +96,27 @@ fn runtime_rc_behavior_matches_reference_procmail() {
                 "fixture: {case}, TRAP stdin"
             );
         }
+        // Command output files describe selected input and branch decisions,
+        // not mail delivery. Compare them separately before excluding their
+        // reviewed names from the destination set so an unexpected file still
+        // fails the fixture.
+        let expected_artifacts = expected_artifacts(&directory);
+        for (name, expected_bytes) in &expected_artifacts {
+            assert_eq!(
+                fs::read(output_directory.0.join(name)).unwrap(),
+                *expected_bytes,
+                "fixture: {case}, command artifact: {name}"
+            );
+        }
         let mut actual = fs::read_dir(&output_directory.0)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .filter(|name| expected_trap.is_none() || name != "trap-message")
+            .filter(|name| {
+                !expected_artifacts
+                    .iter()
+                    .any(|(artifact, _)| artifact == name)
+            })
             .collect::<Vec<_>>();
         actual.sort();
         assert_eq!(actual, expected, "fixture: {case}");
@@ -127,6 +144,23 @@ fn runtime_rc_behavior_matches_reference_procmail() {
             }
         }
     }
+}
+
+fn expected_artifacts(directory: &Path) -> Vec<(String, Vec<u8>)> {
+    let path = directory.join("expected.artifacts");
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut artifacts = entries
+        .map(|entry| {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            let name = entry.file_name().into_string().unwrap();
+            (name, fs::read(entry.path()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    artifacts.sort_by(|left, right| left.0.cmp(&right.0));
+    artifacts
 }
 
 fn mbox_payload(delivery: &[u8]) -> &[u8] {

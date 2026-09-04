@@ -48,6 +48,9 @@ semantics used here.
 Mbox appends are serialized with `flock`, using `LOCKTIMEOUT`. The original
 length is recorded while locked. A failed append or sync attempts to truncate
 back to that length before unlocking; failed rollback is an internal error.
+Normal delivery appends only enough LF bytes for the record to end with one
+empty line; an existing empty line is not extended. Raw `r` delivery adds only
+the LF needed to keep a following postmark on a new line.
 Concurrent tests cover cooperating writers on a local filesystem. No NFS
 safety claim is made, and non-cooperating writers can still corrupt a mailbox.
 

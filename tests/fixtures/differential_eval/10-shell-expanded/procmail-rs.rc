@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+NEEDLE=a.b
+
+:0 c
+* $^Subject: quoted $\NEEDLE$
+mbox:01-quoted
+
+:0
+mbox:99-final

@@ -13,6 +13,11 @@ results produced by the reference run:
 - `expected.destinations` records every selected destination;
 - `expected.delivery` contains the exact bytes written by reference procmail.
 
+An optional `expected.artifacts/` directory contains exact files written by
+fixture commands. These are compared byte-for-byte and excluded from the set
+of delivery destinations, allowing selected command input and control flow to
+be checked without treating command artifacts as mailboxes.
+
 Reference procmail in general-filter mode does not add an mbox postmark, while
 the explicit `mbox:` backend always adds one. The maintained test therefore
 requires a generated `From MAILER-DAEMON` postmark and compares every byte

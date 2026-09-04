@@ -48,7 +48,7 @@ fn adds_record_separator_without_changing_input() {
     for (message, suffix) in [
         (&b"body"[..], &b"body\n\n"[..]),
         (&b"body\n"[..], &b"body\n\n"[..]),
-        (&b"body\n\n"[..], &b"body\n\n\n"[..]),
+        (&b"body\n\n"[..], &b"body\n\n"[..]),
         (&b""[..], &b"\n"[..]),
     ] {
         let original = message.to_vec();

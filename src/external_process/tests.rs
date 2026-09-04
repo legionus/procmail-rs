@@ -155,7 +155,7 @@ fn applies_message_limits_to_filter_output() {
 }
 
 #[test]
-fn normalizes_only_the_bytes_sent_to_the_action() {
+fn normalizes_only_the_bytes_sent_to_the_filter() {
     let (environment, policy) = enabled_shell(&RuntimeVariables::default());
     for (input, ending, expected) in [
         (
@@ -193,6 +193,20 @@ fn normalizes_only_the_bytes_sent_to_the_action() {
 }
 
 #[test]
+fn body_action_input_uses_procmail_double_lf_ending() {
+    for (input, ending, expected) in [
+        (&b"body"[..], OutputEnding::Normalize, &b"body\n"[..]),
+        (&b"body\n"[..], OutputEnding::Normalize, &b"body\n\n"[..]),
+        (&b"body\n\n"[..], OutputEnding::Normalize, &b"body\n\n"[..]),
+        (&b"body\n"[..], OutputEnding::Preserve, &b"body\n"[..]),
+    ] {
+        let mut output = Vec::new();
+        write_action_input(&mut output, input, ending, false, true).unwrap();
+        assert_eq!(output, expected);
+    }
+}
+
+#[test]
 fn rejects_execution_before_spawning_when_policy_is_disabled() {
     let environment = ProcessEnvironment::from_runtime(&RuntimeVariables::default()).unwrap();
     let error = run_filter(
@@ -223,7 +237,7 @@ fn regular_program_discards_stdout_and_reports_completion() {
         &environment,
         "cat >/dev/null; printf 'discarded output'",
         b"Subject: test\n\nbody",
-        OutputEnding::Preserve,
+        ProgramOptions::new(OutputEnding::Preserve, ActionInput::Message),
         Stdio::null(),
     )
     .unwrap();
@@ -240,7 +254,7 @@ fn regular_program_reports_failed_exit_without_parsing_output() {
         &environment,
         "printf 'not a message'; exit 19",
         b"",
-        OutputEnding::Preserve,
+        ProgramOptions::new(OutputEnding::Preserve, ActionInput::Message),
         Stdio::null(),
     )
     .unwrap();
@@ -258,8 +272,8 @@ fn timeout_terminates_a_program_and_its_process_group() {
         &environment,
         "trap '' TERM; (trap '' TERM; sleep 30) & wait",
         b"",
-        OutputEnding::Preserve,
-        Duration::from_millis(50),
+        ProgramOptions::new(OutputEnding::Preserve, ActionInput::Message)
+            .with_timeout(Duration::from_millis(50)),
         Stdio::null(),
     )
     .unwrap();
@@ -299,8 +313,8 @@ fn timeout_interrupts_a_blocked_program_input_write() {
         &environment,
         "sleep 30",
         &input,
-        OutputEnding::Preserve,
-        Duration::from_millis(50),
+        ProgramOptions::new(OutputEnding::Preserve, ActionInput::Message)
+            .with_timeout(Duration::from_millis(50)),
         Stdio::null(),
     )
     .unwrap();
@@ -328,6 +342,22 @@ fn capture_pumps_binary_input_and_output_concurrently() {
     assert_eq!(run.child_exit(), ChildExit::Success);
     assert_eq!(run.exit_code(), Some(0));
     assert_eq!(run.output().unwrap(), input);
+}
+
+#[test]
+fn body_capture_receives_procmail_double_lf_ending() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let run = run_capture_with_timeout(
+        &policy,
+        &environment,
+        "cat",
+        b"body\n",
+        CaptureOptions::new(OutputEnding::Normalize, 16).with_action_input(ActionInput::Body),
+        Stdio::null(),
+    )
+    .unwrap();
+
+    assert_eq!(run.output().unwrap(), b"body\n\n");
 }
 
 #[test]

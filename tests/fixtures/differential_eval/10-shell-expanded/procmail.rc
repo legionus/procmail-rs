@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+NEEDLE=a.b
+
+:0 c
+* $^Subject: quoted $\NEEDLE$
+$OUT/01-quoted
+
+:0
+$OUT/99-final

@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+
+:0 c
+* ^X-Folded: first  second value$
+$OUT/01-folded
+
+:0 c
+* ^Broken header line$
+$OUT/02-malformed
+
+:0 c
+* ^X-After: yes$
+$OUT/03-after
+
+:0 Bc
+* ^body$
+$OUT/04-body
+
+:0
+$OUT/99-final

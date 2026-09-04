@@ -25,3 +25,8 @@ filtering behavior.
 Do not regenerate expected results during a test run. If support is expanded,
 obtain and review the new reference behavior separately, then commit the
 paired configurations, input, and stored result.
+
+The header-shape fixture records folded and syntactically malformed header
+lines without changing their delivered bytes. The match-span fixture checks
+the exact value assigned to `MATCH` through following variable conditions.
+The shell-expanded fixture records procmail's `$\NAME` quoting behavior.

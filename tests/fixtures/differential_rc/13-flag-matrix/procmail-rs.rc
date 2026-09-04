@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+MAILDIR=$CASE
+
+:0 Hcw
+* ^Subject: Flag Matrix$
+| cat >/dev/null; : > "$OUT/01-H"
+
+:0 Bcw
+* ^body old$
+| cat >/dev/null; : > "$OUT/02-B"
+
+:0 HBcw
+* ^X-Matrix: yes$
+* ^body old$
+| cat >/dev/null; : > "$OUT/03-HB"
+
+:0 Dcw
+* ^subject: Flag Matrix$
+| cat >/dev/null; : > "$OUT/never-D"
+
+:0 cw
+* ^subject: Flag Matrix$
+| cat >/dev/null; : > "$OUT/04-case-folded"
+
+:0 Acw
+| cat >/dev/null; : > "$OUT/05-A"
+
+:0 acw
+| cat >/dev/null; : > "$OUT/06-a"
+
+:0 Ecw
+| cat >/dev/null; : > "$OUT/never-E"
+
+:0 cw
+* ^X-Missing:
+| cat >/dev/null; : > "$OUT/never-missing"
+
+:0 Ecw
+| cat >/dev/null; : > "$OUT/07-E"
+
+:0 chw
+| cat > "$OUT/08-h"
+
+:0 cbw
+| cat > "$OUT/09-b"
+
+:0 chbrw
+| cat > "$OUT/10-hbr"
+
+:0 fhw
+| sed 's/^Subject: Flag Matrix$/Subject: Header filtered/'
+
+:0 fbW
+| sed 's/^body old$/body filtered/'
+
+:0 ciw
+| cat > "$OUT/11-i"
+
+:0
+{
+    :0 cw
+    | cat >/dev/null; exit 7
+
+    :0 ecw
+    | cat >/dev/null; : > "$OUT/12-w-status"
+}
+
+:0
+{
+    :0 cW
+    | cat >/dev/null; exit 9
+
+    :0 ecw
+    | cat >/dev/null; : > "$OUT/13-W-status"
+}
+
+:0 crw
+| cat > "$OUT/14-final"
+
+:0
+/dev/null
