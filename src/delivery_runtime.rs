@@ -17,7 +17,7 @@ use procmail_rs::eval::{
     PlannedDelivery, RecipeLockGuard,
 };
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
-use procmail_rs::runtime::{RuntimeSettings, RuntimeVariables};
+use procmail_rs::runtime::{PublicationResult, RuntimeSettings, RuntimeVariables};
 use procmail_rs::trace::{
     DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, TraceEvent, TraceSink,
 };
@@ -517,7 +517,7 @@ fn deliver_one_maildir(
             if let Some(published) = error.published() {
                 record_delivery(destination, DeliveryStage::Published, trace);
                 runtime
-                    .record_delivery_with_trace(published, trace)
+                    .record_publication(PublicationResult::Delivery(published), trace)
                     .map_err(OperationalError::Internal)
                     .map_err(OrderedStepError::after_publication)?;
             }
@@ -539,7 +539,7 @@ fn deliver_one_maildir(
     };
     record_delivery(destination, DeliveryStage::Published, trace);
     runtime
-        .record_delivery_with_trace(&published, trace)
+        .record_publication(PublicationResult::Delivery(&published), trace)
         .map_err(OperationalError::Internal)
         .map_err(OrderedStepError::after_publication)?;
     Ok(())
@@ -573,8 +573,10 @@ fn deliver_file_destination(
     if matches!(destination, Destination::Discard(_)) {
         record_delivery(&destination, DeliveryStage::Published, trace);
         runtime
-            .record_delivery_with_trace(
-                &procmail_rs::delivery::PublishedDelivery::new(PathBuf::from(destination.path())),
+            .record_publication(
+                PublicationResult::Delivery(&procmail_rs::delivery::PublishedDelivery::new(
+                    PathBuf::from(destination.path()),
+                )),
                 trace,
             )
             .map_err(OperationalError::Internal)
@@ -617,7 +619,7 @@ fn deliver_file_destination(
         Ok(published) => {
             record_delivery(&destination, DeliveryStage::Published, trace);
             runtime
-                .record_delivery_with_trace(&published, trace)
+                .record_publication(PublicationResult::Delivery(&published), trace)
                 .map_err(OperationalError::Internal)
                 .map_err(OrderedStepError::after_publication)
         }
@@ -626,8 +628,10 @@ fn deliver_file_destination(
             if error.published() {
                 record_delivery(&destination, DeliveryStage::Published, trace);
                 runtime
-                    .record_delivery_with_trace(
-                        &procmail_rs::delivery::PublishedDelivery::new(path.to_owned()),
+                    .record_publication(
+                        PublicationResult::Delivery(
+                            &procmail_rs::delivery::PublishedDelivery::new(path.to_owned()),
+                        ),
                         trace,
                     )
                     .map_err(OperationalError::Internal)
@@ -675,7 +679,7 @@ fn commit_delivery(
                 record_delivery(delivery.destination(), DeliveryStage::Published, trace);
             }
             runtime
-                .record_commit_with_trace(&report, trace)
+                .record_publication(PublicationResult::Fanout(&report), trace)
                 .map_err(OperationalError::Internal)
         }
         Err(error) => {
@@ -690,7 +694,7 @@ fn commit_delivery(
                 );
             }
             runtime
-                .record_partial_commit_with_trace(&error, trace)
+                .record_publication(PublicationResult::PartialFanout(&error), trace)
                 .map_err(OperationalError::Internal)?;
             Err(OperationalError::delivery(
                 error.class(),

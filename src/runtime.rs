@@ -6,12 +6,29 @@ use std::path::Path;
 
 use crate::delivery::{CommitError, CommitReport, PublishedDelivery};
 use crate::trace::{
-    NoTrace, TraceEvent, TraceName, TraceSink, TraceValue, VariableSource as TraceVariableSource,
+    TraceEvent, TraceName, TraceSink, TraceValue, VariableSource as TraceVariableSource,
 };
 
 mod settings;
 
 pub use settings::{RuntimeSettingError, RuntimeSettings};
+
+#[derive(Debug, Clone, Copy)]
+pub enum PublicationResult<'a> {
+    Delivery(&'a PublishedDelivery),
+    Fanout(&'a CommitReport),
+    PartialFanout(&'a CommitError),
+}
+
+impl<'a> PublicationResult<'a> {
+    fn last_folder(self) -> Option<&'a Path> {
+        match self {
+            Self::Delivery(delivery) => Some(delivery.last_folder()),
+            Self::Fanout(report) => report.last_folder(),
+            Self::PartialFanout(error) => error.last_folder(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeVariables {
@@ -173,48 +190,12 @@ impl RuntimeVariables {
         self.values.insert(name, value);
     }
 
-    pub fn record_commit(&mut self, report: &CommitReport) -> Result<(), String> {
-        self.record_commit_with_trace(report, &mut NoTrace)
-    }
-
-    pub fn record_commit_with_trace(
+    pub fn record_publication(
         &mut self,
-        report: &CommitReport,
+        result: PublicationResult<'_>,
         trace: &mut impl TraceSink,
     ) -> Result<(), String> {
-        self.record_last_folder(report.last_folder(), trace)
-    }
-
-    pub fn record_partial_commit(&mut self, error: &CommitError) -> Result<(), String> {
-        self.record_partial_commit_with_trace(error, &mut NoTrace)
-    }
-
-    pub fn record_partial_commit_with_trace(
-        &mut self,
-        error: &CommitError,
-        trace: &mut impl TraceSink,
-    ) -> Result<(), String> {
-        self.record_last_folder(error.last_folder(), trace)
-    }
-
-    pub fn record_delivery(&mut self, delivery: &PublishedDelivery) -> Result<(), String> {
-        self.record_delivery_with_trace(delivery, &mut NoTrace)
-    }
-
-    pub fn record_delivery_with_trace(
-        &mut self,
-        delivery: &PublishedDelivery,
-        trace: &mut impl TraceSink,
-    ) -> Result<(), String> {
-        self.record_last_folder(Some(delivery.last_folder()), trace)
-    }
-
-    fn record_last_folder(
-        &mut self,
-        path: Option<&Path>,
-        trace: &mut impl TraceSink,
-    ) -> Result<(), String> {
-        let Some(path) = path else {
+        let Some(path) = result.last_folder() else {
             return Ok(());
         };
         let value = path.to_str().ok_or_else(|| {

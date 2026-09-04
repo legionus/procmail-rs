@@ -145,7 +145,12 @@ fn records_last_successful_destination() {
     .unwrap();
     let mut runtime = RuntimeVariables::default();
 
-    runtime.record_commit(&report).unwrap();
+    runtime
+        .record_publication(
+            PublicationResult::Fanout(&report),
+            &mut crate::trace::NoTrace,
+        )
+        .unwrap();
 
     assert_eq!(runtime.last_folder(), Some("second"));
 }
@@ -168,7 +173,12 @@ fn records_last_destination_before_partial_failure() {
     .unwrap_err();
     let mut runtime = RuntimeVariables::default();
 
-    runtime.record_partial_commit(&error).unwrap();
+    runtime
+        .record_publication(
+            PublicationResult::PartialFanout(&error),
+            &mut crate::trace::NoTrace,
+        )
+        .unwrap();
 
     assert_eq!(runtime.last_folder(), Some("first"));
 }
@@ -187,7 +197,7 @@ fn failure_before_publication_does_not_change_last_folder() {
     let mut trace = crate::trace::MemoryTrace::default();
 
     runtime
-        .record_partial_commit_with_trace(&error, &mut trace)
+        .record_publication(PublicationResult::PartialFanout(&error), &mut trace)
         .unwrap();
 
     assert_eq!(runtime.last_folder(), Some("previous"));
@@ -205,7 +215,12 @@ fn failure_after_publication_records_the_visible_folder() {
     .unwrap_err();
     let mut runtime = RuntimeVariables::default();
 
-    runtime.record_partial_commit(&error).unwrap();
+    runtime
+        .record_publication(
+            PublicationResult::PartialFanout(&error),
+            &mut crate::trace::NoTrace,
+        )
+        .unwrap();
 
     assert_eq!(runtime.last_folder(), Some("visible-before-sync-failure"));
 }
