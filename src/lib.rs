@@ -9,6 +9,8 @@
 )))]
 compile_error!("procmail-rs currently supports only 32-bit and 64-bit Linux targets");
 
+mod bounded_bytes;
+
 pub mod config;
 pub mod delivery;
 pub mod environment;

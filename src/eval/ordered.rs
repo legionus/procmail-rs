@@ -6,6 +6,7 @@ use super::services::{
     GlobalLockExecutor, LocalLockExecutor,
 };
 use super::*;
+use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
 struct OrderedTreeExecution<'a, E, T> {
     message: CompleteMessage<'a>,
@@ -622,19 +623,19 @@ fn evaluate_shell_expression<E, T>(
 where
     T: TraceSink,
 {
-    let mut value = Vec::new();
+    let mut value = BoundedBytes::with_capacity(input.limit, 0);
 
     // Build the complete result privately. Commands can fail, time out, or
     // exceed the remaining budget after earlier literal fragments; callers
     // must never observe a partial variable or destination path.
     for part in input.parts {
-        let remaining = input.limit.checked_sub(value.len()).ok_or_else(|| {
+        let remaining = value.remaining().map_err(|_| {
             OrderedExecutionError::Evaluation(EvalError::VariableValueTooLarge {
                 name: input.value_name.to_owned(),
                 size: value.len(),
             })
         })?;
-        let mut bytes = match part {
+        let bytes = match part {
             crate::config::ShellPart::Literal(source) => source.as_bytes().to_vec(),
             crate::config::ShellPart::Command(command) => {
                 let executor = capture.as_deref_mut().ok_or_else(|| {
@@ -711,17 +712,17 @@ where
                 escaped
             }
         };
-        if bytes.len() > remaining {
-            return Err(OrderedExecutionError::Evaluation(
-                EvalError::VariableValueTooLarge {
-                    name: input.value_name.to_owned(),
-                    size: value.len().saturating_add(bytes.len()),
+        value.try_extend(&bytes).map_err(|error| {
+            OrderedExecutionError::Evaluation(EvalError::VariableValueTooLarge {
+                name: input.value_name.to_owned(),
+                size: match error {
+                    BoundedBytesError::LengthOverflow => usize::MAX,
+                    BoundedBytesError::LimitExceeded { attempted } => attempted,
                 },
-            ));
-        }
-        value.append(&mut bytes);
+            })
+        })?;
     }
-    Ok(value)
+    Ok(value.into_vec())
 }
 
 pub(super) fn active_command_value_limit<E>(

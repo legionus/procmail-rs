@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
+use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
+
 use super::{
     Assignment, AssignmentTarget, Config, Destination, HeaderAction, HeaderOperation, HeaderValue,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression,
@@ -2116,18 +2118,15 @@ fn push_bounded(
     limit: usize,
     line: usize,
 ) -> Result<(), ExpansionError> {
-    let new_len = output
-        .len()
-        .checked_add(value.len())
-        .ok_or_else(|| ExpansionError::new(line, "expanded value length overflows"))?;
-    if new_len > limit {
-        return Err(ExpansionError::new(
+    BoundedBytes::try_extend_vec(output, limit, value).map_err(|error| match error {
+        BoundedBytesError::LengthOverflow => {
+            ExpansionError::new(line, "expanded value length overflows")
+        }
+        BoundedBytesError::LimitExceeded { .. } => ExpansionError::new(
             line,
             format!("expanded value exceeds the hard limit of {limit} bytes"),
-        ));
-    }
-    output.extend_from_slice(value);
-    Ok(())
+        ),
+    })
 }
 
 #[cfg(test)]

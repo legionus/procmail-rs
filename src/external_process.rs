@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process_group};
 
+use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use crate::config::{ActionInput, AssignmentTarget, Config, OutputEnding, Statement};
 use crate::environment::{ProcessEnvironment, ShellPolicy};
 use crate::external_filter::{ChildExit, FilterOutput, InputWrite};
@@ -450,7 +451,7 @@ fn read_bounded_output_until(
     timeout: Duration,
     started: Instant,
 ) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(limit.min(64 * 1024));
+    let mut output = BoundedBytes::with_capacity(limit, 64 * 1024);
     let mut buffer = [0u8; 8192];
     loop {
         let read = match reader.read(&mut buffer) {
@@ -472,9 +473,9 @@ fn read_bounded_output_until(
             Err(error) => return Err(error),
         };
         if read == 0 {
-            return Ok(output);
+            return Ok(output.into_vec());
         }
-        let remaining = limit.checked_sub(output.len()).ok_or_else(|| {
+        let remaining = output.remaining().map_err(|_| {
             std::io::Error::other("captured command output size accounting overflowed")
         })?;
         if read > remaining {
@@ -483,7 +484,17 @@ fn read_bounded_output_until(
                 format!("captured command output exceeds the hard limit of {limit} bytes"),
             ));
         }
-        output.extend_from_slice(&buffer[..read]);
+        output
+            .try_extend(&buffer[..read])
+            .map_err(|error| match error {
+                BoundedBytesError::LengthOverflow => {
+                    std::io::Error::other("captured command output size accounting overflowed")
+                }
+                BoundedBytesError::LimitExceeded { .. } => std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("captured command output exceeds the hard limit of {limit} bytes"),
+                ),
+            })?;
     }
 }
 

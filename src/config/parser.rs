@@ -3,6 +3,8 @@
 
 use regex::bytes::RegexBuilder;
 
+use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
+
 use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaptureAction, CaseMode,
     ChildStatusMode, CommandAssignment, Condition, ConditionInput, ConditionKind, Config,
@@ -1303,20 +1305,17 @@ fn expand_reserved_procmail_regex_forms(
 }
 
 fn push_regex_bytes(output: &mut Vec<u8>, value: &[u8], line: usize) -> Result<(), ParseError> {
-    let length = output
-        .len()
-        .checked_add(value.len())
-        .ok_or_else(|| ParseError::new(line, "expanded regular expression length overflows"))?;
-    if length > MAX_REGEX_PATTERN_LEN {
-        return Err(ParseError::new(
+    BoundedBytes::try_extend_vec(output, MAX_REGEX_PATTERN_LEN, value).map_err(|error| match error {
+        BoundedBytesError::LengthOverflow => {
+            ParseError::new(line, "expanded regular expression length overflows")
+        }
+        BoundedBytesError::LimitExceeded { .. } => ParseError::new(
             line,
             format!(
                 "expanded regular expression exceeds the hard limit of {MAX_REGEX_PATTERN_LEN} bytes"
             ),
-        ));
-    }
-    output.extend_from_slice(value);
-    Ok(())
+        ),
+    })
 }
 
 fn prepare_capture_pattern(
