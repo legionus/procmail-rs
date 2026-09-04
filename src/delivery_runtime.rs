@@ -31,6 +31,54 @@ pub(super) struct DeliveryRuntime {
     limits: MessageLimits,
     uid: u32,
     global_lock: Option<LocalLock>,
+    publications: PublicationTracker,
+}
+
+#[derive(Default)]
+struct PublicationTracker {
+    published: usize,
+    original_delivered: bool,
+}
+
+impl PublicationTracker {
+    fn record(
+        &mut self,
+        published: usize,
+        original_delivered: bool,
+    ) -> Result<(), OperationalError> {
+        self.published = self.published.checked_add(published).ok_or_else(|| {
+            OperationalError::Internal("published destination count overflows".to_owned())
+        })?;
+        self.original_delivered |= original_delivered;
+        Ok(())
+    }
+
+    fn record_plan(&mut self, plan: &DeliveryPlan) -> Result<(), OperationalError> {
+        self.record(plan.deliveries().len(), plan.original_delivered())
+    }
+
+    fn record_outcome(
+        &mut self,
+        outcome: procmail_rs::eval::DeliveryOutcome,
+    ) -> Result<(), OperationalError> {
+        self.record(outcome.published(), outcome.original_delivered())
+    }
+
+    fn finish(&mut self) -> Result<(), OperationalError> {
+        // Consume the state even when the original was not delivered. This
+        // keeps accidental reuse of DeliveryRuntime from carrying publication
+        // counts into another message while retaining the copy count in the
+        // diagnostic produced for this one.
+        let completed = std::mem::take(self);
+        if completed.original_delivered {
+            Ok(())
+        } else {
+            Err(OperationalError::Undelivered(format!(
+                "original message was not delivered (published {} copy destination(s))",
+                completed.published
+            )))
+        }
+    }
 }
 
 impl DeliveryRuntime {
@@ -46,6 +94,7 @@ impl DeliveryRuntime {
             limits,
             uid,
             global_lock: None,
+            publications: PublicationTracker::default(),
         }
     }
 
@@ -64,8 +113,8 @@ impl DeliveryRuntime {
             OperationalError::Input(format!("cannot stream message from stdin: {error}"))
         })?;
         commit_delivery(validated, plan.deliveries(), runtime, trace)?;
-
-        delivery_outcome(plan)
+        self.publications.record_plan(plan)?;
+        self.publications.finish()
     }
 
     pub(super) fn deliver_staged<T: TraceSink>(
@@ -249,7 +298,8 @@ impl DeliveryRuntime {
                     }
                     OrderedExecutionError::Delivery(error) => error,
                 })?;
-            return delivery_outcome_counts(outcome.original_delivered(), outcome.published());
+            self.publications.record_outcome(outcome)?;
+            return self.publications.finish();
         }
         let plan = execution
             .resume_with_trace(
@@ -273,8 +323,8 @@ impl DeliveryRuntime {
             .append_bytes(late, staged.as_bytes())
             .map_err(|error| OperationalError::delivery(error.class(), error.to_string()))?;
         commit_delivery(validated, plan.deliveries(), runtime, trace)?;
-
-        delivery_outcome(&plan)
+        self.publications.record_plan(&plan)?;
+        self.publications.finish()
     }
 }
 
@@ -755,24 +805,6 @@ pub(super) fn validate_maildir_path(path: &Path) -> Result<(), String> {
         return Err("path must not contain '..'".into());
     }
     Ok(())
-}
-
-fn delivery_outcome(plan: &DeliveryPlan) -> Result<(), OperationalError> {
-    delivery_outcome_counts(plan.original_delivered(), plan.deliveries().len())
-}
-
-fn delivery_outcome_counts(
-    original_delivered: bool,
-    published: usize,
-) -> Result<(), OperationalError> {
-    if original_delivered {
-        Ok(())
-    } else {
-        Err(OperationalError::Undelivered(format!(
-            "original message was not delivered (published {} copy destination(s))",
-            published
-        )))
-    }
 }
 
 #[cfg(test)]
