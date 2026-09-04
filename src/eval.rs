@@ -22,7 +22,6 @@ mod ordered;
 mod result;
 mod runtime_rc;
 mod services;
-mod simple;
 mod tree;
 
 fn runtime_setting_eval_error(error: RuntimeSettingError) -> EvalError {
@@ -42,13 +41,12 @@ use message::{CompleteMessage, OwnedCompleteMessage, current_ordered_message};
 pub use message::{ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage};
 pub use result::{
     CompletionState, Continuation, DeliveryAttemptError, DeliveryOutcome, DeliveryPlan, EvalError,
-    HeaderEvaluation, OrderedExecutionError, Outcome, PlannedDelivery,
+    HeaderEvaluation, OrderedExecutionError, PlannedDelivery,
 };
 use result::{ContinuationFrame, DeliveryContinuation};
 pub use runtime_rc::MAX_RUNTIME_RC_WARNINGS;
 use runtime_rc::{LoadedRuntimeRc, RcExecutionContext, RuntimeRcState};
 pub use services::{ExecutionServices, ExecutionServicesError, RecipeLockGuard};
-pub use simple::evaluate;
 use tree::{
     ActionExecution, CompiledAction, CompiledAssignment, CompiledNode, CompiledSequence,
     CompiledStatement, SequenceState,
@@ -126,10 +124,6 @@ fn validate_captured_value(
         }
     }
     Ok(output)
-}
-
-pub trait Delivery {
-    fn deliver(&mut self, destination: &Destination, message: &Message) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

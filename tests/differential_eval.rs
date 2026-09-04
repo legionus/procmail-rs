@@ -6,10 +6,15 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
-use procmail_rs::config::{self, Destination};
-use procmail_rs::eval::{Delivery, Outcome, evaluate};
+use procmail_rs::config::{self, Destination, OutputEnding};
+use procmail_rs::eval::{
+    DeliveryAttemptError, DeliveryOutcome, ExecutionPlan, ExecutionServices, MappedMessageInput,
+    MatchingMessage,
+};
 use procmail_rs::limits::MessageLimits;
 use procmail_rs::message::Message;
+use procmail_rs::runtime::RuntimeVariables;
+use procmail_rs::trace::NoTrace;
 
 const FIXTURES: &str = "tests/fixtures/differential_eval";
 
@@ -19,8 +24,8 @@ struct Recorder {
     failures: BTreeSet<String>,
 }
 
-impl Delivery for Recorder {
-    fn deliver(&mut self, destination: &Destination, _: &Message) -> Result<(), String> {
+impl Recorder {
+    fn deliver(&mut self, destination: &Destination) -> Result<(), String> {
         let name = Path::new(destination.path())
             .file_name()
             .and_then(|name| name.to_str())
@@ -58,17 +63,53 @@ fn supported_milestone_7_behavior_matches_reference_procmail() {
 
         let message =
             Message::read_from(&mut Cursor::new(message), MessageLimits::default()).unwrap();
-        let outcome = evaluate(&config, &message, &mut recorder).unwrap();
+        let outcome = evaluate(&config, &message, &mut recorder);
 
         assert_eq!(recorder.selected, expected, "fixture: {case}");
         assert_eq!(render_outcome(outcome), expected_outcome, "fixture: {case}");
     }
 }
 
-fn render_outcome(outcome: Outcome) -> String {
-    match outcome {
-        Outcome::Delivered { deliveries } => format!("delivered {deliveries}\n"),
-        Outcome::Undelivered { copies } => format!("undelivered {copies}\n"),
+fn evaluate(
+    config: &config::Config,
+    message: &Message,
+    recorder: &mut Recorder,
+) -> DeliveryOutcome {
+    let plan = ExecutionPlan::compile(config);
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = NoTrace;
+    let matching_full = plan
+        .needs_message_contents()
+        .then(|| message.matching_message())
+        .flatten();
+    let matching = Some(MatchingMessage::new(
+        message.matching_header(),
+        matching_full.as_deref(),
+    ));
+    let mut delivery = |destination: &Destination,
+                        _: &[u8],
+                        _: OutputEnding,
+                        _: Option<&str>,
+                        _: &mut RuntimeVariables,
+                        _: &mut NoTrace| {
+        recorder
+            .deliver(destination)
+            .map_err(DeliveryAttemptError::Recoverable)
+    };
+    let services = ExecutionServices::new(&mut delivery, &mut trace);
+    plan.execute_mapped_ordered_with_services(
+        MappedMessageInput::new(message.as_bytes(), message.header().len(), matching),
+        &mut runtime,
+        services,
+    )
+    .unwrap()
+}
+
+fn render_outcome(outcome: DeliveryOutcome) -> String {
+    if outcome.original_delivered() {
+        format!("delivered {}\n", outcome.published())
+    } else {
+        format!("undelivered {}\n", outcome.published())
     }
 }
 

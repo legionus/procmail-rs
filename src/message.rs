@@ -32,6 +32,7 @@ pub struct StreamedMessage {
 }
 
 impl Message {
+    #[cfg(test)]
     pub(crate) fn with_edited_header(&self, edited: EditedHeader) -> Result<Self, HeaderEditError> {
         Self::from_edited_header(edited, self.body())
     }
@@ -116,13 +117,13 @@ impl Message {
         &self.raw[self.header.clone()]
     }
 
-    pub(crate) fn matching_header(&self) -> &[u8] {
+    pub fn matching_header(&self) -> &[u8] {
         self.matching_header
             .as_deref()
             .unwrap_or_else(|| self.header())
     }
 
-    pub(crate) fn matching_message(&self) -> Option<Vec<u8>> {
+    pub fn matching_message(&self) -> Option<Vec<u8>> {
         let header = self.matching_header.as_ref()?;
         let mut matching = Vec::with_capacity(self.raw.len());
         matching.extend_from_slice(header);

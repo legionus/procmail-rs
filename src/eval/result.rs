@@ -134,12 +134,6 @@ impl Continuation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    Delivered { deliveries: usize },
-    Undelivered { copies: usize },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
     BodyWasNotBuffered,

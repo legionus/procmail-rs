@@ -21,8 +21,18 @@ struct FailingRecorder {
     attempted: Vec<String>,
 }
 
+trait Delivery {
+    fn deliver(&mut self, destination: &Destination, message: &[u8]) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Delivered { deliveries: usize },
+    Undelivered { copies: usize },
+}
+
 impl Delivery for FailingRecorder {
-    fn deliver(&mut self, destination: &Destination, _: &Message) -> Result<(), String> {
+    fn deliver(&mut self, destination: &Destination, _: &[u8]) -> Result<(), String> {
         self.attempted.push(destination.path().to_owned());
         if self.fail_paths.contains(&destination.path()) {
             Err("injected delivery failure".to_owned())
@@ -33,9 +43,62 @@ impl Delivery for FailingRecorder {
 }
 
 impl Delivery for Recorder {
-    fn deliver(&mut self, destination: &Destination, _: &Message) -> Result<(), String> {
+    fn deliver(&mut self, destination: &Destination, _: &[u8]) -> Result<(), String> {
         self.destinations.push(destination.clone());
         Ok(())
+    }
+}
+
+fn evaluate(
+    config: &Config,
+    message: &Message,
+    delivery: &mut impl Delivery,
+) -> Result<Outcome, EvalError> {
+    let plan = ExecutionPlan::compile(config);
+    let matching_full = plan
+        .needs_message_contents()
+        .then(|| message.matching_message())
+        .flatten();
+    let matching = Some(MatchingMessage::new(
+        message.matching_header(),
+        matching_full.as_deref(),
+    ));
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = NoTrace;
+    let mut deliver = |destination: &Destination,
+                       bytes: &[u8],
+                       _: OutputEnding,
+                       _: Option<&str>,
+                       _: &mut RuntimeVariables,
+                       _: &mut NoTrace| {
+        delivery.deliver(destination, bytes).map_err(|message| {
+            DeliveryAttemptError::Recoverable(EvalError::Delivery {
+                destination: destination.path().to_owned(),
+                message,
+            })
+        })
+    };
+    let services = ExecutionServices::new(&mut deliver, &mut trace);
+    let outcome = plan
+        .execute_mapped_ordered_with_services(
+            MappedMessageInput::new(message.as_bytes(), message.header().len(), matching),
+            &mut runtime,
+            services,
+        )
+        .map_err(|error| match error {
+            OrderedExecutionError::Evaluation(error) | OrderedExecutionError::Delivery(error) => {
+                error
+            }
+        })?;
+
+    if outcome.original_delivered() {
+        Ok(Outcome::Delivered {
+            deliveries: outcome.published(),
+        })
+    } else {
+        Ok(Outcome::Undelivered {
+            copies: outcome.published(),
+        })
     }
 }
 
