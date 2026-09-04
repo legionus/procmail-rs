@@ -10,33 +10,23 @@
 compile_error!("procmail-rs currently supports only 32-bit and 64-bit Linux targets");
 
 use std::env;
-use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{ExitCode, Stdio};
+use std::process::ExitCode;
 
-use procmail_rs::config::{
-    self, ActionMode, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable,
-};
+use procmail_rs::config::{self, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
 use procmail_rs::delivery::discard::DiscardSink;
 use procmail_rs::delivery::local_lock::{LocalLock, LockMethod, lock_timeout_from_config};
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
 use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
-use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{
-    ActionKindExplanation, CapturedCommand, CompletionState, ConditionKindExplanation,
-    DeliveryAttemptError, DeliveryPlan, ExecutionPlan, ExternalActionInput, FinalMessage,
-    HeaderEvaluation, MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation,
-    PlannedDelivery, RecipeLockGuard,
+    ActionKindExplanation, CompletionState, ConditionKindExplanation, DeliveryAttemptError,
+    DeliveryPlan, ExecutionPlan, FinalMessage, HeaderEvaluation, MappedMessageInput,
+    MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery, RecipeLockGuard,
 };
-use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
-use procmail_rs::external_process::{
-    CaptureOptions, FilterOptions, ProgramOptions, process_timeout_from_config,
-    run_capture_with_timeout, run_filter, run_program_with_timeout, run_trap_with_timeout,
-};
+use procmail_rs::external_process::process_timeout_from_config;
 use procmail_rs::hostname::current_hostname;
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
@@ -47,6 +37,10 @@ use procmail_rs::trace::{
     TraceEvent, TraceSink,
 };
 use procmail_rs::user_identity::UserIdentity;
+
+mod command_runner;
+
+use command_runner::CommandRunner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
@@ -281,12 +275,13 @@ fn run() -> Result<u8, OperationalError> {
             let mut head = Message::read_headers(&mut stdin, limits).map_err(|error| {
                 OperationalError::Input(format!("cannot read message headers from stdin: {error}"))
             })?;
+            let command_runner = CommandRunner::new(limits);
             let header_evaluation = plan.evaluate_headers_editing_with_capture_trace(
                 &mut head,
                 &mut runtime,
                 &mut trace,
                 &mut |command, input, output_ending, recipe_options, limit, runtime, _| {
-                    execute_command_capture(
+                    command_runner.capture(
                         command,
                         input,
                         output_ending,
@@ -529,6 +524,7 @@ fn deliver_staged(
 
     if execution.requires_ordered_delivery() {
         let mut global_lock = None;
+        let command_runner = CommandRunner::new(staging_options.limits);
         let outcome = execution
             .execute_mapped_ordered_with_processes_and_completion_trace(
                 MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
@@ -569,14 +565,13 @@ fn deliver_staged(
                 },
                 (
                     &mut |command, input, runtime, _| {
-                        execute_external_condition(command, input, runtime)
+                        command_runner.condition(command, input, runtime)
                     },
                     &mut |action, recipe_options, lock, input, runtime, _| {
                         let _local_lock =
                             acquire_recipe_lock(lock, None, runtime, staging_options.uid)
                                 .map_err(DeliveryAttemptError::Recoverable)?;
-                        execute_external_action(
-                            staging_options.limits,
+                        command_runner.action(
                             action.command.as_str(),
                             recipe_options,
                             input,
@@ -584,7 +579,7 @@ fn deliver_staged(
                         )
                     },
                     &mut |command, input, output_ending, recipe_options, limit, runtime, _| {
-                        execute_command_capture(
+                        command_runner.capture(
                             command,
                             input,
                             output_ending,
@@ -620,7 +615,7 @@ fn deliver_staged(
                     },
                 ),
                 &mut |message: FinalMessage<'_>, runtime, _, state| {
-                    execute_trap(message.as_bytes(), runtime, completion_exit_status(state));
+                    command_runner.trap(message.as_bytes(), runtime, completion_exit_status(state));
                 },
             )
             .map_err(|error| match error {
@@ -672,107 +667,6 @@ fn completion_exit_status(state: CompletionState<'_, OperationalError>) -> u8 {
             error.exit_status() as u8
         }
     }
-}
-
-fn execute_trap(message: &[u8], runtime: &mut RuntimeVariables, provisional_status: u8) {
-    let Some(command) = runtime.get("TRAP").filter(|command| !command.is_empty()) else {
-        return;
-    };
-    let command = command.to_owned();
-    let exitcode_was_absent = runtime.get("EXITCODE").is_none();
-    let exitcode_was_empty = runtime.get("EXITCODE") == Some("");
-    if exitcode_was_absent {
-        runtime.set("EXITCODE", provisional_status.to_string());
-    }
-
-    let result = (|| {
-        let timeout = RuntimeSettings::new(runtime)
-            .process_timeout()
-            .map_err(|error| error.to_string())?;
-        let environment = ProcessEnvironment::from_runtime(runtime)
-            .map_err(|error| format!("cannot build TRAP environment: {error}"))?;
-        let configured_shell = environment
-            .get("SHELL")
-            .ok_or_else(|| "bounded TRAP environment has no SHELL".to_owned())?;
-        let shell_policy =
-            ShellPolicy::approve(configured_shell).map_err(|error| error.to_string())?;
-        let (stdout, stderr) = trap_output(runtime);
-        run_trap_with_timeout(
-            &shell_policy,
-            &environment,
-            &command,
-            message,
-            timeout,
-            stdout,
-            stderr,
-        )
-        .map_err(|error| error.to_string())
-    })();
-
-    match result {
-        Ok(run) if exitcode_was_empty => {
-            if run.child_exit() == ChildExit::TimedOut {
-                report_trap_diagnostic(runtime, "TRAP exceeded TIMEOUT");
-            }
-            if let Some(code) = run.exit_code().filter(|code| *code != 0) {
-                runtime.set("EXITCODE", code.to_string());
-            } else if run.child_exit() != ChildExit::Success {
-                runtime.set(
-                    "EXITCODE",
-                    (ExitStatus::TemporaryDelivery as u8).to_string(),
-                );
-            }
-        }
-        Ok(run) => {
-            if run.child_exit() == ChildExit::TimedOut {
-                report_trap_diagnostic(runtime, "TRAP exceeded TIMEOUT");
-            }
-        }
-        Err(error) => {
-            report_trap_diagnostic(runtime, &format!("TRAP failed: {error}"));
-            if exitcode_was_empty {
-                runtime.set(
-                    "EXITCODE",
-                    (ExitStatus::TemporaryDelivery as u8).to_string(),
-                );
-            }
-        }
-    }
-}
-
-fn report_trap_diagnostic(runtime: &RuntimeVariables, message: &str) {
-    let record = format!("procmail-rs: {message}\n");
-    let result = match open_external_log(runtime) {
-        Ok(Some(mut file)) => file.write_all(record.as_bytes()),
-        Ok(None) => io::stderr().lock().write_all(record.as_bytes()),
-        Err(error) => {
-            eprintln!("procmail-rs: cannot write TRAP diagnostic to LOGFILE: {error}");
-            return;
-        }
-    };
-    if let Err(error) = result {
-        eprintln!("procmail-rs: cannot write TRAP diagnostic: {error}");
-    }
-}
-
-fn trap_output(runtime: &RuntimeVariables) -> (Stdio, Stdio) {
-    match open_external_log(runtime) {
-        Ok(Some(file)) => match file.try_clone() {
-            Ok(stdout) => return (Stdio::from(stdout), Stdio::from(file)),
-            Err(error) => {
-                eprintln!("procmail-rs: cannot duplicate LOGFILE for TRAP output: {error}");
-            }
-        },
-        Ok(None) => {}
-        Err(error) => {
-            eprintln!("procmail-rs: cannot open LOGFILE for TRAP output: {error}");
-        }
-    }
-
-    // TRAP combines stdout with stderr in original procmail. Duplicate the
-    // inherited descriptor instead of routing stdout to the caller's normal
-    // output, where command text could corrupt a protocol-facing response.
-    (Stdio::from(io::stderr()), Stdio::from(io::stderr()))
 }
 
 fn acquire_recipe_lock(
@@ -855,315 +749,6 @@ fn acquire_configured_lock(
             format!("cannot acquire local lockfile: {error}"),
         )
     })
-}
-
-fn execute_external_condition(
-    command: &str,
-    input: &[u8],
-    runtime: &mut RuntimeVariables,
-) -> Result<bool, DeliveryAttemptError<OperationalError>> {
-    let timeout = RuntimeSettings::new(runtime)
-        .process_timeout()
-        .map_err(|error| recoverable_external_error(error.to_string()))?;
-    let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
-        recoverable_external_error(format!(
-            "cannot build external condition environment: {error}"
-        ))
-    })?;
-    let configured_shell = environment.get("SHELL").ok_or_else(|| {
-        recoverable_external_error("command capture environment does not contain SHELL")
-    })?;
-    let shell_policy = ShellPolicy::approve(configured_shell)
-        .map_err(|error| recoverable_external_error(error.to_string()))?;
-    let stderr = external_stderr(runtime).map_err(|error| {
-        recoverable_external_error(format!("cannot open external command log: {error}"))
-    })?;
-
-    // Program conditions always wait for the child and decide solely from its
-    // exit status. A child that closes stdin early must still be usable for
-    // commands such as test(1), which do not consume the message at all.
-    let run = run_program_with_timeout(
-        &shell_policy,
-        &environment,
-        command,
-        input,
-        ProgramOptions::new(
-            procmail_rs::config::OutputEnding::Preserve,
-            procmail_rs::config::ActionInput::Message,
-        )
-        .with_timeout(timeout),
-        stderr,
-    )
-    .map_err(|error| recoverable_external_error(error.to_string()))?;
-    Ok(run.child_exit() == ChildExit::Success)
-}
-
-fn execute_command_capture(
-    command: &str,
-    input: &[u8],
-    output_ending: procmail_rs::config::OutputEnding,
-    recipe_options: Option<procmail_rs::config::RecipeOptions>,
-    limit: usize,
-    runtime: &mut RuntimeVariables,
-) -> Result<CapturedCommand, DeliveryAttemptError<OperationalError>> {
-    let timeout = RuntimeSettings::new(runtime)
-        .process_timeout()
-        .map_err(|error| recoverable_external_error(error.to_string()))?;
-    let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
-        recoverable_external_error(format!("cannot build command capture environment: {error}"))
-    })?;
-    let configured_shell = environment
-        .get("SHELL")
-        .expect("bounded process environment always contains SHELL");
-    let shell_policy = ShellPolicy::approve(configured_shell)
-        .map_err(|error| recoverable_external_error(error.to_string()))?;
-    let stderr = external_stderr(runtime).map_err(|error| {
-        recoverable_external_error(format!("cannot open external command log: {error}"))
-    })?;
-    let run = run_capture_with_timeout(
-        &shell_policy,
-        &environment,
-        command,
-        input,
-        CaptureOptions::new(output_ending, limit)
-            .with_timeout(timeout)
-            .with_action_input(
-                recipe_options.map_or(procmail_rs::config::ActionInput::Message, |options| {
-                    options.action_input
-                }),
-            ),
-        stderr,
-    )
-    .map_err(|error| recoverable_external_error(error.to_string()))?;
-    let input_write = run.input_write();
-    let child_exit = run.child_exit();
-
-    if child_exit == ChildExit::TimedOut {
-        report_external_child_failure(runtime, child_exit).map_err(|error| {
-            recoverable_external_error(format!(
-                "cannot write external command failure diagnostic: {error}"
-            ))
-        })?;
-        return Err(recoverable_external_error(
-            "command assignment exceeded TIMEOUT",
-        ));
-    }
-    if let Some(options) = recipe_options {
-        let decision = decide_program(
-            options.child_status,
-            options.write_errors,
-            input_write,
-            child_exit,
-        );
-        if decision.report_child_failure() {
-            report_external_child_failure(runtime, child_exit).map_err(|error| {
-                recoverable_external_error(format!(
-                    "cannot write external command failure diagnostic: {error}"
-                ))
-            })?;
-        }
-        if !decision.succeeded() {
-            return Err(recoverable_external_error(
-                "command capture did not complete successfully",
-            ));
-        }
-    }
-    let output = run.into_output().map_err(|error| {
-        recoverable_external_error(format!("command returned invalid captured output: {error}"))
-    })?;
-    Ok(CapturedCommand::new(output, input_write, child_exit))
-}
-
-fn execute_external_action(
-    limits: MessageLimits,
-    command: &str,
-    options: procmail_rs::config::RecipeOptions,
-    input: ExternalActionInput<'_>,
-    runtime: &mut RuntimeVariables,
-) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
-    if command.is_empty() {
-        // A sole pipe action is procmail's explicit stdout delivery. Write the
-        // already selected and fully validated message area here so an empty
-        // shell command cannot silently consume it, and include final-buffer
-        // errors in the recipe's normal `i` handling.
-        let mut stdout = io::stdout().lock();
-        let result = stdout.write_all(input.selected()).and_then(|()| {
-            if options.output_ending == procmail_rs::config::OutputEnding::Normalize
-                && !input.selected().ends_with(b"\n")
-            {
-                stdout.write_all(b"\n")?;
-            }
-            stdout.flush()
-        });
-        if let Err(error) = result
-            && options.write_errors == procmail_rs::config::WriteErrorMode::Fail
-        {
-            return Err(recoverable_external_error(format!(
-                "cannot write message to stdout: {error}"
-            )));
-        }
-        runtime.set("LASTFOLDER", "|");
-        return Ok(None);
-    }
-    let timeout = RuntimeSettings::new(runtime)
-        .process_timeout()
-        .map_err(|error| recoverable_external_error(error.to_string()))?;
-    let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
-        recoverable_external_error(format!(
-            "cannot build external command environment: {error}"
-        ))
-    })?;
-    let configured_shell = environment
-        .get("SHELL")
-        .expect("bounded process environment always contains SHELL");
-    let shell_policy = ShellPolicy::approve(configured_shell)
-        .map_err(|error| recoverable_external_error(error.to_string()))?;
-    let stderr = external_stderr(runtime).map_err(|error| {
-        recoverable_external_error(format!("cannot open external command log: {error}"))
-    })?;
-    if options.action_mode == ActionMode::Deliver {
-        let run = run_program_with_timeout(
-            &shell_policy,
-            &environment,
-            command,
-            input.selected(),
-            ProgramOptions::new(options.output_ending, options.action_input).with_timeout(timeout),
-            stderr,
-        )
-        .map_err(|error| recoverable_external_error(error.to_string()))?;
-        let decision = decide_program(
-            options.child_status,
-            options.write_errors,
-            run.input_write(),
-            run.child_exit(),
-        );
-        if decision.report_child_failure() {
-            report_external_child_failure(runtime, run.child_exit()).map_err(|error| {
-                recoverable_external_error(format!(
-                    "cannot write external command failure diagnostic: {error}"
-                ))
-            })?;
-        }
-        return if decision.succeeded() {
-            runtime.set("LASTFOLDER", command);
-            Ok(None)
-        } else {
-            Err(recoverable_external_error(
-                "external program did not complete successfully",
-            ))
-        };
-    }
-    let run = run_filter(
-        &shell_policy,
-        &environment,
-        command,
-        input.selected(),
-        FilterOptions::new(options.output_ending, options.action_input, limits)
-            .with_timeout(timeout),
-        stderr,
-    )
-    .map_err(|error| recoverable_external_error(error.to_string()))?;
-    let decision = decide_filter(
-        options.child_status,
-        options.write_errors,
-        run.input_write(),
-        run.output_state(),
-        run.child_exit(),
-    );
-    if decision.report_child_failure() {
-        report_external_child_failure(runtime, run.child_exit()).map_err(|error| {
-            recoverable_external_error(format!(
-                "cannot write external command failure diagnostic: {error}"
-            ))
-        })?;
-    }
-
-    // Read and validate stdout before consulting the status decision. This
-    // keeps the detailed bounded-input error available while the previous
-    // message remains owned by the evaluator for a following error recipe.
-    if run.output_state() == FilterOutput::Failed {
-        let error = run
-            .into_output()
-            .expect_err("failed filter output retains its validation error");
-        return Err(recoverable_external_error(format!(
-            "external filter returned an invalid message: {error}"
-        )));
-    }
-    if !decision.succeeded() {
-        return Err(recoverable_external_error(
-            "external filter did not complete successfully",
-        ));
-    }
-    let output = run
-        .into_output()
-        .expect("successful filter output was validated");
-    let replacement = Message::from_filter_output(
-        input.header(),
-        input.body(),
-        &output,
-        options.action_input,
-        limits,
-    )
-    .map_err(|error| {
-        recoverable_external_error(format!(
-            "external filter returned an invalid replacement message: {error}"
-        ))
-    })?;
-    Ok(Some(replacement))
-}
-
-fn recoverable_external_error(
-    message: impl Into<String>,
-) -> DeliveryAttemptError<OperationalError> {
-    DeliveryAttemptError::Recoverable(OperationalError::TemporaryDelivery(message.into()))
-}
-
-fn external_stderr(runtime: &RuntimeVariables) -> io::Result<Stdio> {
-    Ok(match open_external_log(runtime)? {
-        Some(file) => Stdio::from(file),
-        None => Stdio::inherit(),
-    })
-}
-
-fn report_external_child_failure(
-    runtime: &RuntimeVariables,
-    child_exit: ChildExit,
-) -> io::Result<()> {
-    let diagnostic = if child_exit == ChildExit::TimedOut {
-        b"procmail-rs: external command exceeded TIMEOUT\n".as_slice()
-    } else {
-        b"procmail-rs: external command exited unsuccessfully\n".as_slice()
-    };
-    match open_external_log(runtime)? {
-        Some(mut file) => file.write_all(diagnostic),
-        None => io::stderr().lock().write_all(diagnostic),
-    }
-}
-
-fn open_external_log(runtime: &RuntimeVariables) -> io::Result<Option<File>> {
-    let settings = RuntimeSettings::new(runtime);
-    let Some(path) = settings.logfile() else {
-        return Ok(None);
-    };
-    let mask = settings
-        .umask()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600 & !mask)
-        .custom_flags(
-            i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
-                .expect("Linux O_NOFOLLOW fits in the std custom-flags type"),
-        )
-        .open(path)?;
-    if !file.metadata()?.file_type().is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "LOGFILE is not a regular file",
-        ));
-    }
-    Ok(Some(file))
 }
 
 fn stage_matching_message(
