@@ -17,12 +17,10 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 
 use procmail_rs::config::{
-    self, ActionMode, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable, parse_umask,
+    self, ActionMode, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable,
 };
 use procmail_rs::delivery::discard::DiscardSink;
-use procmail_rs::delivery::local_lock::{
-    LocalLock, LockMethod, lock_timeout_from_config, parse_lock_timeout,
-};
+use procmail_rs::delivery::local_lock::{LocalLock, LockMethod, lock_timeout_from_config};
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
 use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
@@ -36,15 +34,14 @@ use procmail_rs::eval::{
 };
 use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
 use procmail_rs::external_process::{
-    CaptureOptions, FilterOptions, ProgramOptions, parse_process_timeout,
-    process_timeout_from_config, run_capture_with_timeout, run_filter, run_program_with_timeout,
-    run_trap_with_timeout,
+    CaptureOptions, FilterOptions, ProgramOptions, process_timeout_from_config,
+    run_capture_with_timeout, run_filter, run_program_with_timeout, run_trap_with_timeout,
 };
 use procmail_rs::hostname::current_hostname;
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::RcFileLoader;
-use procmail_rs::runtime::RuntimeVariables;
+use procmail_rs::runtime::{RuntimeSettings, RuntimeVariables};
 use procmail_rs::trace::{
     DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, NoTrace, TraceConfig,
     TraceEvent, TraceSink,
@@ -310,7 +307,8 @@ fn run() -> Result<u8, OperationalError> {
                         &mut trace,
                     ),
                     HeaderEvaluation::NeedsMessage(continuation) => {
-                        let runtime_staging = runtime.get("MAILDIR").map(PathBuf::from);
+                        let runtime_staging =
+                            RuntimeSettings::new(&runtime).maildir().map(PathBuf::from);
                         let staging_directory = runtime_staging
                             .as_deref()
                             .or(staging_directory.as_deref())
@@ -688,7 +686,9 @@ fn execute_trap(message: &[u8], runtime: &mut RuntimeVariables, provisional_stat
     }
 
     let result = (|| {
-        let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))?;
+        let timeout = RuntimeSettings::new(runtime)
+            .process_timeout()
+            .map_err(|error| error.to_string())?;
         let environment = ProcessEnvironment::from_runtime(runtime)
             .map_err(|error| format!("cannot build TRAP environment: {error}"))?;
         let configured_shell = environment
@@ -839,11 +839,16 @@ fn acquire_configured_lock(
     runtime: &RuntimeVariables,
     uid: u32,
 ) -> Result<LocalLock, OperationalError> {
-    let method = LockMethod::parse(runtime.get("LOCKMETHOD").unwrap_or("flock"))
-        .map_err(OperationalError::PermanentDestination)?;
-    let timeout = parse_lock_timeout(runtime.get("LOCKTIMEOUT").unwrap_or("1024"))
-        .map_err(OperationalError::PermanentDestination)?;
-    let mask = active_umask(runtime)?;
+    let settings = RuntimeSettings::new(runtime);
+    let method = settings
+        .lock_method()
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
+    let timeout = settings
+        .lock_timeout()
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
+    let mask = settings
+        .umask()
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
     LocalLock::acquire_with_mask(Path::new(path), method, uid, timeout, mask).map_err(|error| {
         OperationalError::delivery(
             DeliveryFailureClass::from_io_error(&error),
@@ -852,18 +857,14 @@ fn acquire_configured_lock(
     })
 }
 
-fn active_umask(runtime: &RuntimeVariables) -> Result<u32, OperationalError> {
-    parse_umask(runtime.get("UMASK").unwrap_or("077"))
-        .map_err(OperationalError::PermanentDestination)
-}
-
 fn execute_external_condition(
     command: &str,
     input: &[u8],
     runtime: &mut RuntimeVariables,
 ) -> Result<bool, DeliveryAttemptError<OperationalError>> {
-    let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))
-        .map_err(recoverable_external_error)?;
+    let timeout = RuntimeSettings::new(runtime)
+        .process_timeout()
+        .map_err(|error| recoverable_external_error(error.to_string()))?;
     let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
         recoverable_external_error(format!(
             "cannot build external condition environment: {error}"
@@ -905,8 +906,9 @@ fn execute_command_capture(
     limit: usize,
     runtime: &mut RuntimeVariables,
 ) -> Result<CapturedCommand, DeliveryAttemptError<OperationalError>> {
-    let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))
-        .map_err(recoverable_external_error)?;
+    let timeout = RuntimeSettings::new(runtime)
+        .process_timeout()
+        .map_err(|error| recoverable_external_error(error.to_string()))?;
     let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
         recoverable_external_error(format!("cannot build command capture environment: {error}"))
     })?;
@@ -1003,8 +1005,9 @@ fn execute_external_action(
         runtime.set("LASTFOLDER", "|");
         return Ok(None);
     }
-    let timeout = parse_process_timeout(runtime.get("TIMEOUT").unwrap_or("960"))
-        .map_err(recoverable_external_error)?;
+    let timeout = RuntimeSettings::new(runtime)
+        .process_timeout()
+        .map_err(|error| recoverable_external_error(error.to_string()))?;
     let environment = ProcessEnvironment::from_runtime(runtime).map_err(|error| {
         recoverable_external_error(format!(
             "cannot build external command environment: {error}"
@@ -1138,11 +1141,13 @@ fn report_external_child_failure(
 }
 
 fn open_external_log(runtime: &RuntimeVariables) -> io::Result<Option<File>> {
-    let Some(path) = runtime.get("LOGFILE").filter(|path| !path.is_empty()) else {
+    let settings = RuntimeSettings::new(runtime);
+    let Some(path) = settings.logfile() else {
         return Ok(None);
     };
-    let mask = parse_umask(runtime.get("UMASK").unwrap_or("077"))
-        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    let mask = settings
+        .umask()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1225,7 +1230,10 @@ fn deliver_one_maildir(
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
 ) -> Result<(), OrderedStepError> {
-    let mask = active_umask(runtime).map_err(OrderedStepError::before_publication)?;
+    let mask = RuntimeSettings::new(runtime)
+        .umask()
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
+        .map_err(OrderedStepError::before_publication)?;
     let mut sinks = vec![
         open_sink(destination, durability, mask, runtime, trace)
             .map_err(OrderedStepError::before_publication)?,
@@ -1322,10 +1330,15 @@ fn deliver_file_destination(
         ));
     };
     let path = Path::new(expression.source());
-    let lock_timeout = parse_lock_timeout(runtime.get("LOCKTIMEOUT").unwrap_or("1024"))
-        .map_err(OperationalError::PermanentDestination)
+    let settings = RuntimeSettings::new(runtime);
+    let lock_timeout = settings
+        .lock_timeout()
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
         .map_err(OrderedStepError::before_publication)?;
-    let mask = active_umask(runtime).map_err(OrderedStepError::before_publication)?;
+    let mask = settings
+        .umask()
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
+        .map_err(OrderedStepError::before_publication)?;
     let locked = MboxFile::open_with_mask(path, mask)
         .and_then(|mbox| mbox.lock_with_timeout(lock_timeout))
         .map_err(|error| {
@@ -1436,11 +1449,10 @@ fn open_sinks(
 ) -> Result<Vec<Box<dyn PendingSink>>, OperationalError> {
     let mut sinks: Vec<Box<dyn PendingSink>> = Vec::with_capacity(deliveries.len());
     for delivery in deliveries {
-        let mask = parse_umask(delivery.umask()).map_err(OperationalError::PermanentDestination)?;
         sinks.push(open_sink(
             delivery.destination(),
             durability,
-            mask,
+            delivery.umask(),
             runtime,
             trace,
         )?);

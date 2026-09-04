@@ -8,7 +8,7 @@ use crate::config::{
 use crate::limits::MessageLimits;
 use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::rc_file::RcFileLoader;
-use crate::runtime::RuntimeVariables;
+use crate::runtime::{RuntimeSettingError, RuntimeSettings, RuntimeVariables};
 use crate::trace::{
     NoTrace, RecipeDecision, TraceEvent, TraceName, TraceSink, TraceValue,
     VariableSource as TraceVariableSource,
@@ -23,6 +23,13 @@ mod result;
 mod runtime_rc;
 mod simple;
 mod tree;
+
+fn runtime_setting_eval_error(error: RuntimeSettingError) -> EvalError {
+    EvalError::RuntimeSettingUnavailable {
+        line: error.line().unwrap_or(0),
+        name: error.name(),
+    }
+}
 
 use condition::PartialMatch;
 pub use explanation::{

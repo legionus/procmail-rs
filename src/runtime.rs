@@ -7,6 +7,10 @@ use std::path::Path;
 use crate::delivery::{CommitError, CommitReport, PublishedDelivery};
 use crate::trace::{NoTrace, TraceEvent, TraceSink};
 
+mod settings;
+
+pub use settings::{RuntimeSettingError, RuntimeSettings};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeVariables {
     values: BTreeMap<String, String>,
@@ -21,8 +25,16 @@ impl Default for RuntimeVariables {
             "LINEBUF".to_owned(),
             crate::config::DEFAULT_LINEBUF.to_string(),
         );
-        values.insert("TIMEOUT".to_owned(), "960".to_owned());
-        values.insert("UMASK".to_owned(), "077".to_owned());
+        values.insert(
+            "TIMEOUT".to_owned(),
+            crate::external_process::DEFAULT_PROCESS_TIMEOUT
+                .as_secs()
+                .to_string(),
+        );
+        values.insert(
+            "UMASK".to_owned(),
+            format!("{:03o}", crate::config::DEFAULT_UMASK),
+        );
         values.insert(
             "LOCKEXT".to_owned(),
             crate::config::DEFAULT_LOCK_EXT.to_owned(),

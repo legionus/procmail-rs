@@ -19,7 +19,7 @@ pub struct PlannedDelivery {
     pub(super) continuation: DeliveryContinuation,
     pub(super) output_ending: OutputEnding,
     pub(super) lock: Option<String>,
-    pub(super) umask: String,
+    pub(super) umask: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +85,8 @@ impl PlannedDelivery {
         self.lock.as_deref()
     }
 
-    pub fn umask(&self) -> &str {
-        &self.umask
+    pub fn umask(&self) -> u32 {
+        self.umask
     }
 }
 

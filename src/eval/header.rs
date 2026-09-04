@@ -937,6 +937,9 @@ impl CompiledNode {
             .map_err(EvalError::Expansion)?;
         let lock = self.resolve_lock(runtime).map_err(EvalError::Expansion)?;
         let copy = *continuation == ContinuationMode::Continue;
+        let umask = RuntimeSettings::at_line(runtime, self.line)
+            .umask()
+            .map_err(runtime_setting_eval_error)?;
         execution.deliveries.push(PlannedDelivery {
             destination,
             continuation: if copy {
@@ -946,7 +949,7 @@ impl CompiledNode {
             },
             output_ending: *output_ending,
             lock,
-            umask: runtime.get("UMASK").unwrap_or("077").to_owned(),
+            umask,
         });
         execution.original_delivered |= !copy;
         if copy || has_error_handler {

@@ -9,6 +9,7 @@ pub const MAX_COMMAND_LINE_VARIABLES: usize = 256;
 pub const MAX_LOCK_TIMEOUT_SECONDS: u64 = 86_400;
 pub const MAX_PROCESS_TIMEOUT_SECONDS: u64 = 86_400;
 pub const DEFAULT_LOCK_EXT: &str = ".lock";
+pub const DEFAULT_UMASK: u32 = 0o077;
 pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "DEFAULT",
     "ORGMAIL",

@@ -1210,10 +1210,9 @@ pub(crate) fn expand_shell_condition(
         parsed = parse_shell_condition_expression(&condition.source, line)?;
         &parsed
     };
-    let linebuf = runtime
-        .get("LINEBUF")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(super::DEFAULT_LINEBUF);
+    let linebuf = crate::runtime::RuntimeSettings::at_line(runtime, line)
+        .linebuf()
+        .map_err(|error| ExpansionError::new(line, error.message().to_owned()))?;
     let bytes = evaluate_shell_condition(expression, line, linebuf, runtime, 0)
         .map_err(|error| relabel_linebuf_error(error, linebuf, usize::MAX))?;
     String::from_utf8(bytes).map_err(|_| {

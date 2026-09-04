@@ -170,11 +170,10 @@ impl CompiledNode {
                         .map_err(OrderedExecutionError::Evaluation)?;
                         &parsed
                     };
-                    let limit = context
-                        .runtime
-                        .get("LINEBUF")
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .unwrap_or(crate::config::DEFAULT_LINEBUF);
+                    let limit = RuntimeSettings::at_line(context.runtime, line)
+                        .linebuf()
+                        .map_err(runtime_setting_eval_error)
+                        .map_err(OrderedExecutionError::Evaluation)?;
                     let raw = message
                         .raw()
                         .ok_or(EvalError::BodyWasNotBuffered)
@@ -456,7 +455,10 @@ impl CompiledNode {
                         })
                         .map_err(OrderedExecutionError::Evaluation)?;
                     destination
-                        .resolve_command_output(source, context.runtime.get("MAILDIR"))
+                        .resolve_command_output(
+                            source,
+                            RuntimeSettings::new(context.runtime).maildir(),
+                        )
                         .map_err(EvalError::Expansion)
                         .map_err(OrderedExecutionError::Evaluation)?
                 } else {
@@ -807,15 +809,10 @@ pub(super) fn active_command_value_limit<E>(
     target: AssignmentTarget,
     line: usize,
 ) -> Result<usize, OrderedExecutionError<E>> {
-    let linebuf = match runtime.get("LINEBUF") {
-        Some(value) => value.parse::<usize>().map_err(|_| {
-            OrderedExecutionError::Evaluation(EvalError::RuntimeSettingUnavailable {
-                line,
-                name: "LINEBUF",
-            })
-        })?,
-        None => crate::config::DEFAULT_LINEBUF,
-    };
+    let linebuf = RuntimeSettings::at_line(runtime, line)
+        .linebuf()
+        .map_err(runtime_setting_eval_error)
+        .map_err(OrderedExecutionError::Evaluation)?;
     Ok(linebuf.min(crate::config::assignment_value_limit(target)))
 }
 
