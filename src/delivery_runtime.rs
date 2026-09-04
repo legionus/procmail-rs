@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use procmail_rs::config::{self, Destination, OutputEnding, RecipeOptions};
+use procmail_rs::config::{self, Destination, DestinationKind, OutputEnding, RecipeOptions};
 use procmail_rs::delivery::discard::DiscardSink;
 use procmail_rs::delivery::local_lock::LocalLock;
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
@@ -191,10 +191,9 @@ impl DeliveryRuntime {
                                 trace: &mut T| {
                 let _local_lock = acquire_recipe_lock(lock, Some(destination), runtime, uid)
                     .map_err(DeliveryAttemptError::Recoverable)?;
-                let result = if matches!(
-                    destination,
-                    Destination::Mbox(_) | Destination::File(_) | Destination::Discard(_)
-                ) {
+                let result = if destination.supports_fanout_delivery() {
+                    deliver_one_sink(destination, message, durability, runtime, trace)
+                } else {
                     deliver_file_destination(
                         destination,
                         message,
@@ -203,8 +202,6 @@ impl DeliveryRuntime {
                         runtime,
                         trace,
                     )
-                } else {
-                    deliver_one_maildir(destination, message, durability, runtime, trace)
                 };
                 result.map_err(|error| {
                     if error.can_handle {
@@ -482,7 +479,7 @@ impl OrderedStepError {
     }
 }
 
-fn deliver_one_maildir(
+fn deliver_one_sink(
     destination: &Destination,
     message: &[u8],
     durability: Durability,
@@ -570,7 +567,7 @@ fn deliver_file_destination(
     // a hostile filesystem object. The complete message has already passed
     // input validation, while avoiding device writes also keeps mbox locking,
     // rollback, and durability assumptions limited to regular files.
-    if matches!(destination, Destination::Discard(_)) {
+    if destination.kind() == DestinationKind::Discard {
         record_delivery(&destination, DeliveryStage::Published, trace);
         runtime
             .record_publication(
@@ -583,13 +580,13 @@ fn deliver_file_destination(
             .map_err(OrderedStepError::after_publication)?;
         return Ok(());
     }
-    let Destination::Mbox(_) = &destination else {
+    if destination.kind() != DestinationKind::Mbox {
         return Err(OrderedStepError::before_publication(
             OperationalError::Internal(
                 "internal error: file delivery resolved to another destination type".to_owned(),
             ),
         ));
-    };
+    }
     let path = Path::new(destination.path());
     let settings = RuntimeSettings::new(runtime);
     let lock_timeout = settings
@@ -741,8 +738,8 @@ fn open_sink(
             );
             OperationalError::PermanentDestination(error.to_string())
         })?;
-    match &destination {
-        Destination::Maildir(_) => {
+    match destination.kind() {
+        DestinationKind::Maildir => {
             let path = Path::new(destination.path());
             let sink = MaildirSink::create_with_durability_and_mask(path, durability, mask)
                 .map_err(|error| {
@@ -758,7 +755,7 @@ fn open_sink(
                 })?;
             Ok(Box::new(sink))
         }
-        Destination::Mbox(_) => {
+        DestinationKind::Mbox => {
             record_delivery(
                 unresolved,
                 DeliveryStage::Failed(FailureClass::Permanent),
@@ -769,8 +766,8 @@ fn open_sink(
                 destination.path()
             )))
         }
-        Destination::Discard(_) => Ok(Box::new(DiscardSink::null())),
-        Destination::File(_) => {
+        DestinationKind::Discard => Ok(Box::new(DiscardSink::null())),
+        DestinationKind::File => {
             record_delivery(
                 unresolved,
                 DeliveryStage::Failed(FailureClass::Permanent),
@@ -785,11 +782,11 @@ fn open_sink(
 }
 
 fn record_delivery(destination: &Destination, stage: DeliveryStage, trace: &mut impl TraceSink) {
-    let destination_kind = match destination {
-        Destination::Maildir(_) => TraceDestinationKind::Maildir,
-        Destination::Mbox(_) => TraceDestinationKind::Mbox,
-        Destination::File(_) => TraceDestinationKind::File,
-        Destination::Discard(_) => TraceDestinationKind::Discard,
+    let destination_kind = match destination.kind() {
+        DestinationKind::Maildir => TraceDestinationKind::Maildir,
+        DestinationKind::Mbox => TraceDestinationKind::Mbox,
+        DestinationKind::File => TraceDestinationKind::File,
+        DestinationKind::Discard => TraceDestinationKind::Discard,
     };
     trace.record(TraceEvent::Delivery {
         recipe_line: destination.line(),

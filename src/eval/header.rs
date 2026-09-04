@@ -838,8 +838,7 @@ impl CompiledNode {
                 !capture_available || options.action_input != ActionInput::Headers
             }
             CompiledAction::Deliver { destination, .. } => {
-                destination.needs_runtime_variables()
-                    || matches!(destination, Destination::Mbox(_) | Destination::File(_))
+                destination.needs_runtime_variables() || destination.requires_ordered_delivery()
             }
             CompiledAction::Block(_) => false,
             CompiledAction::Headers(_) => false,

@@ -304,11 +304,11 @@ impl Destination {
     }
 
     fn purpose(&self) -> PathPurpose {
-        match self {
-            Self::Maildir(_) => PathPurpose::Maildir,
-            Self::Mbox(_) => PathPurpose::Mbox,
-            Self::File(_) => PathPurpose::File,
-            Self::Discard(_) => PathPurpose::Discard,
+        match self.kind() {
+            super::DestinationKind::Maildir => PathPurpose::Maildir,
+            super::DestinationKind::Mbox => PathPurpose::Mbox,
+            super::DestinationKind::File => PathPurpose::File,
+            super::DestinationKind::Discard => PathPurpose::Discard,
         }
     }
 
@@ -339,7 +339,9 @@ impl Destination {
     }
 
     fn adopt_static_discard_classification(&mut self, resolved: &Self) {
-        if matches!(self, Self::File(_)) && matches!(resolved, Self::Discard(_)) {
+        if self.kind() == super::DestinationKind::File
+            && resolved.kind() == super::DestinationKind::Discard
+        {
             let expression = self.expression().clone();
             *self = Self::Discard(expression);
         }

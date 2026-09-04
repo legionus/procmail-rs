@@ -534,6 +534,36 @@ pub enum Destination {
     Discard(PathExpression),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationKind {
+    Maildir,
+    Mbox,
+    File,
+    Discard,
+}
+
+impl Destination {
+    pub fn kind(&self) -> DestinationKind {
+        match self {
+            Self::Maildir(_) => DestinationKind::Maildir,
+            Self::Mbox(_) => DestinationKind::Mbox,
+            Self::File(_) => DestinationKind::File,
+            Self::Discard(_) => DestinationKind::Discard,
+        }
+    }
+
+    pub fn requires_ordered_delivery(&self) -> bool {
+        matches!(self.kind(), DestinationKind::Mbox | DestinationKind::File)
+    }
+
+    pub fn supports_fanout_delivery(&self) -> bool {
+        matches!(
+            self.kind(),
+            DestinationKind::Maildir | DestinationKind::Discard
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PathExpression {
     pub(crate) source: String,
