@@ -4000,6 +4000,44 @@ fn filter_reparses_shell_expanded_condition_with_regex_quoted_value() {
 }
 
 #[test]
+fn filter_reparses_shell_condition_from_bounded_command_output() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    create_maildir(&base.join("matched"));
+    create_maildir(&base.join("fallback"));
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\n* $`grep -q body && printf '^Subject: wanted$'`\nmatched/\n:0\nfallback/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: wanted\n\nbody")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&base.join("matched")).len(), 1);
+    assert!(delivered_messages(&base.join("fallback")).is_empty());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn invalid_command_line_variable_does_not_consume_stdin() {
     let config = config_file(":0\nmaildir:unused\n");
     let input_path = config.parent().unwrap().join("message.eml");

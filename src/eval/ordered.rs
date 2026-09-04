@@ -156,9 +156,50 @@ impl CompiledNode {
     {
         for (index, condition) in self.conditions.iter().enumerate() {
             let message = current_ordered_message(context.message, context.replacement.as_ref());
-            let resolved = condition
-                .resolve_shell_expansion(context.runtime)
-                .map_err(OrderedExecutionError::Evaluation)?;
+            let resolved = condition.resolve_shell_expansion_with(
+                |shell, line| {
+                    let parsed;
+                    let expression = if let Some(expression) = shell.expansion.as_ref() {
+                        expression
+                    } else {
+                        parsed = crate::config::expand::parse_shell_condition_expression(
+                            &shell.source,
+                            line,
+                        )
+                        .map_err(EvalError::Expansion)
+                        .map_err(OrderedExecutionError::Evaluation)?;
+                        &parsed
+                    };
+                    let limit = context
+                        .runtime
+                        .get("LINEBUF")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(crate::config::DEFAULT_LINEBUF);
+                    let raw = message
+                        .raw()
+                        .ok_or(EvalError::BodyWasNotBuffered)
+                        .map_err(OrderedExecutionError::Evaluation)?;
+                    let bytes = evaluate_shell_expression(
+                        ShellExpressionInput {
+                            parts: &expression.parts,
+                            line,
+                            value_name: "shell-expanded condition",
+                            message: raw,
+                            limit,
+                        },
+                        context.runtime,
+                        context.trace,
+                        &mut context.capture,
+                    )?;
+                    String::from_utf8(bytes)
+                        .map_err(|_| EvalError::RuntimeCondition {
+                            line,
+                            message: "shell-expanded condition contains non-UTF-8 data".to_owned(),
+                        })
+                        .map_err(OrderedExecutionError::Evaluation)
+                },
+                OrderedExecutionError::Evaluation,
+            )?;
             let condition = resolved.as_ref().unwrap_or(condition);
             let matched = if let Some((command, input)) = condition.program() {
                 let input = match input {
@@ -390,16 +431,16 @@ impl CompiledNode {
                         .raw()
                         .ok_or(EvalError::BodyWasNotBuffered)
                         .map_err(OrderedExecutionError::Evaluation)?;
-                let destination = if let Some(parts) = destination.command_parts() {
+                let destination = if let Some(parts) = destination.command_expression() {
                     let limit = active_command_value_limit(
                         context.runtime,
                         AssignmentTarget::User,
                         destination.command_line(),
                     )?
                     .min(crate::config::MAX_PATH_EXPRESSION_LEN);
-                    let bytes = execute_command_parts(
-                        CommandPartsInput {
-                            parts,
+                    let bytes = evaluate_shell_expression(
+                        ShellExpressionInput {
+                            parts: &parts.parts,
                             line: destination.command_line(),
                             value_name: "destination",
                             message,
@@ -611,9 +652,9 @@ where
         .ok_or(EvalError::BodyWasNotBuffered)
         .map_err(OrderedExecutionError::Evaluation)?;
     let limit = active_command_value_limit(context.runtime, assignment.target, assignment.line)?;
-    let value = execute_command_parts(
-        CommandPartsInput {
-            parts: &assignment.parts,
+    let value = evaluate_shell_expression(
+        ShellExpressionInput {
+            parts: &assignment.expression.parts,
             line: assignment.line,
             value_name: &assignment.name,
             message,
@@ -642,16 +683,16 @@ where
     Ok(())
 }
 
-struct CommandPartsInput<'a> {
-    parts: &'a [crate::config::CommandAssignmentPart],
+struct ShellExpressionInput<'a> {
+    parts: &'a [crate::config::ShellPart],
     line: usize,
     value_name: &'a str,
     message: &'a [u8],
     limit: usize,
 }
 
-fn execute_command_parts<E, T>(
-    input: CommandPartsInput<'_>,
+fn evaluate_shell_expression<E, T>(
+    input: ShellExpressionInput<'_>,
     runtime: &mut RuntimeVariables,
     trace: &mut T,
     capture: &mut Option<&mut CommandCaptureExecutor<'_, E, T>>,
@@ -672,11 +713,8 @@ where
             })
         })?;
         let mut bytes = match part {
-            crate::config::CommandAssignmentPart::Literal(source) => runtime
-                .expand_bytes(source, input.line, remaining)
-                .map_err(EvalError::Expansion)
-                .map_err(OrderedExecutionError::Evaluation)?,
-            crate::config::CommandAssignmentPart::Command(command) => {
+            crate::config::ShellPart::Literal(source) => source.as_bytes().to_vec(),
+            crate::config::ShellPart::Command(command) => {
                 let executor = capture.as_deref_mut().ok_or_else(|| {
                     OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
                         line: input.line,
@@ -702,6 +740,53 @@ where
                     CapturedNewlineRule::StripAll,
                 )
                 .map_err(OrderedExecutionError::Evaluation)?
+            }
+            crate::config::ShellPart::Variable { name, default } => {
+                if let Some(bytes) = runtime.get_bytes(name).filter(|value| !value.is_empty()) {
+                    bytes.to_vec()
+                } else if let Some(default) = default {
+                    evaluate_shell_expression(
+                        ShellExpressionInput {
+                            parts: &default.parts,
+                            line: input.line,
+                            value_name: input.value_name,
+                            message: input.message,
+                            limit: remaining,
+                        },
+                        runtime,
+                        trace,
+                        capture,
+                    )?
+                } else if let Some(bytes) = runtime.get_bytes(name) {
+                    bytes.to_vec()
+                } else {
+                    return Err(OrderedExecutionError::Evaluation(EvalError::Expansion(
+                        crate::config::ExpansionError {
+                            line: input.line,
+                            message: format!("variable {name} is not defined"),
+                        },
+                    )));
+                }
+            }
+            crate::config::ShellPart::RegexQuotedVariable(name) => {
+                let source = runtime.get_bytes(name).ok_or_else(|| {
+                    OrderedExecutionError::Evaluation(EvalError::Expansion(
+                        crate::config::ExpansionError {
+                            line: input.line,
+                            message: format!("variable {name} is not defined"),
+                        },
+                    ))
+                })?;
+                let mut escaped = Vec::new();
+                crate::config::expand::push_regex_escaped(
+                    &mut escaped,
+                    source,
+                    remaining,
+                    input.line,
+                )
+                .map_err(EvalError::Expansion)
+                .map_err(OrderedExecutionError::Evaluation)?;
+                escaped
             }
         };
         if bytes.len() > remaining {

@@ -60,11 +60,11 @@ a review source; installed procmail-rs tests do not depend on it.
 | Documented procmail behavior | Current status | Compatibility consequence |
 | --- | --- | --- |
 | Ordinary regex, `!`, `?`, `<`, `>`, and `NAME ??` conditions | Supported within the limits described above. | Program conditions use the configured trusted shell and finite `TIMEOUT`. |
-| A condition beginning with `$` is expanded using shell substitution rules inside double quotes and then reparsed as a condition. | Supported with the project's bounded variable syntax, including procmail's `$\NAME` regex quoting. | The intermediate text is limited by active `LINEBUF`. Backquoted commands and unsupported special parameters are rejected explicitly. Runtime-dependent forms conservatively require complete staging because the resulting condition type is not known before evaluation. |
+| A condition beginning with `$` is expanded using shell substitution rules inside double quotes and then reparsed as a condition. | Supported with the project's bounded variable syntax, procmail's `$\NAME` regex quoting, and backquoted commands. | Intermediate text is limited by active `LINEBUF`; commands receive the complete current message and use active `TIMEOUT` and `LOGFILE`. Unsupported special parameters are rejected explicitly. Runtime-dependent forms conservatively require complete staging because the resulting condition type is not known before evaluation. |
 | `w^x` weighted regex, program, and length conditions; final score in `$=` | Explicitly rejected as one unsupported condition category. | Implement all scoring forms together with bounded match counting, checked numeric handling, and `$=` so a mixed recipe cannot receive partial scoring behavior. |
 | A trailing backslash continues a condition; shell-expanded conditions retain continuation whitespace. | Explicitly rejected. | Bounded continuation support must preserve the distinct whitespace rule for shell-expanded conditions. |
 | Procmail ERE operators and its `^`, `$`, `^^`, `\<`, `\>`, and `\/` extensions | Partly supported through the Rust byte-regex engine and explicit translations. | Procmail chooses the leftmost shortest match except while computing `MATCH`; the Rust engine has different disambiguation. Procmail treats `{` as an ordinary byte and does not support named character classes, while the Rust engine accepts counted repetition and POSIX classes. These differences can change both decisions and captures and need differential fixtures or explicit rejection. |
-| Shell-style assignments, including single and double quotes, escapes, unsetting with bare `NAME`, field splitting, and all documented parameter forms | Only the bounded subset in the supported table is implemented. | Unsupported `$` forms are rejected, but single quotes, backslash escapes, inline comment boundaries, and some unquoted shell syntax can remain literal and therefore change values silently. Assignment tokenization should reject every unimplemented form before broader expansion is added. |
+| Shell-style assignments, including single and double quotes, escapes, unsetting with bare `NAME`, field splitting, and all documented parameter forms | Only the bounded subset in the supported table is implemented. Backslash escaping outside and within a complete double-quoted value follows the tested procmail behavior. | Unsupported `$` forms are rejected, but single quotes, inline comment boundaries, and some unquoted shell syntax can remain literal and therefore change values silently. Assignment tokenization should reject every unimplemented form before broader expansion is added. |
 | Backquoted commands in assignments and in mailbox names | Supported. Each command receives the complete current message and its stdout participates in bounded path construction. | Destination output must be UTF-8 and obeys both active `LINEBUF` and the fixed path ceiling. It is resolved only after every fragment succeeds. |
 | `| command`, `NAME=| command`, and a sole `|` that writes the selected input to stdout | All three explicit recipe forms are supported. | A sole `|` writes the area selected by `h`/`b` directly, applies `r` and `i`, and does not start a shell. `DEFAULT=|` remains outside project scope because implicit fallback delivery is absent. |
 | A pipe without `w` or `W` may continue without waiting after its input has been accepted. | procmail-rs supervises and reaps every shell even when its normal exit status is ignored. | Side-effect timing and lock lifetime differ. Preserving process supervision is safer; compatibility may require a documented asynchronous mode rather than weakening the default silently. |
@@ -147,10 +147,13 @@ resolved only when evaluation reaches it and conservatively requires the
 complete message because it may become a body regex, size test, or program
 condition.
 
-Backquoted commands, unsupported special parameters, and continued physical
-condition lines remain explicitly rejected. Ordinary substitution requires
-UTF-8 runtime data; `$\NAME` can safely quote arbitrary bytes into an ASCII
-byte-regex fragment.
+Backquoted commands receive the complete current message on stdin when the
+condition is reached. Their bounded stdout has all trailing newlines removed,
+uses the active `TIMEOUT` and `LOGFILE`, and then participates in the same
+reparse pass as literal and variable parts. Unsupported special parameters and
+continued physical condition lines remain explicitly rejected. Ordinary
+substitution requires UTF-8 runtime data; `$\NAME` can safely quote arbitrary
+bytes into an ASCII byte-regex fragment.
 
 ## Command output assignments
 

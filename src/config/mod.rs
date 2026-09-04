@@ -248,7 +248,7 @@ fn statements_have_external_commands(statements: &[Statement]) -> bool {
                 RecipeAction::Pipe(action) => !action.command.is_empty(),
                 RecipeAction::Capture(_) => true,
                 RecipeAction::Block(children) => statements_have_external_commands(children),
-                RecipeAction::Deliver(destination) => destination.command_parts().is_some(),
+                RecipeAction::Deliver(destination) => destination.command_expression().is_some(),
                 RecipeAction::Headers(_) => false,
             }
         }
@@ -273,20 +273,15 @@ pub struct CommandAssignment {
     pub name: String,
     pub source: String,
     pub target: AssignmentTarget,
-    pub parts: Vec<CommandAssignmentPart>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandAssignmentPart {
-    Literal(String),
-    Command(String),
+    pub(crate) double_quoted: bool,
+    pub(crate) expression: ShellExpression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RcFileExpression {
     pub line: usize,
     pub value: String,
-    pub(crate) expansion: Option<ExpansionExpression>,
+    pub(crate) expansion: Option<ShellExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,7 +290,8 @@ pub struct Assignment {
     pub name: String,
     pub value: String,
     pub target: AssignmentTarget,
-    pub(crate) expansion: Option<ExpansionExpression>,
+    pub(crate) double_quoted: bool,
+    pub(crate) expansion: Option<ShellExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,7 +426,7 @@ pub enum HeaderOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderValue {
     pub source: String,
-    pub(crate) expansion: Option<ExpansionExpression>,
+    pub(crate) expansion: Option<ShellExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,22 +461,35 @@ pub enum ConditionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellExpandedCondition {
     pub(crate) source: String,
-    pub(crate) expansion: Option<ShellConditionExpression>,
+    pub(crate) expansion: Option<ShellExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ShellConditionExpression {
-    pub(crate) parts: Vec<ShellConditionPart>,
+pub(crate) struct ShellExpression {
+    pub(crate) parts: Vec<ShellPart>,
+}
+
+impl ShellExpression {
+    pub(crate) fn has_commands(&self) -> bool {
+        self.parts.iter().any(|part| match part {
+            ShellPart::Command(_) => true,
+            ShellPart::Variable { default, .. } => {
+                default.as_ref().is_some_and(ShellExpression::has_commands)
+            }
+            ShellPart::Literal(_) | ShellPart::RegexQuotedVariable(_) => false,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ShellConditionPart {
+pub(crate) enum ShellPart {
     Literal(String),
     Variable {
         name: String,
-        regex_escape: bool,
-        default: Option<ShellConditionExpression>,
+        default: Option<ShellExpression>,
     },
+    RegexQuotedVariable(String),
+    Command(String),
 }
 
 #[derive(Debug, Clone)]
@@ -533,22 +542,7 @@ pub struct PathExpression {
     pub(crate) runtime_dependent: bool,
     pub(crate) runtime_base: bool,
     pub(crate) typed_destination: bool,
-    pub(crate) command_parts: Option<Vec<CommandAssignmentPart>>,
-    pub(crate) expansion: Option<ExpansionExpression>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExpansionExpression {
-    pub(crate) parts: Vec<ExpansionPart>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExpansionPart {
-    Literal(String),
-    Variable {
-        name: String,
-        default: Option<ExpansionExpression>,
-    },
+    pub(crate) expansion: Option<ShellExpression>,
 }
 
 impl PartialEq for PathExpression {
@@ -568,7 +562,6 @@ impl From<&str> for PathExpression {
             runtime_dependent: false,
             runtime_base: false,
             typed_destination: false,
-            command_parts: None,
             expansion: None,
         }
     }
@@ -583,7 +576,6 @@ impl From<String> for PathExpression {
             runtime_dependent: false,
             runtime_base: false,
             typed_destination: false,
-            command_parts: None,
             expansion: None,
         }
     }

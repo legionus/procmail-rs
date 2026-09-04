@@ -5,13 +5,13 @@ use regex::bytes::RegexBuilder;
 
 use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaptureAction, CaseMode,
-    ChildStatusMode, CommandAssignment, CommandAssignmentPart, Condition, ConditionInput,
-    ConditionKind, Config, ContinuationMode, ControlFlow, Destination, HeaderAction,
-    HeaderOperation, HeaderValue, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN,
-    MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE,
-    MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError,
-    PathExpression, PipeAction, RcFileExpression, RcLimits, RcParseCounts, RcParseState, Recipe,
-    RecipeAction, RecipeOptions, RegexCondition, Statement, VariablePolicy, VariableSource,
+    ChildStatusMode, CommandAssignment, Condition, ConditionInput, ConditionKind, Config,
+    ContinuationMode, ControlFlow, Destination, HeaderAction, HeaderOperation, HeaderValue,
+    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION,
+    MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_CAPTURES,
+    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression,
+    PipeAction, RcFileExpression, RcLimits, RcParseCounts, RcParseState, Recipe, RecipeAction,
+    RecipeOptions, RegexCondition, ShellExpression, Statement, VariablePolicy, VariableSource,
     WriteErrorMode, variable_policy,
 };
 
@@ -157,8 +157,12 @@ fn parse_statements(
                     ),
                 ));
             }
-            let statement = match parse_command_substitutions(&assignment.value, assignment.line)? {
-                Some(parts) => {
+            let statement = match parse_command_substitutions(
+                &assignment.value,
+                assignment.line,
+                assignment.double_quoted,
+            )? {
+                Some(expression) => {
                     if matches!(
                         assignment.target,
                         AssignmentTarget::RcLimit(_) | AssignmentTarget::LineBuf
@@ -176,7 +180,8 @@ fn parse_statements(
                         name: assignment.name,
                         source: assignment.value,
                         target: assignment.target,
-                        parts,
+                        double_quoted: assignment.double_quoted,
+                        expression,
                     })
                 }
                 None => match assignment.name.as_str() {
@@ -315,7 +320,7 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
     {
         return Ok(None);
     }
-    let value = parse_assignment_value(value.trim(), line_number)?;
+    let (value, double_quoted) = parse_assignment_value(value.trim(), line_number)?;
     if value.len() > MAX_ASSIGNMENT_VALUE_LEN {
         return Err(ParseError::new(
             line_number,
@@ -358,6 +363,7 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
         name: name.to_owned(),
         value,
         target,
+        double_quoted,
         expansion: None,
     }))
 }
@@ -658,16 +664,15 @@ fn destination_path_expression(
     line: usize,
     typed_destination: bool,
 ) -> Result<PathExpression, ParseError> {
-    let command_parts = parse_command_substitutions(&source, line)?;
+    let expansion = parse_command_substitutions(&source, line, false)?;
     Ok(PathExpression {
         source,
         base: None,
         line,
-        runtime_dependent: command_parts.is_some(),
+        runtime_dependent: expansion.is_some(),
         runtime_base: false,
         typed_destination,
-        command_parts,
-        expansion: None,
+        expansion,
     })
 }
 
@@ -708,57 +713,16 @@ fn parse_capture_action_prefix(
 fn parse_command_substitutions(
     value: &str,
     line: usize,
-) -> Result<Option<Vec<CommandAssignmentPart>>, ParseError> {
-    let mut parts = Vec::new();
-    let mut opening = None;
-    let mut literal_start = 0usize;
-    let mut escaped = false;
-
-    // Locate substitutions without interpreting their shell language. The rc
-    // parser only establishes bounded, paired regions; the configured shell
-    // remains responsible for the trusted command text during evaluation.
-    for (index, character) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if character == '\\' {
-            escaped = true;
-            continue;
-        }
-        if character != '`' {
-            continue;
-        }
-        if let Some(start) = opening.take() {
-            let opening_index = start - 1;
-            if literal_start < opening_index {
-                parts.push(CommandAssignmentPart::Literal(
-                    value[literal_start..opening_index].to_owned(),
-                ));
-            }
-            parts.push(CommandAssignmentPart::Command(
-                value[start..index].to_owned(),
-            ));
-            literal_start = index + character.len_utf8();
+    double_quoted: bool,
+) -> Result<Option<ShellExpression>, ParseError> {
+    super::expand::parse_command_expression(value, line, double_quoted).map_err(|error| {
+        let message = if error.message == "unterminated backquoted command in expression" {
+            "unterminated backquoted command in assignment value".to_owned()
         } else {
-            opening = Some(index + character.len_utf8());
-        }
-    }
-    if opening.is_some() {
-        return Err(ParseError::new(
-            line,
-            "unterminated backquoted command in assignment value",
-        ));
-    }
-    if parts.is_empty() {
-        return Ok(None);
-    }
-    if literal_start < value.len() {
-        parts.push(CommandAssignmentPart::Literal(
-            value[literal_start..].to_owned(),
-        ));
-    }
-    Ok(Some(parts))
+            error.message
+        };
+        ParseError::new(error.line, message)
+    })
 }
 
 fn parse_header_action(
@@ -1161,12 +1125,6 @@ fn parse_condition(
     }
 
     let (kind, is_regex) = if let Some(source) = input.strip_prefix('$') {
-        if source.contains('`') {
-            return Err(ParseError::new(
-                line,
-                "backquoted commands in shell-expanded conditions are not supported",
-            ));
-        }
         (
             ConditionKind::ShellExpanded(super::ShellExpandedCondition {
                 source: source.to_owned(),
@@ -1549,14 +1507,15 @@ fn strip_comment(value: &str) -> &str {
     value.split_once('#').map_or(value, |(value, _)| value)
 }
 
-fn parse_assignment_value(value: &str, line: usize) -> Result<String, ParseError> {
+fn parse_assignment_value(value: &str, line: usize) -> Result<(String, bool), ParseError> {
     if !value.starts_with('"') {
-        return Ok(strip_assignment_comment(value).trim().to_owned());
+        return Ok((strip_assignment_comment(value).trim().to_owned(), false));
     }
 
     // An outer double-quoted value is a single rc value, so a '#' within it
-    // is data rather than a comment. Quote escapes and trailing shell syntax
-    // stay rejected until their exact procmail behavior is implemented.
+    // is data rather than a comment. Preserve the quote mode separately after
+    // removing the delimiters because backslash handling differs inside the
+    // quotes and cannot be reconstructed from the remaining text alone.
     let quoted = &value[1..];
     let Some(closing) = find_outer_assignment_quote(quoted) else {
         return Err(ParseError::new(
@@ -1572,7 +1531,7 @@ fn parse_assignment_value(value: &str, line: usize) -> Result<String, ParseError
             "syntax after a double-quoted assignment value is not supported",
         ));
     }
-    Ok(inner.to_owned())
+    Ok((inner.to_owned(), true))
 }
 
 fn strip_assignment_comment(value: &str) -> &str {

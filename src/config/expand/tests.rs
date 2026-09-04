@@ -86,6 +86,33 @@ fn shell_condition_expansion_obeys_linebuf_at_the_boundary() {
 }
 
 #[test]
+fn shell_condition_escaping_matches_double_quoted_procmail_rules() {
+    let mut runtime = crate::runtime::RuntimeVariables::default();
+    runtime.set("X", "value");
+
+    for (source, expected) in [
+        (r"${X}", "value"),
+        (r"\${X}", "${X}"),
+        (r"\\${X}", r"\value"),
+        (r"\\\${X}", r"\${X}"),
+        (r"\\\\${X}", r"\\value"),
+        (r"\q", r"\q"),
+        (r"\.", r"\."),
+        (r"\`", "`"),
+    ] {
+        let condition = ShellExpandedCondition {
+            source: source.to_owned(),
+            expansion: None,
+        };
+        assert_eq!(
+            expand_shell_condition(&condition, 7, &runtime).unwrap(),
+            expected,
+            "source {source:?}",
+        );
+    }
+}
+
+#[test]
 fn shell_condition_regex_quoting_accepts_binary_without_reinterpreting_it() {
     let mut runtime = crate::runtime::RuntimeVariables::default();
     runtime.set_bytes("VALUE", b"a.\xff".to_vec());
@@ -689,6 +716,60 @@ fn follows_shell_like_name_boundaries() {
     };
     assert_eq!(a.value, "archive");
     assert_eq!(b.value, "mailsuffix");
+}
+
+#[test]
+fn assignment_escaping_matches_procmail_backslash_parity() {
+    let source = r#"X=value
+U0=${X}
+U1=\${X}
+U2=\\${X}
+U3=\\\${X}
+U4=\\\\${X}
+Q0="${X}"
+Q1="\${X}"
+Q2="\\${X}"
+Q3="\\\${X}"
+Q4="\\\\${X}"
+E0=\q
+E1=\.
+E2="\q"
+E3="\."
+T0=\`printf\`
+T1="\`printf\`"
+"#;
+    let config = parse(source).unwrap().expand().unwrap();
+    let values = config
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Assignment(assignment) => {
+                Some((assignment.name.as_str(), assignment.value.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for (name, expected) in [
+        ("U0", "value"),
+        ("U1", "${X}"),
+        ("U2", "\\value"),
+        ("U3", "\\${X}"),
+        ("U4", "\\\\value"),
+        ("Q0", "value"),
+        ("Q1", "${X}"),
+        ("Q2", "\\value"),
+        ("Q3", "\\${X}"),
+        ("Q4", "\\\\value"),
+        ("E0", "q"),
+        ("E1", "."),
+        ("E2", "\\q"),
+        ("E3", "\\."),
+        ("T0", "`printf`"),
+        ("T1", "`printf`"),
+    ] {
+        assert_eq!(values.get(name), Some(&expected), "assignment {name}");
+    }
 }
 
 #[test]

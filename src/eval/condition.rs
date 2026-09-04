@@ -148,6 +148,20 @@ impl CompiledCondition {
         &self,
         runtime: &RuntimeVariables,
     ) -> Result<Option<Self>, EvalError> {
+        self.resolve_shell_expansion_with(
+            |condition, line| {
+                crate::config::expand::expand_shell_condition(condition, line, runtime)
+                    .map_err(EvalError::Expansion)
+            },
+            |error| error,
+        )
+    }
+
+    pub(super) fn resolve_shell_expansion_with<X>(
+        &self,
+        mut expand: impl FnMut(&crate::config::ShellExpandedCondition, usize) -> Result<String, X>,
+        mut map_error: impl FnMut(EvalError) -> X,
+    ) -> Result<Option<Self>, X> {
         let CompiledConditionKind::ShellExpanded {
             condition,
             area,
@@ -163,17 +177,17 @@ impl CompiledCondition {
         // variable supplies a complete condition. Bound those repeated passes
         // so hostile runtime values cannot create unbounded reparsing work.
         for _ in 0..=crate::config::MAX_EXPANSION_DEPTH {
-            let expanded =
-                crate::config::expand::expand_shell_condition(&condition, self.line, runtime)
-                    .map_err(EvalError::Expansion)?;
+            let expanded = expand(&condition, self.line)?;
             let parsed = crate::config::parse_reparsed_condition(
                 expanded.trim_start(),
                 self.line,
                 *case_sensitive,
             )
-            .map_err(|error| EvalError::RuntimeCondition {
-                line: error.line,
-                message: error.message,
+            .map_err(|error| {
+                map_error(EvalError::RuntimeCondition {
+                    line: error.line,
+                    message: error.message,
+                })
             })?;
             negated ^= parsed.negated;
             if let ConditionKind::ShellExpanded(next) = parsed.kind {
@@ -184,13 +198,13 @@ impl CompiledCondition {
             compiled.negated = negated;
             return Ok(Some(compiled));
         }
-        Err(EvalError::RuntimeCondition {
+        Err(map_error(EvalError::RuntimeCondition {
             line: self.line,
             message: format!(
                 "condition expansion exceeds the hard depth limit of {}",
                 crate::config::MAX_EXPANSION_DEPTH
             ),
-        })
+        }))
     }
 
     pub(super) fn program(&self) -> Option<(&str, ConditionInput)> {

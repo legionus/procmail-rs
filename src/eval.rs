@@ -304,6 +304,7 @@ impl ExecutionPlan {
                         name: name.clone(),
                         value: value.clone(),
                         target: AssignmentTarget::User,
+                        double_quoted: false,
                         expansion: None,
                     },
                     line: None,

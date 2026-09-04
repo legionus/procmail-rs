@@ -385,7 +385,7 @@ impl CompiledNode {
                 },
             },
             CompiledAction::Deliver { destination, .. }
-                if destination.command_parts().is_some() =>
+                if destination.command_expression().is_some() =>
             {
                 InputRequirements {
                     needs_headers: true,
@@ -457,7 +457,7 @@ impl CompiledNode {
                     options.action_input != ActionInput::Headers
                 }
                 CompiledAction::Deliver { destination, .. } => {
-                    destination.command_parts().is_some()
+                    destination.command_expression().is_some()
                 }
                 CompiledAction::Block(sequence) => sequence.needs_message_contents(),
                 CompiledAction::Headers(_) => false,

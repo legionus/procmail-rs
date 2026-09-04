@@ -8,7 +8,7 @@ fn parse_wide(input: &str) -> Result<Config, ParseError> {
     state.limits.linebuf = super::super::MAX_LINEBUF;
     parse_with_state(input, &mut state)
 }
-use crate::config::MAX_SHELL_SETTING_LEN;
+use crate::config::{MAX_SHELL_SETTING_LEN, ShellPart};
 
 #[test]
 fn parses_assignment_and_recipe() {
@@ -22,6 +22,7 @@ fn parses_assignment_and_recipe() {
             name: "MAILDIR".into(),
             value: "/srv/mail".into(),
             target: crate::config::AssignmentTarget::Maildir,
+            double_quoted: false,
             expansion: None,
         })
     );
@@ -495,12 +496,14 @@ fn parses_shell_expanded_condition_for_later_bounded_reparsing() {
     assert!(recipe.conditions[0].negated);
     assert_eq!(condition.source, "^To:.*<$\\LOGNAME>");
 
-    let error = parse(":0\n* $^Subject: `printf value`\nmailbox\n").unwrap_err();
-    assert_eq!(error.line, 2);
-    assert_eq!(
-        error.message,
-        "backquoted commands in shell-expanded conditions are not supported"
-    );
+    let config = parse(":0\n* $`printf '^Subject: value$'`\nmailbox\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    assert!(matches!(
+        recipe.conditions[0].kind,
+        ConditionKind::ShellExpanded(_)
+    ));
 }
 
 #[test]
@@ -527,14 +530,18 @@ fn parses_destination_command_substitution_and_stdout_delivery() {
         panic!("expected delivery action");
     };
     assert_eq!(
-        destination.command_parts(),
-        Some(
-            &[
-                CommandAssignmentPart::Literal("archive/".into()),
-                CommandAssignmentPart::Command("date +%Y".into()),
-                CommandAssignmentPart::Literal("-$BOX".into()),
-            ][..]
-        )
+        destination.command_expression(),
+        Some(&ShellExpression {
+            parts: vec![
+                ShellPart::Literal("archive/".into()),
+                ShellPart::Command("date +%Y".into()),
+                ShellPart::Literal("-".into()),
+                ShellPart::Variable {
+                    name: "BOX".into(),
+                    default: None,
+                },
+            ],
+        })
     );
 
     let Statement::Recipe(stdout) = &config.statements[1] else {
@@ -707,13 +714,13 @@ fn separates_backquoted_assignments_from_literal_assignments() {
     assert_eq!(assignment.name, "COMPUTED");
     assert_eq!(assignment.source, "pre`printf '#one'`mid`printf two`post");
     assert_eq!(
-        assignment.parts,
+        assignment.expression.parts,
         [
-            CommandAssignmentPart::Literal("pre".into()),
-            CommandAssignmentPart::Command("printf '#one'".into()),
-            CommandAssignmentPart::Literal("mid".into()),
-            CommandAssignmentPart::Command("printf two".into()),
-            CommandAssignmentPart::Literal("post".into()),
+            ShellPart::Literal("pre".into()),
+            ShellPart::Command("printf '#one'".into()),
+            ShellPart::Literal("mid".into()),
+            ShellPart::Command("printf two".into()),
+            ShellPart::Literal("post".into()),
         ]
     );
     assert!(matches!(config.statements[2], Statement::Assignment(_)));
@@ -728,13 +735,30 @@ fn backquoted_assignment_quotes_do_not_hide_command_quotes() {
 
     assert_eq!(assignment.source, "before `printf \"inside\"` after");
     assert_eq!(
-        assignment.parts,
+        assignment.expression.parts,
         [
-            CommandAssignmentPart::Literal("before ".into()),
-            CommandAssignmentPart::Command("printf \"inside\"".into()),
-            CommandAssignmentPart::Literal(" after".into()),
+            ShellPart::Literal("before ".into()),
+            ShellPart::Command("printf \"inside\"".into()),
+            ShellPart::Literal(" after".into()),
         ]
     );
+}
+
+#[test]
+fn parses_command_substitution_inside_a_default_branch() {
+    let config = parse("VALUE=${MISSING:-pre`printf value`post}\n").unwrap();
+    let Statement::CommandAssignment(assignment) = &config.statements[0] else {
+        panic!("expected command assignment");
+    };
+    let ShellPart::Variable {
+        name,
+        default: Some(default),
+    } = &assignment.expression.parts[0]
+    else {
+        panic!("expected variable with a default expression");
+    };
+    assert_eq!(name, "MISSING");
+    assert!(default.has_commands());
 }
 
 #[test]
