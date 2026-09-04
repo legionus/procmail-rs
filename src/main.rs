@@ -14,7 +14,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use procmail_rs::config::{self, Destination, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
+use procmail_rs::config::{
+    self, Destination, MAX_COMMAND_LINE_VARIABLES, OutputEnding, RecipeOptions, SuppliedVariable,
+};
 use procmail_rs::delivery::discard::DiscardSink;
 use procmail_rs::delivery::local_lock::{LocalLock, LockMethod, lock_timeout_from_config};
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
@@ -23,8 +25,9 @@ use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::eval::{
     ActionKindExplanation, CompletionState, ConditionKindExplanation, DeliveryAttemptError,
-    DeliveryPlan, ExecutionPlan, FinalMessage, HeaderEvaluation, MappedMessageInput,
-    MatchingMessage, OrderedExecutionError, PlanExplanation, PlannedDelivery, RecipeLockGuard,
+    DeliveryPlan, ExecutionPlan, ExecutionServices, ExternalActionInput, FinalMessage,
+    HeaderEvaluation, MappedMessageInput, MatchingMessage, OrderedExecutionError, PlanExplanation,
+    PlannedDelivery, RecipeLockGuard,
 };
 use procmail_rs::external_process::process_timeout_from_config;
 use procmail_rs::hostname::current_hostname;
@@ -472,14 +475,14 @@ fn deliver_decided(
     delivery_outcome(plan)
 }
 
-fn deliver_staged(
+fn deliver_staged<T: TraceSink>(
     mut head: procmail_rs::message::MessageHead,
     reader: &mut impl io::BufRead,
     execution: &ExecutionPlan,
     continuation: procmail_rs::eval::Continuation,
     staging_options: StagingOptions<'_>,
     runtime: &mut RuntimeVariables,
-    trace: &mut impl TraceSink,
+    trace: &mut T,
 ) -> Result<(), OperationalError> {
     let early_count = continuation.pending_deliveries().len();
     let early_sinks = if execution.requires_ordered_delivery() {
@@ -525,98 +528,119 @@ fn deliver_staged(
     if execution.requires_ordered_delivery() {
         let mut global_lock = None;
         let command_runner = CommandRunner::new(staging_options.limits);
+        let mut delivery = |destination: &Destination,
+                            message: &[u8],
+                            output_ending: OutputEnding,
+                            lock: Option<&str>,
+                            runtime: &mut RuntimeVariables,
+                            trace: &mut T| {
+            let _local_lock =
+                acquire_recipe_lock(lock, Some(destination), runtime, staging_options.uid)
+                    .map_err(DeliveryAttemptError::Recoverable)?;
+            let result = if matches!(
+                destination,
+                Destination::Mbox(_) | Destination::File(_) | Destination::Discard(_)
+            ) {
+                deliver_file_destination(
+                    destination,
+                    message,
+                    output_ending,
+                    staging_options.durability,
+                    runtime,
+                    trace,
+                )
+            } else {
+                deliver_one_maildir(
+                    destination,
+                    message,
+                    staging_options.durability,
+                    runtime,
+                    trace,
+                )
+            };
+            result.map_err(|error| {
+                if error.can_handle {
+                    DeliveryAttemptError::Recoverable(error.error)
+                } else {
+                    DeliveryAttemptError::Fatal(error.error)
+                }
+            })
+        };
+        let mut condition =
+            |command: &str, input: &[u8], runtime: &mut RuntimeVariables, _: &mut T| {
+                command_runner.condition(command, input, runtime)
+            };
+        let mut action = |action: &procmail_rs::config::PipeAction,
+                          recipe_options: RecipeOptions,
+                          lock: Option<&str>,
+                          input: ExternalActionInput<'_>,
+                          runtime: &mut RuntimeVariables,
+                          _: &mut T| {
+            let _local_lock = acquire_recipe_lock(lock, None, runtime, staging_options.uid)
+                .map_err(DeliveryAttemptError::Recoverable)?;
+            command_runner.action(action.command.as_str(), recipe_options, input, runtime)
+        };
+        let mut capture = |command: &str,
+                           input: &[u8],
+                           output_ending: OutputEnding,
+                           recipe_options: Option<RecipeOptions>,
+                           limit: usize,
+                           runtime: &mut RuntimeVariables,
+                           _: &mut T| {
+            command_runner.capture(
+                command,
+                input,
+                output_ending,
+                recipe_options,
+                limit,
+                runtime,
+            )
+        };
+        let mut global_lock_service = |path: &str, runtime: &mut RuntimeVariables| {
+            // Replacing LOCKFILE first releases the preceding global lock. If
+            // replacement fails, clear its visible value so later statements
+            // cannot mistake an unheld path for an active semaphore.
+            global_lock = None;
+            if path.is_empty() {
+                return Ok(());
+            }
+            match acquire_configured_lock(path, runtime, staging_options.uid) {
+                Ok(lock) => {
+                    global_lock = Some(lock);
+                    Ok(())
+                }
+                Err(error) => {
+                    runtime.set("LOCKFILE".to_owned(), String::new());
+                    Err(error)
+                }
+            }
+        };
+        let mut local_lock_service = |path: &str, runtime: &mut RuntimeVariables| {
+            acquire_configured_lock(path, runtime, staging_options.uid)
+                .map(|lock| Box::new(lock) as Box<dyn RecipeLockGuard>)
+                .map_err(DeliveryAttemptError::Recoverable)
+        };
+        let mut completion =
+            |message: FinalMessage<'_>,
+             runtime: &mut RuntimeVariables,
+             _: &mut T,
+             state: CompletionState<'_, OperationalError>| {
+                command_runner.trap(message.as_bytes(), runtime, completion_exit_status(state));
+            };
+        let services = ExecutionServices::new(&mut delivery, trace)
+            .with_external_condition(&mut condition)
+            .with_external_action(&mut action)
+            .with_capture(&mut capture)
+            .with_global_lock(&mut global_lock_service)
+            .with_local_lock(&mut local_lock_service)
+            .with_completion(&mut completion)
+            .require_complete()
+            .map_err(|error| OperationalError::Internal(error.to_string()))?;
         let outcome = execution
-            .execute_mapped_ordered_with_processes_and_completion_trace(
+            .execute_mapped_ordered_with_services(
                 MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                 runtime,
-                trace,
-                &mut |destination, message, output_ending, lock, runtime, trace| {
-                    let _local_lock =
-                        acquire_recipe_lock(lock, Some(destination), runtime, staging_options.uid)
-                            .map_err(DeliveryAttemptError::Recoverable)?;
-                    let result = if matches!(
-                        destination,
-                        Destination::Mbox(_) | Destination::File(_) | Destination::Discard(_)
-                    ) {
-                        deliver_file_destination(
-                            destination,
-                            message,
-                            output_ending,
-                            staging_options.durability,
-                            runtime,
-                            trace,
-                        )
-                    } else {
-                        deliver_one_maildir(
-                            destination,
-                            message,
-                            staging_options.durability,
-                            runtime,
-                            trace,
-                        )
-                    };
-                    result.map_err(|error| {
-                        if error.can_handle {
-                            DeliveryAttemptError::Recoverable(error.error)
-                        } else {
-                            DeliveryAttemptError::Fatal(error.error)
-                        }
-                    })
-                },
-                (
-                    &mut |command, input, runtime, _| {
-                        command_runner.condition(command, input, runtime)
-                    },
-                    &mut |action, recipe_options, lock, input, runtime, _| {
-                        let _local_lock =
-                            acquire_recipe_lock(lock, None, runtime, staging_options.uid)
-                                .map_err(DeliveryAttemptError::Recoverable)?;
-                        command_runner.action(
-                            action.command.as_str(),
-                            recipe_options,
-                            input,
-                            runtime,
-                        )
-                    },
-                    &mut |command, input, output_ending, recipe_options, limit, runtime, _| {
-                        command_runner.capture(
-                            command,
-                            input,
-                            output_ending,
-                            recipe_options,
-                            limit,
-                            runtime,
-                        )
-                    },
-                    &mut |path, runtime| {
-                        // Replacing LOCKFILE first releases the preceding
-                        // global lock. If replacement fails, clear the visible
-                        // value so later statements cannot mistake an unheld
-                        // path for an active semaphore.
-                        global_lock = None;
-                        if path.is_empty() {
-                            return Ok(());
-                        }
-                        match acquire_configured_lock(path, runtime, staging_options.uid) {
-                            Ok(lock) => {
-                                global_lock = Some(lock);
-                                Ok(())
-                            }
-                            Err(error) => {
-                                runtime.set("LOCKFILE".to_owned(), String::new());
-                                Err(error)
-                            }
-                        }
-                    },
-                    &mut |path, runtime| {
-                        acquire_configured_lock(path, runtime, staging_options.uid)
-                            .map(|lock| Box::new(lock) as Box<dyn RecipeLockGuard>)
-                            .map_err(DeliveryAttemptError::Recoverable)
-                    },
-                ),
-                &mut |message: FinalMessage<'_>, runtime, _, state| {
-                    command_runner.trap(message.as_bytes(), runtime, completion_exit_status(state));
-                },
+                services,
             )
             .map_err(|error| match error {
                 OrderedExecutionError::Evaluation(error) => OperationalError::PermanentDestination(

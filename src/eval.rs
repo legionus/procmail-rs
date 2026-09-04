@@ -21,6 +21,7 @@ mod message;
 mod ordered;
 mod result;
 mod runtime_rc;
+mod services;
 mod simple;
 mod tree;
 
@@ -39,7 +40,6 @@ pub use explanation::{
 use header::FanoutPlanState;
 use message::{CompleteMessage, OwnedCompleteMessage, current_ordered_message};
 pub use message::{ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage};
-pub use ordered::RecipeLockGuard;
 pub use result::{
     CompletionState, Continuation, DeliveryAttemptError, DeliveryOutcome, DeliveryPlan, EvalError,
     HeaderEvaluation, OrderedExecutionError, Outcome, PlannedDelivery,
@@ -47,6 +47,7 @@ pub use result::{
 use result::{ContinuationFrame, DeliveryContinuation};
 pub use runtime_rc::MAX_RUNTIME_RC_WARNINGS;
 use runtime_rc::{LoadedRuntimeRc, RcExecutionContext, RuntimeRcState};
+pub use services::{ExecutionServices, ExecutionServicesError, RecipeLockGuard};
 pub use simple::evaluate;
 use tree::{
     ActionExecution, CompiledAction, CompiledAssignment, CompiledNode, CompiledSequence,

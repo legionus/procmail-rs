@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
+use super::services::{
+    CommandCaptureExecutor, DeliveryExecutor, ExternalActionExecutor, ExternalConditionExecutor,
+    GlobalLockExecutor, LocalLockExecutor,
+};
 use super::*;
 
-struct OrderedTreeExecution<'a, E, D, T> {
+struct OrderedTreeExecution<'a, E, T> {
     message: CompleteMessage<'a>,
     replacement: Option<OwnedCompleteMessage>,
     runtime: &'a mut RuntimeVariables,
     trace: &'a mut T,
-    deliver: &'a mut D,
+    deliver: &'a mut DeliveryExecutor<'a, E, T>,
     published: usize,
     original_delivered: bool,
     pending_error: Option<E>,
@@ -21,51 +25,7 @@ struct OrderedTreeExecution<'a, E, D, T> {
     limits: MessageLimits,
 }
 
-pub trait RecipeLockGuard {}
-
-impl<T> RecipeLockGuard for T {}
-
-type ExternalActionExecutor<'a, E, T> = dyn FnMut(
-        &PipeAction,
-        RecipeOptions,
-        Option<&str>,
-        ExternalActionInput<'_>,
-        &mut RuntimeVariables,
-        &mut T,
-    ) -> Result<Option<Message>, DeliveryAttemptError<E>>
-    + 'a;
-
-type ExternalConditionExecutor<'a, E, T> = dyn FnMut(&str, &[u8], &mut RuntimeVariables, &mut T) -> Result<bool, DeliveryAttemptError<E>>
-    + 'a;
-
-type CommandCaptureExecutor<'a, E, T> = dyn FnMut(
-        &str,
-        &[u8],
-        OutputEnding,
-        Option<RecipeOptions>,
-        usize,
-        &mut RuntimeVariables,
-        &mut T,
-    ) -> Result<CapturedCommand, DeliveryAttemptError<E>>
-    + 'a;
-
-type GlobalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + 'a;
-
-type LocalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<E>>
-    + 'a;
-
-type CompletionExecutor<'a, E, T> =
-    dyn FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>) + 'a;
-
-struct OptionalOrderedExecutors<'a, E, T> {
-    external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
-    capture: Option<&'a mut CommandCaptureExecutor<'a, E, T>>,
-    external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
-    global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
-    local_lock: Option<&'a mut LocalLockExecutor<'a, E>>,
-}
-
-impl<E, D, T> OrderedTreeExecution<'_, E, D, T> {
+impl<E, T> OrderedTreeExecution<'_, E, T> {
     fn replace_message(&mut self, message: Message) {
         let matching_full = message.matching_message();
         self.replacement = Some(OwnedCompleteMessage {
@@ -76,19 +36,11 @@ impl<E, D, T> OrderedTreeExecution<'_, E, D, T> {
 }
 
 impl CompiledSequence {
-    fn execute_ordered<E, D, T>(
+    fn execute_ordered<E, T>(
         &self,
-        context: &mut OrderedTreeExecution<'_, E, D, T>,
+        context: &mut OrderedTreeExecution<'_, E, T>,
     ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
     where
-        D: FnMut(
-            &Destination,
-            &[u8],
-            OutputEnding,
-            Option<&str>,
-            &mut RuntimeVariables,
-            &mut T,
-        ) -> Result<(), DeliveryAttemptError<E>>,
         T: TraceSink,
     {
         let mut state = SequenceState::default();
@@ -139,19 +91,11 @@ impl CompiledSequence {
 }
 
 impl CompiledNode {
-    fn matches_ordered<E, D, T>(
+    fn matches_ordered<E, T>(
         &self,
-        context: &mut OrderedTreeExecution<'_, E, D, T>,
+        context: &mut OrderedTreeExecution<'_, E, T>,
     ) -> Result<bool, OrderedExecutionError<E>>
     where
-        D: FnMut(
-            &Destination,
-            &[u8],
-            OutputEnding,
-            Option<&str>,
-            &mut RuntimeVariables,
-            &mut T,
-        ) -> Result<(), DeliveryAttemptError<E>>,
         T: TraceSink,
     {
         for (index, condition) in self.conditions.iter().enumerate() {
@@ -240,19 +184,11 @@ impl CompiledNode {
         Ok(true)
     }
 
-    fn execute_ordered_action<E, D, T>(
+    fn execute_ordered_action<E, T>(
         &self,
-        context: &mut OrderedTreeExecution<'_, E, D, T>,
+        context: &mut OrderedTreeExecution<'_, E, T>,
     ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
     where
-        D: FnMut(
-            &Destination,
-            &[u8],
-            OutputEnding,
-            Option<&str>,
-            &mut RuntimeVariables,
-            &mut T,
-        ) -> Result<(), DeliveryAttemptError<E>>,
         T: TraceSink,
     {
         match &self.action {
@@ -537,19 +473,11 @@ impl CompiledNode {
     }
 }
 
-fn execute_statements_ordered<E, D, T>(
+fn execute_statements_ordered<E, T>(
     statements: &[CompiledStatement],
-    context: &mut OrderedTreeExecution<'_, E, D, T>,
+    context: &mut OrderedTreeExecution<'_, E, T>,
 ) -> Result<SequenceControl, OrderedExecutionError<E>>
 where
-    D: FnMut(
-        &Destination,
-        &[u8],
-        OutputEnding,
-        Option<&str>,
-        &mut RuntimeVariables,
-        &mut T,
-    ) -> Result<(), DeliveryAttemptError<E>>,
     T: TraceSink,
 {
     for statement in statements {
@@ -634,19 +562,11 @@ where
     Ok(SequenceControl::Continue)
 }
 
-fn execute_command_assignment<E, D, T>(
+fn execute_command_assignment<E, T>(
     assignment: &crate::config::CommandAssignment,
-    context: &mut OrderedTreeExecution<'_, E, D, T>,
+    context: &mut OrderedTreeExecution<'_, E, T>,
 ) -> Result<(), OrderedExecutionError<E>>
 where
-    D: FnMut(
-        &Destination,
-        &[u8],
-        OutputEnding,
-        Option<&str>,
-        &mut RuntimeVariables,
-        &mut T,
-    ) -> Result<(), DeliveryAttemptError<E>>,
     T: TraceSink,
 {
     let message = current_ordered_message(context.message, context.replacement.as_ref())
@@ -861,19 +781,11 @@ impl ExecutionPlan {
         ) -> Result<(), DeliveryAttemptError<E>>,
         T: TraceSink,
     {
-        self.execute_mapped_ordered_inner(
+        let services = ExecutionServices::new(deliver, trace);
+        self.execute_mapped_ordered_with_services(
             MappedMessageInput::new(raw, header_len, matching),
             runtime,
-            trace,
-            deliver,
-            OptionalOrderedExecutors {
-                external: None,
-                capture: None,
-                external_condition: None,
-                global_lock: None,
-                local_lock: None,
-            },
-            None,
+            services,
         )
     }
 
@@ -904,20 +816,8 @@ impl ExecutionPlan {
         ) -> Result<Option<Message>, DeliveryAttemptError<E>>,
         T: TraceSink,
     {
-        self.execute_mapped_ordered_inner(
-            message,
-            runtime,
-            trace,
-            deliver,
-            OptionalOrderedExecutors {
-                external: Some(external),
-                capture: None,
-                external_condition: None,
-                global_lock: None,
-                local_lock: None,
-            },
-            None,
-        )
+        let services = ExecutionServices::new(deliver, trace).with_external_action(external);
+        self.execute_mapped_ordered_with_services(message, runtime, services)
     }
 
     pub fn execute_mapped_ordered_with_capture_trace<E, D, K, T>(
@@ -948,20 +848,8 @@ impl ExecutionPlan {
         ) -> Result<CapturedCommand, DeliveryAttemptError<E>>,
         T: TraceSink,
     {
-        self.execute_mapped_ordered_inner(
-            message,
-            runtime,
-            trace,
-            deliver,
-            OptionalOrderedExecutors {
-                external: None,
-                capture: Some(capture),
-                external_condition: None,
-                global_lock: None,
-                local_lock: None,
-            },
-            None,
-        )
+        let services = ExecutionServices::new(deliver, trace).with_capture(capture);
+        self.execute_mapped_ordered_with_services(message, runtime, services)
     }
 
     pub fn execute_mapped_ordered_with_processes_trace<E, D, C, X, K, G, L, T>(
@@ -1012,20 +900,13 @@ impl ExecutionPlan {
         T: TraceSink,
     {
         let (external_condition, external, capture, global_lock, local_lock) = executors;
-        self.execute_mapped_ordered_inner(
-            message,
-            runtime,
-            trace,
-            deliver,
-            OptionalOrderedExecutors {
-                external: Some(external),
-                capture: Some(capture),
-                external_condition: Some(external_condition),
-                global_lock: Some(global_lock),
-                local_lock: Some(local_lock),
-            },
-            None,
-        )
+        let services = ExecutionServices::new(deliver, trace)
+            .with_external_condition(external_condition)
+            .with_external_action(external)
+            .with_capture(capture)
+            .with_global_lock(global_lock)
+            .with_local_lock(local_lock);
+        self.execute_mapped_ordered_with_services(message, runtime, services)
     }
 
     pub fn execute_mapped_ordered_with_processes_and_completion_trace<E, D, C, X, K, G, L, F, T>(
@@ -1078,40 +959,23 @@ impl ExecutionPlan {
         T: TraceSink,
     {
         let (external_condition, external, capture, global_lock, local_lock) = executors;
-        self.execute_mapped_ordered_inner(
-            message,
-            runtime,
-            trace,
-            deliver,
-            OptionalOrderedExecutors {
-                external: Some(external),
-                capture: Some(capture),
-                external_condition: Some(external_condition),
-                global_lock: Some(global_lock),
-                local_lock: Some(local_lock),
-            },
-            Some(completion),
-        )
+        let services = ExecutionServices::new(deliver, trace)
+            .with_external_condition(external_condition)
+            .with_external_action(external)
+            .with_capture(capture)
+            .with_global_lock(global_lock)
+            .with_local_lock(local_lock)
+            .with_completion(completion);
+        self.execute_mapped_ordered_with_services(message, runtime, services)
     }
 
-    fn execute_mapped_ordered_inner<'a, E, D, T>(
+    pub fn execute_mapped_ordered_with_services<'a, E, T>(
         &'a self,
         message: MappedMessageInput<'a>,
         runtime: &'a mut RuntimeVariables,
-        trace: &'a mut T,
-        deliver: &'a mut D,
-        executors: OptionalOrderedExecutors<'a, E, T>,
-        mut completion: Option<&mut CompletionExecutor<'_, E, T>>,
+        services: ExecutionServices<'a, E, T>,
     ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
     where
-        D: FnMut(
-            &Destination,
-            &[u8],
-            OutputEnding,
-            Option<&str>,
-            &mut RuntimeVariables,
-            &mut T,
-        ) -> Result<(), DeliveryAttemptError<E>>,
         T: TraceSink,
     {
         let message = message
@@ -1119,20 +983,30 @@ impl ExecutionPlan {
             .ok_or(OrderedExecutionError::Evaluation(
                 EvalError::BodyWasNotBuffered,
             ))?;
+        let ExecutionServices {
+            delivery,
+            trace,
+            external,
+            capture,
+            external_condition,
+            global_lock,
+            local_lock,
+            mut completion,
+        } = services;
         let mut context = OrderedTreeExecution {
             message,
             replacement: None,
             runtime,
             trace,
-            deliver,
+            deliver: delivery,
             published: 0,
             original_delivered: false,
             pending_error: None,
-            external: executors.external,
-            capture: executors.capture,
-            external_condition: executors.external_condition,
-            global_lock: executors.global_lock,
-            local_lock: executors.local_lock,
+            external,
+            capture,
+            external_condition,
+            global_lock,
+            local_lock,
             rc: self.rc_context(),
             limits: self
                 .message_limits
