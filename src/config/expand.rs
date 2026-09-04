@@ -19,6 +19,20 @@ struct ExpandedValue {
     depth: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparationPhase {
+    Eager,
+    Deferred,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparationContext<'a> {
+    known: &'a BTreeMap<String, ExpandedValue>,
+    dynamic: &'a BTreeSet<String>,
+    maildir: Option<&'a str>,
+    phase: PreparationPhase,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpansionError {
     pub line: usize,
@@ -587,11 +601,20 @@ fn expand_config(
                 dynamic.insert(assignment.name.clone());
             }
             Statement::Recipe(recipe) => {
-                if dynamic.is_empty() {
-                    expand_recipe(recipe, &variables, maildir.as_deref())?;
+                let phase = if dynamic.is_empty() {
+                    PreparationPhase::Eager
                 } else {
-                    prepare_runtime_recipe(recipe, &variables, &dynamic, maildir.as_deref())?;
-                }
+                    PreparationPhase::Deferred
+                };
+                prepare_recipe(
+                    recipe,
+                    PreparationContext {
+                        known: &variables,
+                        dynamic: &dynamic,
+                        maildir: maildir.as_deref(),
+                        phase,
+                    },
+                )?;
                 record_recipe_dynamic_names(recipe, &mut dynamic);
             }
             Statement::Include(expression) | Statement::Switch(expression) => {
@@ -706,19 +729,22 @@ fn parse_linebuf(value: &str, line: usize) -> Result<usize, ExpansionError> {
     Ok(parsed)
 }
 
-fn expand_recipe(
+fn prepare_recipe(
     recipe: &mut Recipe,
-    variables: &BTreeMap<String, ExpandedValue>,
-    maildir: Option<&str>,
+    context: PreparationContext<'_>,
 ) -> Result<(), ExpansionError> {
-    prepare_shell_conditions(recipe, variables, &BTreeSet::new())?;
+    // Run both early and deferred recipes through the same traversal so locks,
+    // conditions, headers, and nested blocks cannot gain phase-specific gaps.
+    // Only destinations branch on the phase: fully known paths are validated
+    // now, while message-produced names retain their expression for execution.
+    prepare_shell_conditions(recipe, context.known, context.dynamic)?;
     if let Some(expression) = &mut recipe.lock {
         prepare_lock_expression(
             expression,
             recipe.line,
-            variables,
-            &BTreeSet::new(),
-            maildir,
+            context.known,
+            context.dynamic,
+            context.maildir,
         )?;
         if expression.source.is_empty() && matches!(recipe.action, RecipeAction::Pipe(_)) {
             return Err(ExpansionError::new(
@@ -736,7 +762,7 @@ fn expand_recipe(
                 Destination::File(expression) => (expression, "file destination", false),
                 Destination::Discard(expression) => (expression, "discard destination", false),
             };
-            expression.base = maildir.map(str::to_owned);
+            expression.base = context.maildir.map(str::to_owned);
             expression.line = recipe.action_line;
             if let Some(command_expression) = expression
                 .expansion
@@ -746,21 +772,33 @@ fn expand_recipe(
                 validate_shell_expression(
                     command_expression,
                     recipe.action_line,
-                    variables,
-                    &BTreeSet::new(),
+                    context.known,
+                    context.dynamic,
                 )?;
                 expression.runtime_dependent = true;
+                expression.runtime_base = context.dynamic.contains("MAILDIR");
                 return Ok(());
             }
             let parsed = parse_expression(&expression.source, recipe.action_line)?;
-            validate_path_references(&parsed, recipe.action_line, variables)?;
-            let has_runtime_reference = expression_needs_runtime(&parsed, variables);
+            if context.phase == PreparationPhase::Eager {
+                validate_path_references(&parsed, recipe.action_line, context.known)?;
+            } else {
+                validate_runtime_references(
+                    &parsed,
+                    recipe.action_line,
+                    context.known,
+                    context.dynamic,
+                )?;
+            }
+            let has_runtime_reference = expression_references_any(&parsed, context.dynamic)
+                || expression_needs_runtime(&parsed, context.known);
             expression.runtime_dependent = has_runtime_reference;
+            expression.runtime_base = context.dynamic.contains("MAILDIR");
             expression.expansion = Some(parsed);
             let expression_line = expression.line;
-            if !has_runtime_reference {
+            if context.phase == PreparationPhase::Eager && !has_runtime_reference {
                 let resolved = destination
-                    .resolve_with(|name| variables.get(name).map(|value| value.text.clone()))?;
+                    .resolve_with(|name| context.known.get(name).map(|value| value.text.clone()))?;
                 validate_filesystem_path(
                     resolved.path(),
                     expression_line,
@@ -778,10 +816,20 @@ fn expand_recipe(
         RecipeAction::Pipe(_) => {}
         RecipeAction::Capture(_) => {}
         RecipeAction::Headers(action) => {
-            prepare_header_action(action, variables, &BTreeSet::new())?;
+            prepare_header_action(action, context.known, context.dynamic)?;
         }
         RecipeAction::Block(statements) => {
-            prepare_runtime_statements(statements, variables, &mut BTreeSet::new(), maildir)?;
+            let mut child_dynamic = if context.phase == PreparationPhase::Eager {
+                BTreeSet::new()
+            } else {
+                context.dynamic.clone()
+            };
+            prepare_runtime_statements(
+                statements,
+                context.known,
+                &mut child_dynamic,
+                context.maildir,
+            )?;
         }
     }
     Ok(())
@@ -884,7 +932,15 @@ fn prepare_runtime_statements(
                 dynamic.insert(assignment.name.clone());
             }
             Statement::Recipe(recipe) => {
-                prepare_runtime_recipe(recipe, known, dynamic, maildir)?;
+                prepare_recipe(
+                    recipe,
+                    PreparationContext {
+                        known,
+                        dynamic,
+                        maildir,
+                        phase: PreparationPhase::Deferred,
+                    },
+                )?;
                 record_recipe_dynamic_names(recipe, dynamic);
             }
             Statement::Include(expression) | Statement::Switch(expression) => {
@@ -892,63 +948,6 @@ fn prepare_runtime_statements(
                 validate_runtime_references(&parsed, expression.line, known, dynamic)?;
                 expression.expansion = Some(parsed);
             }
-        }
-    }
-    Ok(())
-}
-
-fn prepare_runtime_recipe(
-    recipe: &mut Recipe,
-    known: &BTreeMap<String, ExpandedValue>,
-    dynamic: &BTreeSet<String>,
-    maildir: Option<&str>,
-) -> Result<(), ExpansionError> {
-    prepare_shell_conditions(recipe, known, dynamic)?;
-    if let Some(expression) = &mut recipe.lock {
-        prepare_lock_expression(expression, recipe.line, known, dynamic, maildir)?;
-        if expression.source.is_empty() && matches!(recipe.action, RecipeAction::Pipe(_)) {
-            return Err(ExpansionError::new(
-                recipe.line,
-                "an implicit local lockfile requires a filesystem destination",
-            ));
-        }
-    }
-
-    match &mut recipe.action {
-        RecipeAction::Deliver(destination) => {
-            let expression = match destination {
-                Destination::Maildir(expression)
-                | Destination::Mbox(expression)
-                | Destination::File(expression)
-                | Destination::Discard(expression) => expression,
-            };
-            expression.base = maildir.map(str::to_owned);
-            expression.line = recipe.action_line;
-            if let Some(command_expression) = expression
-                .expansion
-                .as_ref()
-                .filter(|expression| expression.has_commands())
-            {
-                validate_shell_expression(command_expression, recipe.action_line, known, dynamic)?;
-                expression.runtime_dependent = true;
-                expression.runtime_base = dynamic.contains("MAILDIR");
-                return Ok(());
-            }
-            let parsed = parse_expression(&expression.source, recipe.action_line)?;
-            validate_runtime_references(&parsed, recipe.action_line, known, dynamic)?;
-            expression.runtime_dependent = expression_references_any(&parsed, dynamic)
-                || expression_needs_runtime(&parsed, known);
-            expression.runtime_base = dynamic.contains("MAILDIR");
-            expression.expansion = Some(parsed);
-        }
-        RecipeAction::Pipe(_) => {}
-        RecipeAction::Capture(_) => {}
-        RecipeAction::Headers(action) => {
-            prepare_header_action(action, known, dynamic)?;
-        }
-        RecipeAction::Block(children) => {
-            let mut child_dynamic = dynamic.clone();
-            prepare_runtime_statements(children, known, &mut child_dynamic, maildir)?;
         }
     }
     Ok(())
