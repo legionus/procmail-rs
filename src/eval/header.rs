@@ -577,8 +577,13 @@ impl CompiledSequence {
                                     &action.name,
                                     CapturedNewlineRule::StripOne,
                                 )?;
-                                runtime.set_bytes(action.name.clone(), value.clone());
-                                record_command_assignment(action.line, &action.name, &value, trace);
+                                runtime.set_bytes_with_trace(
+                                    action.name.clone(),
+                                    value,
+                                    Some(action.line),
+                                    TraceVariableSource::RcFile,
+                                    trace,
+                                );
                                 planning.pending_error = None;
                                 HeaderControl::Continue
                             }
@@ -779,25 +784,6 @@ impl CompiledSequence {
             execution,
             context,
         )
-    }
-}
-
-fn record_command_assignment(
-    line: usize,
-    variable: &str,
-    value: &[u8],
-    trace: &mut impl TraceSink,
-) {
-    if let Ok(name) = TraceName::new(variable) {
-        trace.record(TraceEvent::VariableAssigned {
-            line: Some(line),
-            name,
-            source: TraceVariableSource::RcFile,
-            value: trace
-                .detail()
-                .includes_variable_values()
-                .then(|| TraceValue::new(value)),
-        });
     }
 }
 

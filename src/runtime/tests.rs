@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::delivery::{PendingFanout, PendingSink, PublishedDelivery};
+use crate::trace::{MemoryTrace, TraceEvent, VariableSource as TraceVariableSource};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -35,6 +36,31 @@ fn preserves_binary_values_and_replaces_the_previous_representation() {
     runtime.set("VALUE", "text");
     assert_eq!(runtime.get("VALUE"), Some("text"));
     assert_eq!(runtime.get_bytes("VALUE"), Some(&b"text"[..]));
+}
+
+#[test]
+fn traced_assignment_preserves_binary_storage_and_metadata_privacy() {
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = MemoryTrace::default();
+
+    runtime.set_bytes_with_trace(
+        "VALUE".to_owned(),
+        b"secret\xff".to_vec(),
+        Some(7),
+        TraceVariableSource::RcFile,
+        &mut trace,
+    );
+
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"secret\xff"[..]));
+    assert!(matches!(
+        trace.events(),
+        [TraceEvent::VariableAssigned {
+            line: Some(7),
+            source: TraceVariableSource::RcFile,
+            value: None,
+            ..
+        }]
+    ));
 }
 
 #[test]

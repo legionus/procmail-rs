@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::delivery::{CommitError, CommitReport, PublishedDelivery};
-use crate::trace::{NoTrace, TraceEvent, TraceSink};
+use crate::trace::{
+    NoTrace, TraceEvent, TraceName, TraceSink, TraceValue, VariableSource as TraceVariableSource,
+};
 
 mod settings;
 
@@ -72,6 +74,35 @@ impl RuntimeVariables {
                 self.values.remove(&name);
                 self.byte_values.insert(name, error.into_bytes());
             }
+        }
+    }
+
+    pub(crate) fn set_bytes_with_trace(
+        &mut self,
+        name: String,
+        value: Vec<u8>,
+        line: Option<usize>,
+        source: TraceVariableSource,
+        trace: &mut impl TraceSink,
+    ) {
+        // Construct the bounded trace fields before moving the complete value
+        // into runtime storage. The trace receives no value in metadata mode,
+        // while high-detail mode copies only its independently limited prefix.
+        let event = TraceName::new(&name).ok().map(|name| {
+            let value = trace
+                .detail()
+                .includes_variable_values()
+                .then(|| TraceValue::new(&value));
+            TraceEvent::VariableAssigned {
+                line,
+                name,
+                source,
+                value,
+            }
+        });
+        self.set_bytes(name, value);
+        if let Some(event) = event {
+            trace.record(event);
         }
     }
 

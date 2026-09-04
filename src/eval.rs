@@ -10,8 +10,7 @@ use crate::message::{Message, MessageHead, StreamedMessage};
 use crate::rc_file::RcFileLoader;
 use crate::runtime::{RuntimeSettingError, RuntimeSettings, RuntimeVariables};
 use crate::trace::{
-    NoTrace, RecipeDecision, TraceEvent, TraceName, TraceSink, TraceValue,
-    VariableSource as TraceVariableSource,
+    NoTrace, RecipeDecision, TraceEvent, TraceSink, VariableSource as TraceVariableSource,
 };
 
 mod condition;
@@ -255,18 +254,13 @@ fn execute_assignment(
         .assignment
         .resolve_with(|name| runtime.get(name).map(str::to_owned))
         .map_err(EvalError::Expansion)?;
-    runtime.set(assignment.assignment.name.clone(), value.clone());
-    if let Ok(name) = TraceName::new(&assignment.assignment.name) {
-        trace.record(TraceEvent::VariableAssigned {
-            line: assignment.line,
-            name,
-            source: assignment.source,
-            value: trace
-                .detail()
-                .includes_variable_values()
-                .then(|| TraceValue::new(value.as_bytes())),
-        });
-    }
+    runtime.set_bytes_with_trace(
+        assignment.assignment.name.clone(),
+        value.into_bytes(),
+        assignment.line,
+        assignment.source,
+        trace,
+    );
     Ok(())
 }
 

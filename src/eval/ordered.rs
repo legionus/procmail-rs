@@ -225,21 +225,13 @@ impl CompiledNode {
                             CapturedNewlineRule::StripOne,
                         )
                         .map_err(OrderedExecutionError::Evaluation)?;
-                        context
-                            .runtime
-                            .set_bytes(action.name.clone(), value.clone());
-                        if let Ok(name) = TraceName::new(&action.name) {
-                            context.trace.record(TraceEvent::VariableAssigned {
-                                line: Some(action.line),
-                                name,
-                                source: TraceVariableSource::RcFile,
-                                value: context
-                                    .trace
-                                    .detail()
-                                    .includes_variable_values()
-                                    .then(|| TraceValue::new(&value)),
-                            });
-                        }
+                        context.runtime.set_bytes_with_trace(
+                            action.name.clone(),
+                            value,
+                            Some(action.line),
+                            TraceVariableSource::RcFile,
+                            context.trace,
+                        );
                         context.pending_error = None;
                         Ok((ActionExecution::Succeeded, SequenceControl::Continue))
                     }
@@ -588,21 +580,13 @@ where
         &mut context.capture,
     )?;
 
-    context
-        .runtime
-        .set_bytes(assignment.name.clone(), value.clone());
-    if let Ok(name) = TraceName::new(&assignment.name) {
-        context.trace.record(TraceEvent::VariableAssigned {
-            line: Some(assignment.line),
-            name,
-            source: TraceVariableSource::RcFile,
-            value: context
-                .trace
-                .detail()
-                .includes_variable_values()
-                .then(|| TraceValue::new(&value)),
-        });
-    }
+    context.runtime.set_bytes_with_trace(
+        assignment.name.clone(),
+        value,
+        Some(assignment.line),
+        TraceVariableSource::RcFile,
+        context.trace,
+    );
     Ok(())
 }
 
