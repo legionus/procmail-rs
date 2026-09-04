@@ -26,6 +26,8 @@ struct OrderedTreeExecution<'a, E, T> {
     limits: MessageLimits,
 }
 
+type OrderedActionResult<E> = Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>;
+
 impl<E, T> OrderedTreeExecution<'_, E, T> {
     fn replace_message(&mut self, message: Message) {
         let matching_full = message.matching_message();
@@ -33,6 +35,20 @@ impl<E, T> OrderedTreeExecution<'_, E, T> {
             message,
             matching_full,
         });
+    }
+
+    fn action_succeeded(&mut self, control: SequenceControl) -> OrderedActionResult<E> {
+        self.pending_error = None;
+        Ok((ActionExecution::Succeeded, control))
+    }
+
+    fn action_failed(&mut self, error: E) -> OrderedActionResult<E> {
+        self.pending_error = Some(error);
+        Ok((ActionExecution::Failed, SequenceControl::Continue))
+    }
+
+    fn action_failed_fatally(&mut self, error: E) -> OrderedActionResult<E> {
+        Err(OrderedExecutionError::Delivery(error))
     }
 }
 
@@ -232,16 +248,10 @@ impl CompiledNode {
                             TraceVariableSource::RcFile,
                             context.trace,
                         );
-                        context.pending_error = None;
-                        Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                        context.action_succeeded(SequenceControl::Continue)
                     }
-                    Err(DeliveryAttemptError::Recoverable(error)) => {
-                        context.pending_error = Some(error);
-                        Ok((ActionExecution::Failed, SequenceControl::Continue))
-                    }
-                    Err(DeliveryAttemptError::Fatal(error)) => {
-                        Err(OrderedExecutionError::Delivery(error))
-                    }
+                    Err(DeliveryAttemptError::Recoverable(error)) => context.action_failed(error),
+                    Err(DeliveryAttemptError::Fatal(error)) => context.action_failed_fatally(error),
                 }
             }
             CompiledAction::Headers(action) => {
@@ -273,8 +283,7 @@ impl CompiledNode {
                     })
                     .map_err(OrderedExecutionError::Evaluation)?;
                 context.replace_message(message);
-                context.pending_error = None;
-                Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                context.action_succeeded(SequenceControl::Continue)
             }
             CompiledAction::Pipe { action, options } => {
                 let message =
@@ -314,7 +323,6 @@ impl CompiledNode {
                     context.trace,
                 ) {
                     Ok(replacement) => {
-                        context.pending_error = None;
                         if options.action_mode == crate::config::ActionMode::Filter {
                             let message = replacement.ok_or_else(|| {
                                 OrderedExecutionError::Evaluation(
@@ -325,7 +333,7 @@ impl CompiledNode {
                                 )
                             })?;
                             context.replace_message(message);
-                            Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                            context.action_succeeded(SequenceControl::Continue)
                         } else if replacement.is_some() {
                             Err(OrderedExecutionError::Evaluation(
                                 EvalError::InvalidExternalActionResult {
@@ -335,18 +343,13 @@ impl CompiledNode {
                             ))
                         } else if options.continuation == ContinuationMode::Stop {
                             context.original_delivered = true;
-                            Ok((ActionExecution::Succeeded, SequenceControl::Stop))
+                            context.action_succeeded(SequenceControl::Stop)
                         } else {
-                            Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                            context.action_succeeded(SequenceControl::Continue)
                         }
                     }
-                    Err(DeliveryAttemptError::Recoverable(error)) => {
-                        context.pending_error = Some(error);
-                        Ok((ActionExecution::Failed, SequenceControl::Continue))
-                    }
-                    Err(DeliveryAttemptError::Fatal(error)) => {
-                        Err(OrderedExecutionError::Delivery(error))
-                    }
+                    Err(DeliveryAttemptError::Recoverable(error)) => context.action_failed(error),
+                    Err(DeliveryAttemptError::Fatal(error)) => context.action_failed_fatally(error),
                 }
             }
             CompiledAction::Deliver {
@@ -410,21 +413,15 @@ impl CompiledNode {
                 ) {
                     Ok(()) => {
                         context.published += 1;
-                        context.pending_error = None;
                         if *continuation == ContinuationMode::Stop {
                             context.original_delivered = true;
-                            Ok((ActionExecution::Succeeded, SequenceControl::Stop))
+                            context.action_succeeded(SequenceControl::Stop)
                         } else {
-                            Ok((ActionExecution::Succeeded, SequenceControl::Continue))
+                            context.action_succeeded(SequenceControl::Continue)
                         }
                     }
-                    Err(DeliveryAttemptError::Recoverable(error)) => {
-                        context.pending_error = Some(error);
-                        Ok((ActionExecution::Failed, SequenceControl::Continue))
-                    }
-                    Err(DeliveryAttemptError::Fatal(error)) => {
-                        Err(OrderedExecutionError::Delivery(error))
-                    }
+                    Err(DeliveryAttemptError::Recoverable(error)) => context.action_failed(error),
+                    Err(DeliveryAttemptError::Fatal(error)) => context.action_failed_fatally(error),
                 }
             }
             CompiledAction::Block(children) => {
@@ -445,11 +442,10 @@ impl CompiledNode {
                     match executor(path, context.runtime) {
                         Ok(guard) => Some(guard),
                         Err(DeliveryAttemptError::Recoverable(error)) => {
-                            context.pending_error = Some(error);
-                            return Ok((ActionExecution::Failed, SequenceControl::Continue));
+                            return context.action_failed(error);
                         }
                         Err(DeliveryAttemptError::Fatal(error)) => {
-                            return Err(OrderedExecutionError::Delivery(error));
+                            return context.action_failed_fatally(error);
                         }
                     }
                 } else {
