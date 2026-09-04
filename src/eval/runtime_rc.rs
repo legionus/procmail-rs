@@ -82,16 +82,12 @@ impl CompiledInclude {
         self.expression.line
     }
 
-    pub(super) fn loaded(&self) -> Ref<'_, LoadedRuntimeRc> {
-        self.loaded.borrow()
-    }
-
-    pub(super) fn ensure_loaded(
+    pub(super) fn enter<'state>(
         &self,
         runtime: &RuntimeVariables,
-        context: RcExecutionContext<'_>,
-    ) -> Result<(), EvalError> {
-        load_runtime_rc(
+        context: RcExecutionContext<'state>,
+    ) -> Result<EnteredRuntimeRc<'_, 'state>, EvalError> {
+        enter_runtime_rc(
             &self.expression,
             &self.loaded,
             "INCLUDERC",
@@ -119,16 +115,35 @@ impl CompiledSwitch {
         self.expression.line
     }
 
-    pub(super) fn loaded(&self) -> Ref<'_, LoadedRuntimeRc> {
-        self.loaded.borrow()
-    }
-
-    pub(super) fn ensure_loaded(
+    pub(super) fn enter<'state>(
         &self,
         runtime: &RuntimeVariables,
-        context: RcExecutionContext<'_>,
-    ) -> Result<(), EvalError> {
-        load_runtime_rc(&self.expression, &self.loaded, "SWITCHRC", runtime, context)
+        context: RcExecutionContext<'state>,
+    ) -> Result<EnteredRuntimeRc<'_, 'state>, EvalError> {
+        enter_runtime_rc(&self.expression, &self.loaded, "SWITCHRC", runtime, context)
+    }
+}
+
+pub(super) struct EnteredRuntimeRc<'loaded, 'state> {
+    loaded: Ref<'loaded, LoadedRuntimeRc>,
+    child_context: Option<RcExecutionContext<'state>>,
+}
+
+impl<'loaded, 'state> EnteredRuntimeRc<'loaded, 'state> {
+    pub(super) fn is_empty(&self) -> bool {
+        matches!(&*self.loaded, LoadedRuntimeRc::Empty)
+    }
+
+    pub(super) fn sequence(
+        &self,
+    ) -> Result<Option<(&CompiledSequence, RcExecutionContext<'state>)>, EvalError> {
+        match (&*self.loaded, self.child_context) {
+            (LoadedRuntimeRc::Sequence(sequence), Some(context)) => Ok(Some((sequence, context))),
+            (LoadedRuntimeRc::Sequence(_), None) => Err(EvalError::RuntimeRc(
+                "loaded runtime rc sequence has no child context".to_owned(),
+            )),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -251,6 +266,31 @@ fn load_runtime_rc(
     }
     *loaded_state.borrow_mut() = LoadedRuntimeRc::Sequence(Box::new(sequence));
     Ok(())
+}
+
+fn enter_runtime_rc<'loaded, 'state>(
+    expression: &RcFileExpression,
+    loaded_state: &'loaded RefCell<LoadedRuntimeRc>,
+    statement: &'static str,
+    runtime: &RuntimeVariables,
+    context: RcExecutionContext<'state>,
+) -> Result<EnteredRuntimeRc<'loaded, 'state>, EvalError> {
+    load_runtime_rc(expression, loaded_state, statement, runtime, context)?;
+    let loaded = loaded_state.borrow();
+
+    // Compute the child context at the same boundary that owns the loaded
+    // tree. This keeps depth checking identical in every evaluation mode and
+    // prevents a caller from accidentally evaluating a child with its
+    // parent's rc-file depth.
+    let child_context = if matches!(&*loaded, LoadedRuntimeRc::Sequence(_)) {
+        Some(context.descend()?)
+    } else {
+        None
+    };
+    Ok(EnteredRuntimeRc {
+        loaded,
+        child_context,
+    })
 }
 
 fn truncate_utf8(value: &mut String, limit: usize) {

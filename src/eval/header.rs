@@ -971,14 +971,14 @@ fn plan_statements_complete(
                 }
             }
             CompiledStatement::Include(include) => {
-                include.ensure_loaded(runtime, context)?;
-                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded()
+                let entered = include.enter(runtime, context)?;
+                if let Some((sequence, child_context)) = entered.sequence()?
                     && sequence.plan_complete_with_context(
                         message,
                         runtime,
                         trace,
                         execution,
-                        context.descend()?,
+                        child_context,
                     )? == SequenceControl::Stop
                 {
                     return Ok(SequenceControl::Stop);
@@ -989,25 +989,23 @@ fn plan_statements_complete(
                 // EndRcFile to unwind every enclosing recipe block. An
                 // INCLUDERC boundary consumes that result and resumes its
                 // caller, while the root treats it as end of processing.
-                switch.ensure_loaded(runtime, context)?;
-                match &*switch.loaded() {
-                    LoadedRuntimeRc::Unloaded => unreachable!(),
-                    LoadedRuntimeRc::Failed => {}
-                    LoadedRuntimeRc::Empty => return Ok(SequenceControl::EndRcFile),
-                    LoadedRuntimeRc::Sequence(sequence) => {
-                        let control = sequence.plan_complete_with_context(
-                            message,
-                            runtime,
-                            trace,
-                            execution,
-                            context.descend()?,
-                        )?;
-                        return Ok(if control == SequenceControl::Stop {
-                            SequenceControl::Stop
-                        } else {
-                            SequenceControl::EndRcFile
-                        });
-                    }
+                let entered = switch.enter(runtime, context)?;
+                if entered.is_empty() {
+                    return Ok(SequenceControl::EndRcFile);
+                }
+                if let Some((sequence, child_context)) = entered.sequence()? {
+                    let control = sequence.plan_complete_with_context(
+                        message,
+                        runtime,
+                        trace,
+                        execution,
+                        child_context,
+                    )?;
+                    return Ok(if control == SequenceControl::Stop {
+                        SequenceControl::Stop
+                    } else {
+                        SequenceControl::EndRcFile
+                    });
                 }
             }
         }
@@ -1044,8 +1042,8 @@ where
                 }
             }
             CompiledStatement::Include(include) => {
-                include.ensure_loaded(runtime, route.rc)?;
-                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded() {
+                let entered = include.enter(runtime, route.rc)?;
+                if let Some((sequence, child_context)) = entered.sequence()? {
                     if sequence.requires_preemptive_ordered_delivery() {
                         planning.frames.clear();
                         planning.restart = true;
@@ -1065,7 +1063,7 @@ where
                         planning,
                         HeaderPlanRoute {
                             following: route.following,
-                            rc: route.rc.descend()?,
+                            rc: child_context,
                             capture: route.capture,
                         },
                     )?;
@@ -1091,49 +1089,46 @@ where
                 // Requirements after this statement are unreachable after a
                 // successful switch. If the dynamic target needs the body,
                 // restart from the private root plan after staging it.
-                switch.ensure_loaded(runtime, route.rc)?;
-                match &*switch.loaded() {
-                    LoadedRuntimeRc::Unloaded => unreachable!(),
-                    LoadedRuntimeRc::Failed => {}
-                    LoadedRuntimeRc::Empty => return Ok(HeaderControl::EndRcFile),
-                    LoadedRuntimeRc::Sequence(sequence) => {
-                        if sequence.requires_preemptive_ordered_delivery() {
-                            planning.frames.clear();
-                            planning.restart = true;
-                            planning.requirements =
-                                sequence.requirements().union(InputRequirements {
-                                    needs_end_of_message: true,
-                                    ..InputRequirements::default()
-                                });
-                            return Ok(HeaderControl::Deferred);
-                        }
-                        let child = sequence.plan_headers(
-                            head,
-                            runtime,
-                            trace,
-                            planning,
-                            HeaderPlanRoute {
-                                following: InputRequirements::default(),
-                                rc: route.rc.descend()?,
-                                capture: route.capture,
-                            },
-                        )?;
-                        if child == HeaderControl::Deferred {
-                            // Replaying from the root reconstructs the dynamic
-                            // target without retaining pointers into its tree.
-                            // Nothing after SWITCHRC remains reachable.
-                            planning.frames.clear();
-                            planning.restart = true;
-                            planning.requirements =
-                                planning.requirements.union(sequence.requirements());
-                            return Ok(HeaderControl::Deferred);
-                        }
-                        return Ok(if child == HeaderControl::Stop {
-                            HeaderControl::Stop
-                        } else {
-                            HeaderControl::EndRcFile
+                let entered = switch.enter(runtime, route.rc)?;
+                if entered.is_empty() {
+                    return Ok(HeaderControl::EndRcFile);
+                }
+                if let Some((sequence, child_context)) = entered.sequence()? {
+                    if sequence.requires_preemptive_ordered_delivery() {
+                        planning.frames.clear();
+                        planning.restart = true;
+                        planning.requirements = sequence.requirements().union(InputRequirements {
+                            needs_end_of_message: true,
+                            ..InputRequirements::default()
                         });
+                        return Ok(HeaderControl::Deferred);
                     }
+                    let child = sequence.plan_headers(
+                        head,
+                        runtime,
+                        trace,
+                        planning,
+                        HeaderPlanRoute {
+                            following: InputRequirements::default(),
+                            rc: child_context,
+                            capture: route.capture,
+                        },
+                    )?;
+                    if child == HeaderControl::Deferred {
+                        // Replaying from the root reconstructs the dynamic
+                        // target without retaining pointers into its tree.
+                        // Nothing after SWITCHRC remains reachable.
+                        planning.frames.clear();
+                        planning.restart = true;
+                        planning.requirements =
+                            planning.requirements.union(sequence.requirements());
+                        return Ok(HeaderControl::Deferred);
+                    }
+                    return Ok(if child == HeaderControl::Stop {
+                        HeaderControl::Stop
+                    } else {
+                        HeaderControl::EndRcFile
+                    });
                 }
             }
         }

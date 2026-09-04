@@ -28,7 +28,7 @@ struct OrderedTreeExecution<'a, E, T> {
 
 type OrderedActionResult<E> = Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>;
 
-impl<E, T> OrderedTreeExecution<'_, E, T> {
+impl<'a, E, T> OrderedTreeExecution<'a, E, T> {
     fn replace_message(&mut self, message: Message) {
         let matching_full = message.matching_message();
         self.replacement = Some(OwnedCompleteMessage {
@@ -49,6 +49,24 @@ impl<E, T> OrderedTreeExecution<'_, E, T> {
 
     fn action_failed_fatally(&mut self, error: E) -> OrderedActionResult<E> {
         Err(OrderedExecutionError::Delivery(error))
+    }
+
+    fn execute_runtime_rc(
+        &mut self,
+        sequence: &CompiledSequence,
+        child_context: RcExecutionContext<'a>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+    where
+        T: TraceSink,
+    {
+        // The mutable execution object carries the active rc context for
+        // nested actions. Restore its caller value before propagating either
+        // success or failure so an included file cannot leak its depth into
+        // the statements that follow it.
+        let caller_context = std::mem::replace(&mut self.rc, child_context);
+        let result = sequence.execute_ordered(self);
+        self.rc = caller_context;
+        result
     }
 }
 
@@ -503,17 +521,14 @@ where
                 }
             }
             CompiledStatement::Include(include) => {
-                include
-                    .ensure_loaded(context.runtime, context.rc)
+                let entered = include
+                    .enter(context.runtime, context.rc)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                if let LoadedRuntimeRc::Sequence(sequence) = &*include.loaded() {
-                    let previous = context.rc;
-                    context.rc = previous
-                        .descend()
-                        .map_err(OrderedExecutionError::Evaluation)?;
-                    let result = sequence.execute_ordered(context);
-                    context.rc = previous;
-                    let (_, control) = result?;
+                if let Some((sequence, child_context)) = entered
+                    .sequence()
+                    .map_err(OrderedExecutionError::Evaluation)?
+                {
+                    let (_, control) = context.execute_runtime_rc(sequence, child_context)?;
                     if control == SequenceControl::Stop {
                         return Ok(control);
                     }
@@ -523,27 +538,22 @@ where
                 // Preserve the same rc-file boundary while deliveries happen
                 // immediately. Restoring the caller context matters when the
                 // switch belongs to a file entered through INCLUDERC.
-                switch
-                    .ensure_loaded(context.runtime, context.rc)
+                let entered = switch
+                    .enter(context.runtime, context.rc)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                match &*switch.loaded() {
-                    LoadedRuntimeRc::Unloaded => unreachable!(),
-                    LoadedRuntimeRc::Failed => {}
-                    LoadedRuntimeRc::Empty => return Ok(SequenceControl::EndRcFile),
-                    LoadedRuntimeRc::Sequence(sequence) => {
-                        let previous = context.rc;
-                        context.rc = previous
-                            .descend()
-                            .map_err(OrderedExecutionError::Evaluation)?;
-                        let result = sequence.execute_ordered(context);
-                        context.rc = previous;
-                        let (_, control) = result?;
-                        return Ok(if control == SequenceControl::Stop {
-                            SequenceControl::Stop
-                        } else {
-                            SequenceControl::EndRcFile
-                        });
-                    }
+                if entered.is_empty() {
+                    return Ok(SequenceControl::EndRcFile);
+                }
+                if let Some((sequence, child_context)) = entered
+                    .sequence()
+                    .map_err(OrderedExecutionError::Evaluation)?
+                {
+                    let (_, control) = context.execute_runtime_rc(sequence, child_context)?;
+                    return Ok(if control == SequenceControl::Stop {
+                        SequenceControl::Stop
+                    } else {
+                        SequenceControl::EndRcFile
+                    });
                 }
             }
         }

@@ -44,7 +44,7 @@ pub use result::{
 };
 use result::{ContinuationFrame, DeliveryContinuation};
 pub use runtime_rc::MAX_RUNTIME_RC_WARNINGS;
-use runtime_rc::{LoadedRuntimeRc, RcExecutionContext, RuntimeRcState};
+use runtime_rc::{RcExecutionContext, RuntimeRcState};
 pub use services::{ExecutionServices, ExecutionServicesError, RecipeLockGuard};
 use tree::{
     ActionExecution, CompiledAction, CompiledAssignment, CompiledNode, CompiledSequence,
