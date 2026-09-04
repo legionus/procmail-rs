@@ -281,25 +281,89 @@ impl HeaderAction {
 }
 
 impl Destination {
-    pub(crate) fn command_expression(&self) -> Option<&ShellExpression> {
+    // Keep access to the shared path state and reconstruction of its enum
+    // variant together. Resolution may turn an unmarked file into mbox or
+    // discard delivery, so duplicating these matches at call sites could
+    // preserve stale preparation state or choose a different backend.
+    fn expression(&self) -> &PathExpression {
         match self {
             Self::Maildir(expression)
             | Self::Mbox(expression)
             | Self::File(expression)
-            | Self::Discard(expression) => expression
-                .expansion
-                .as_ref()
-                .filter(|expression| expression.has_commands()),
+            | Self::Discard(expression) => expression,
         }
     }
 
-    pub(crate) fn command_line(&self) -> usize {
+    fn expression_mut(&mut self) -> &mut PathExpression {
         match self {
             Self::Maildir(expression)
             | Self::Mbox(expression)
             | Self::File(expression)
-            | Self::Discard(expression) => expression.line,
+            | Self::Discard(expression) => expression,
         }
+    }
+
+    fn purpose(&self) -> PathPurpose {
+        match self {
+            Self::Maildir(_) => PathPurpose::Maildir,
+            Self::Mbox(_) => PathPurpose::Mbox,
+            Self::File(_) => PathPurpose::File,
+            Self::Discard(_) => PathPurpose::Discard,
+        }
+    }
+
+    fn rebuild(&self, expression: PathExpression, classify_file: bool) -> Self {
+        match self {
+            Self::Maildir(_) => Self::Maildir(expression),
+            Self::Mbox(_) => Self::Mbox(expression),
+            Self::File(_) if classify_file && expression.source == "/dev/null" => {
+                Self::Discard(expression)
+            }
+            Self::File(_) if classify_file => Self::Mbox(expression),
+            Self::File(_) => Self::File(expression),
+            Self::Discard(_) => Self::Discard(expression),
+        }
+    }
+
+    fn resolved_expression(&self, source: String) -> PathExpression {
+        let expression = self.expression();
+        PathExpression {
+            source,
+            base: None,
+            line: expression.line,
+            runtime_dependent: false,
+            runtime_base: false,
+            typed_destination: expression.typed_destination,
+            expansion: None,
+        }
+    }
+
+    fn adopt_static_discard_classification(&mut self, resolved: &Self) {
+        if matches!(self, Self::File(_)) && matches!(resolved, Self::Discard(_)) {
+            let expression = self.expression().clone();
+            *self = Self::Discard(expression);
+        }
+    }
+
+    fn resolver<'a>(&self, base: Option<&'a str>) -> PathResolver<'a> {
+        let expression = self.expression();
+        PathResolver::destination(
+            self.purpose(),
+            expression.line,
+            base,
+            expression.typed_destination,
+        )
+    }
+
+    pub(crate) fn command_expression(&self) -> Option<&ShellExpression> {
+        self.expression()
+            .expansion
+            .as_ref()
+            .filter(|expression| expression.has_commands())
+    }
+
+    pub fn line(&self) -> usize {
+        self.expression().line
     }
 
     pub(crate) fn resolve_command_output(
@@ -307,12 +371,7 @@ impl Destination {
         source: String,
         runtime_maildir: Option<&str>,
     ) -> Result<Self, ExpansionError> {
-        let (expression, purpose) = match self {
-            Self::Maildir(expression) => (expression, PathPurpose::Maildir),
-            Self::Mbox(expression) => (expression, PathPurpose::Mbox),
-            Self::File(expression) => (expression, PathPurpose::File),
-            Self::Discard(expression) => (expression, PathPurpose::Discard),
-        };
+        let expression = self.expression();
         if !expression
             .expansion
             .as_ref()
@@ -328,37 +387,16 @@ impl Destination {
         } else {
             expression.base.as_deref()
         };
-        let path =
-            PathResolver::destination(purpose, expression.line, base, expression.typed_destination)
-                .resolve(&source)?;
-        let resolved = PathExpression {
-            source: path,
-            base: None,
-            line: expression.line,
-            runtime_dependent: false,
-            runtime_base: false,
-            typed_destination: expression.typed_destination,
-            expansion: None,
-        };
-        Ok(match self {
-            Self::Maildir(_) => Self::Maildir(resolved),
-            Self::Mbox(_) => Self::Mbox(resolved),
-            Self::File(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
-            Self::File(_) => Self::Mbox(resolved),
-            Self::Discard(_) => Self::Discard(resolved),
-        })
+        let path = self.resolver(base).resolve(&source)?;
+        let resolved = self.resolved_expression(path);
+        Ok(self.rebuild(resolved, true))
     }
 
     pub fn bind_with(
         &self,
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, ExpansionError> {
-        let expression = match self {
-            Self::Maildir(expression)
-            | Self::Mbox(expression)
-            | Self::File(expression)
-            | Self::Discard(expression) => expression,
-        };
+        let expression = self.expression();
         if expression
             .expansion
             .as_ref()
@@ -386,24 +424,14 @@ impl Destination {
             typed_destination: expression.typed_destination,
             expansion: Some(expansion),
         };
-        Ok(match self {
-            Self::Maildir(_) => Self::Maildir(bound),
-            Self::Mbox(_) => Self::Mbox(bound),
-            Self::File(_) => Self::File(bound),
-            Self::Discard(_) => Self::Discard(bound),
-        })
+        Ok(self.rebuild(bound, false))
     }
 
     pub fn resolve_with(
         &self,
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, ExpansionError> {
-        let (expression, purpose) = match self {
-            Self::Maildir(expression) => (expression, PathPurpose::Maildir),
-            Self::Mbox(expression) => (expression, PathPurpose::Mbox),
-            Self::File(expression) => (expression, PathPurpose::File),
-            Self::Discard(expression) => (expression, PathPurpose::Discard),
-        };
+        let expression = self.expression();
         if expression
             .expansion
             .as_ref()
@@ -427,44 +455,18 @@ impl Destination {
         // so whitespace introduced by a runtime value cannot safely mean one
         // filename here. Explicit backend syntax supplies that missing
         // distinction and may therefore retain whitespace as path data.
-        let path =
-            PathResolver::destination(purpose, expression.line, base, expression.typed_destination)
-                .evaluate(compiled, &mut lookup)?;
-        let resolved = PathExpression {
-            source: path,
-            base: None,
-            line: expression.line,
-            runtime_dependent: false,
-            runtime_base: false,
-            typed_destination: expression.typed_destination,
-            expansion: None,
-        };
-        let destination = match self {
-            Self::Maildir(_) => Self::Maildir(resolved),
-            Self::Mbox(_) => Self::Mbox(resolved),
-            Self::File(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
-            Self::File(_) => Self::Mbox(resolved),
-            Self::Discard(_) => Self::Discard(resolved),
-        };
-        Ok(destination)
+        let path = self.resolver(base).evaluate(compiled, &mut lookup)?;
+        let resolved = self.resolved_expression(path);
+        Ok(self.rebuild(resolved, true))
     }
 
     pub fn path(&self) -> &str {
-        match self {
-            Self::Maildir(expression)
-            | Self::Mbox(expression)
-            | Self::File(expression)
-            | Self::Discard(expression) => expression.source(),
-        }
+        self.expression().source()
     }
 
     pub fn needs_runtime_variables(&self) -> bool {
-        match self {
-            Self::Maildir(expression)
-            | Self::Mbox(expression)
-            | Self::File(expression)
-            | Self::Discard(expression) => expression.runtime_dependent || expression.runtime_base,
-        }
+        let expression = self.expression();
+        expression.runtime_dependent || expression.runtime_base
     }
 }
 
@@ -821,12 +823,7 @@ fn prepare_recipe(
 
     match &mut recipe.action {
         RecipeAction::Deliver(destination) => {
-            let expression = match destination {
-                Destination::Maildir(expression)
-                | Destination::Mbox(expression)
-                | Destination::File(expression)
-                | Destination::Discard(expression) => expression,
-            };
+            let expression = destination.expression_mut();
             expression.base = context.maildir.map(str::to_owned);
             expression.line = recipe.action_line;
             if let Some(command_expression) = expression
@@ -863,12 +860,7 @@ fn prepare_recipe(
             if context.phase == PreparationPhase::Eager && !has_runtime_reference {
                 let resolved = destination
                     .resolve_with(|name| context.known.get(name).map(|value| value.text.clone()))?;
-                if matches!(resolved, Destination::Discard(_))
-                    && let Destination::File(expression) = destination
-                {
-                    let expression = expression.clone();
-                    *destination = Destination::Discard(expression);
-                }
+                destination.adopt_static_discard_classification(&resolved);
             }
         }
         RecipeAction::Pipe(_) => {}

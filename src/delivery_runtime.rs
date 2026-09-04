@@ -520,25 +520,25 @@ fn deliver_file_destination(
     // a hostile filesystem object. The complete message has already passed
     // input validation, while avoiding device writes also keeps mbox locking,
     // rollback, and durability assumptions limited to regular files.
-    if let Destination::Discard(expression) = &destination {
+    if matches!(destination, Destination::Discard(_)) {
         record_delivery(&destination, DeliveryStage::Published, trace);
         runtime
             .record_delivery_with_trace(
-                &procmail_rs::delivery::PublishedDelivery::new(PathBuf::from(expression.source())),
+                &procmail_rs::delivery::PublishedDelivery::new(PathBuf::from(destination.path())),
                 trace,
             )
             .map_err(OperationalError::Internal)
             .map_err(OrderedStepError::after_publication)?;
         return Ok(());
     }
-    let Destination::Mbox(expression) = &destination else {
+    let Destination::Mbox(_) = &destination else {
         return Err(OrderedStepError::before_publication(
             OperationalError::Internal(
                 "internal error: file delivery resolved to another destination type".to_owned(),
             ),
         ));
     };
-    let path = Path::new(expression.source());
+    let path = Path::new(destination.path());
     let settings = RuntimeSettings::new(runtime);
     let lock_timeout = settings
         .lock_timeout()
@@ -688,8 +688,8 @@ fn open_sink(
             OperationalError::PermanentDestination(error.to_string())
         })?;
     match &destination {
-        Destination::Maildir(expression) => {
-            let path = Path::new(expression.source());
+        Destination::Maildir(_) => {
+            let path = Path::new(destination.path());
             let sink = MaildirSink::create_with_durability_and_mask(path, durability, mask)
                 .map_err(|error| {
                     record_delivery(
@@ -704,7 +704,7 @@ fn open_sink(
                 })?;
             Ok(Box::new(sink))
         }
-        Destination::Mbox(expression) => {
+        Destination::Mbox(_) => {
             record_delivery(
                 unresolved,
                 DeliveryStage::Failed(FailureClass::Permanent),
@@ -712,11 +712,11 @@ fn open_sink(
             );
             Err(OperationalError::Internal(format!(
                 "internal error: mbox destination reached streaming delivery: {}",
-                expression.source()
+                destination.path()
             )))
         }
         Destination::Discard(_) => Ok(Box::new(DiscardSink::null())),
-        Destination::File(expression) => {
+        Destination::File(_) => {
             record_delivery(
                 unresolved,
                 DeliveryStage::Failed(FailureClass::Permanent),
@@ -724,22 +724,22 @@ fn open_sink(
             );
             Err(OperationalError::Internal(format!(
                 "internal error: ordered destination reached streaming delivery: {}",
-                expression.source()
+                destination.path()
             )))
         }
     }
 }
 
 fn record_delivery(destination: &Destination, stage: DeliveryStage, trace: &mut impl TraceSink) {
-    let (line, destination) = match destination {
-        Destination::Maildir(expression) => (expression.line(), TraceDestinationKind::Maildir),
-        Destination::Mbox(expression) => (expression.line(), TraceDestinationKind::Mbox),
-        Destination::File(expression) => (expression.line(), TraceDestinationKind::File),
-        Destination::Discard(expression) => (expression.line(), TraceDestinationKind::Discard),
+    let destination_kind = match destination {
+        Destination::Maildir(_) => TraceDestinationKind::Maildir,
+        Destination::Mbox(_) => TraceDestinationKind::Mbox,
+        Destination::File(_) => TraceDestinationKind::File,
+        Destination::Discard(_) => TraceDestinationKind::Discard,
     };
     trace.record(TraceEvent::Delivery {
-        recipe_line: line,
-        destination,
+        recipe_line: destination.line(),
+        destination: destination_kind,
         stage,
     });
 }

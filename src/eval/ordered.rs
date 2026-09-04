@@ -384,13 +384,13 @@ impl CompiledNode {
                     let limit = active_command_value_limit(
                         context.runtime,
                         AssignmentTarget::User,
-                        destination.command_line(),
+                        destination.line(),
                     )?
                     .min(crate::config::MAX_PATH_EXPRESSION_LEN);
                     let bytes = evaluate_shell_expression(
                         ShellExpressionInput {
                             parts: &parts.parts,
-                            line: destination.command_line(),
+                            line: destination.line(),
                             value_name: "destination",
                             message,
                             limit,
@@ -401,7 +401,7 @@ impl CompiledNode {
                     )?;
                     let source = String::from_utf8(bytes)
                         .map_err(|_| EvalError::DestinationCommandOutputIsNotUtf8 {
-                            line: destination.command_line(),
+                            line: destination.line(),
                         })
                         .map_err(OrderedExecutionError::Evaluation)?;
                     destination
