@@ -31,6 +31,7 @@ use procmail_rs::runtime::RuntimeVariables;
 use procmail_rs::trace::{NoTrace, TraceConfig};
 use procmail_rs::user_identity::UserIdentity;
 
+mod command_log;
 mod command_runner;
 mod delivery_runtime;
 

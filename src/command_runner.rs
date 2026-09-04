@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
 
 use procmail_rs::config::{ActionInput, ActionMode, OutputEnding, RecipeOptions, WriteErrorMode};
@@ -19,6 +17,7 @@ use procmail_rs::message::Message;
 use procmail_rs::runtime::{RuntimeSettings, RuntimeVariables};
 
 use super::{ExitStatus, OperationalError};
+use crate::command_log::{CommandLog, DiagnosticWriteError, TrapOutputError};
 
 #[derive(Debug, Clone, Copy)]
 enum InputSelection {
@@ -340,7 +339,8 @@ fn prepare(
     runtime: &RuntimeVariables,
 ) -> Result<PreparedCommand, DeliveryAttemptError<OperationalError>> {
     let prepared = prepare_environment(runtime, "external command").map_err(recoverable_error)?;
-    let stderr = external_stderr(runtime)
+    let stderr = CommandLog::new(runtime)
+        .stderr()
         .map_err(|error| recoverable_error(format!("cannot open external command log: {error}")))?;
     Ok(PreparedCommand {
         environment: prepared.environment,
@@ -463,81 +463,39 @@ fn log_error(error: io::Error) -> DeliveryAttemptError<OperationalError> {
     ))
 }
 
-fn external_stderr(runtime: &RuntimeVariables) -> io::Result<Stdio> {
-    Ok(match open_external_log(runtime)? {
-        Some(file) => Stdio::from(file),
-        None => Stdio::inherit(),
-    })
-}
-
 fn report_child_failure(runtime: &RuntimeVariables, child_exit: ChildExit) -> io::Result<()> {
     let diagnostic = if child_exit == ChildExit::TimedOut {
         b"procmail-rs: external command exceeded TIMEOUT\n".as_slice()
     } else {
         b"procmail-rs: external command exited unsuccessfully\n".as_slice()
     };
-    match open_external_log(runtime)? {
-        Some(mut file) => file.write_all(diagnostic),
-        None => io::stderr().lock().write_all(diagnostic),
-    }
+    CommandLog::new(runtime)
+        .write_diagnostic(diagnostic)
+        .map_err(DiagnosticWriteError::into_io_error)
 }
 
 fn report_trap_diagnostic(runtime: &RuntimeVariables, message: &str) {
     let record = format!("procmail-rs: {message}\n");
-    let result = match open_external_log(runtime) {
-        Ok(Some(mut file)) => file.write_all(record.as_bytes()),
-        Ok(None) => io::stderr().lock().write_all(record.as_bytes()),
-        Err(error) => {
+    match CommandLog::new(runtime).write_diagnostic(record.as_bytes()) {
+        Ok(()) => {}
+        Err(DiagnosticWriteError::Open(error)) => {
             eprintln!("procmail-rs: cannot write TRAP diagnostic to LOGFILE: {error}");
-            return;
         }
-    };
-    if let Err(error) = result {
-        eprintln!("procmail-rs: cannot write TRAP diagnostic: {error}");
+        Err(DiagnosticWriteError::Write(error)) => {
+            eprintln!("procmail-rs: cannot write TRAP diagnostic: {error}");
+        }
     }
 }
 
 fn trap_output(runtime: &RuntimeVariables) -> (Stdio, Stdio) {
-    match open_external_log(runtime) {
-        Ok(Some(file)) => match file.try_clone() {
-            Ok(stdout) => return (Stdio::from(stdout), Stdio::from(file)),
-            Err(error) => {
-                eprintln!("procmail-rs: cannot duplicate LOGFILE for TRAP output: {error}");
-            }
-        },
-        Ok(None) => {}
-        Err(error) => {
+    match CommandLog::new(runtime).trap_output() {
+        Ok(output) => return output,
+        Err(TrapOutputError::Open(error)) => {
             eprintln!("procmail-rs: cannot open LOGFILE for TRAP output: {error}");
         }
+        Err(TrapOutputError::Duplicate(error)) => {
+            eprintln!("procmail-rs: cannot duplicate LOGFILE for TRAP output: {error}");
+        }
     }
-
-    // TRAP combines stdout with stderr in original procmail. Duplicate the
-    // inherited descriptor instead of routing stdout to normal command output,
-    // where trusted diagnostic text could corrupt a protocol-facing response.
-    (Stdio::from(io::stderr()), Stdio::from(io::stderr()))
-}
-
-fn open_external_log(runtime: &RuntimeVariables) -> io::Result<Option<File>> {
-    let settings = RuntimeSettings::new(runtime);
-    let Some(path) = settings.logfile() else {
-        return Ok(None);
-    };
-    let mask = settings
-        .umask()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let nofollow = i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
-        .map_err(|_| io::Error::other("Linux O_NOFOLLOW does not fit custom-flags type"))?;
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600 & !mask)
-        .custom_flags(nofollow)
-        .open(path)?;
-    if !file.metadata()?.file_type().is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "LOGFILE is not a regular file",
-        ));
-    }
-    Ok(Some(file))
+    CommandLog::inherited_trap_output()
 }
