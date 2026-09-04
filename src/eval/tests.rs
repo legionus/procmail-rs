@@ -31,6 +31,47 @@ enum Outcome {
     Undelivered { copies: usize },
 }
 
+trait HeaderTestExt {
+    fn evaluate_headers_with_runtime(
+        &self,
+        head: &MessageHead,
+        runtime: &mut RuntimeVariables,
+    ) -> HeaderEvaluation;
+
+    fn resume_mapped_with_runtime(
+        &self,
+        continuation: Continuation,
+        raw: &[u8],
+        header_len: usize,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<DeliveryPlan, EvalError>;
+}
+
+impl HeaderTestExt for ExecutionPlan {
+    fn evaluate_headers_with_runtime(
+        &self,
+        head: &MessageHead,
+        runtime: &mut RuntimeVariables,
+    ) -> HeaderEvaluation {
+        self.evaluate_headers_with_trace(head, runtime, &mut NoTrace)
+    }
+
+    fn resume_mapped_with_runtime(
+        &self,
+        continuation: Continuation,
+        raw: &[u8],
+        header_len: usize,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<DeliveryPlan, EvalError> {
+        self.resume_with_trace(
+            continuation,
+            MappedMessageInput::new(raw, header_len, None),
+            runtime,
+            &mut NoTrace,
+        )
+    }
+}
+
 impl Delivery for FailingRecorder {
     fn deliver(&mut self, destination: &Destination, _: &[u8]) -> Result<(), String> {
         self.attempted.push(destination.path().to_owned());
@@ -2138,10 +2179,9 @@ fn resume_does_not_repeat_the_header_prefix_trace() {
         panic!("expected body condition to defer");
     };
 
-    plan.resume_mapped_with_trace(
+    plan.resume_with_trace(
         continuation,
-        raw,
-        b"Subject: test\n\n".len(),
+        MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
         &mut runtime,
         &mut trace,
     )

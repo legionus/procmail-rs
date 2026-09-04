@@ -252,11 +252,9 @@ impl DeliveryRuntime {
             return delivery_outcome_counts(outcome.original_delivered(), outcome.published());
         }
         let plan = execution
-            .resume_mapped_with_matching_trace(
+            .resume_with_trace(
                 continuation,
-                staged.as_bytes(),
-                staged.header_len(),
-                matching,
+                MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                 runtime,
                 trace,
             )

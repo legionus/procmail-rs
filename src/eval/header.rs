@@ -85,15 +85,7 @@ impl From<SequenceControl> for HeaderControl {
 
 impl ExecutionPlan {
     pub fn evaluate_headers(&self, head: &MessageHead) -> HeaderEvaluation {
-        self.evaluate_headers_with_runtime(head, &mut RuntimeVariables::default())
-    }
-
-    pub fn evaluate_headers_with_runtime(
-        &self,
-        head: &MessageHead,
-        runtime: &mut RuntimeVariables,
-    ) -> HeaderEvaluation {
-        self.evaluate_headers_with_trace(head, runtime, &mut NoTrace)
+        self.evaluate_headers_with_trace(head, &mut RuntimeVariables::default(), &mut NoTrace)
     }
 
     pub fn evaluate_headers_with_trace(
@@ -217,16 +209,9 @@ impl ExecutionPlan {
         continuation: Continuation,
         message: &Message,
     ) -> Result<DeliveryPlan, EvalError> {
-        let matching_full = self
-            .needs_message_contents()
-            .then(|| message.matching_message())
-            .flatten();
-        self.resume_tree(
+        self.resume_input(
             continuation,
-            CompleteMessage::Buffered {
-                message,
-                matching_full: matching_full.as_deref(),
-            },
+            ResumeInput::Buffered(message),
             &mut RuntimeVariables::default(),
             &mut NoTrace,
         )
@@ -237,65 +222,22 @@ impl ExecutionPlan {
         continuation: Continuation,
         message: &StreamedMessage,
     ) -> Result<DeliveryPlan, EvalError> {
-        if continuation.requirements.needs_body_contents {
-            return Err(EvalError::BodyWasNotBuffered);
-        }
-        self.resume_tree(
+        self.resume_input(
             continuation,
-            CompleteMessage::Streamed(message),
+            ResumeInput::Streamed(message),
             &mut RuntimeVariables::default(),
             &mut NoTrace,
         )
     }
 
-    pub fn resume_mapped(
+    pub fn resume_with_trace(
         &self,
         continuation: Continuation,
-        raw: &[u8],
-        header_len: usize,
-    ) -> Result<DeliveryPlan, EvalError> {
-        self.resume_mapped_with_runtime(
-            continuation,
-            raw,
-            header_len,
-            &mut RuntimeVariables::default(),
-        )
-    }
-
-    pub fn resume_mapped_with_runtime(
-        &self,
-        continuation: Continuation,
-        raw: &[u8],
-        header_len: usize,
-        runtime: &mut RuntimeVariables,
-    ) -> Result<DeliveryPlan, EvalError> {
-        self.resume_mapped_with_trace(continuation, raw, header_len, runtime, &mut NoTrace)
-    }
-
-    pub fn resume_mapped_with_trace(
-        &self,
-        continuation: Continuation,
-        raw: &[u8],
-        header_len: usize,
+        message: MappedMessageInput<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
-        self.resume_mapped_with_matching_trace(continuation, raw, header_len, None, runtime, trace)
-    }
-
-    pub fn resume_mapped_with_matching_trace(
-        &self,
-        continuation: Continuation,
-        raw: &[u8],
-        header_len: usize,
-        matching: Option<MatchingMessage<'_>>,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-    ) -> Result<DeliveryPlan, EvalError> {
-        let message = MappedMessageInput::new(raw, header_len, matching)
-            .complete_message(self.needs_message_contents())
-            .ok_or(EvalError::BodyWasNotBuffered)?;
-        self.resume_tree(continuation, message, runtime, trace)
+        self.resume_input(continuation, ResumeInput::Mapped(message), runtime, trace)
     }
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
@@ -320,13 +262,35 @@ impl ExecutionPlan {
         })
     }
 
-    fn resume_tree(
+    fn resume_input(
         &self,
         continuation: Continuation,
-        message: CompleteMessage<'_>,
+        input: ResumeInput<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
+        let matching_full;
+        let message = match input {
+            ResumeInput::Buffered(message) => {
+                matching_full = self
+                    .needs_message_contents()
+                    .then(|| message.matching_message())
+                    .flatten();
+                CompleteMessage::Buffered {
+                    message,
+                    matching_full: matching_full.as_deref(),
+                }
+            }
+            ResumeInput::Streamed(message) => {
+                if continuation.requirements.needs_body_contents {
+                    return Err(EvalError::BodyWasNotBuffered);
+                }
+                CompleteMessage::Streamed(message)
+            }
+            ResumeInput::Mapped(message) => message
+                .complete_message(self.needs_message_contents())
+                .ok_or(EvalError::BodyWasNotBuffered)?,
+        };
         if continuation.frames.is_empty() && !continuation.restart {
             return Err(EvalError::BodyWasNotBuffered);
         }
@@ -362,6 +326,12 @@ impl ExecutionPlan {
             original_delivered: execution.original_delivered,
         })
     }
+}
+
+enum ResumeInput<'a> {
+    Buffered(&'a Message),
+    Streamed(&'a StreamedMessage),
+    Mapped(MappedMessageInput<'a>),
 }
 
 impl CompiledSequence {
