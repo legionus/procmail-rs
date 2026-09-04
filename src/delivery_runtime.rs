@@ -176,7 +176,7 @@ impl DeliveryRuntime {
         let matching_raw = matching_staged.as_ref().map(|message| message.as_bytes());
         let matching = matching_header
             .as_deref()
-            .map(|header| MatchingMessage::new(header, matching_raw));
+            .map(|header| MatchingMessage::from_normalized_parts(header, matching_raw));
 
         if execution.requires_ordered_delivery() {
             let command_runner = CommandRunner::new(self.limits);

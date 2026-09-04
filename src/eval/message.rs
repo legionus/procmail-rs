@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use crate::config::ActionInput;
+use crate::config::{ActionInput, ConditionInput};
 use crate::message::{Message, StreamedMessage};
 
 #[derive(Debug, Clone, Copy)]
@@ -11,12 +11,36 @@ pub struct MatchingMessage<'a> {
 }
 
 impl<'a> MatchingMessage<'a> {
-    pub fn new(header: &'a [u8], full: Option<&'a [u8]>) -> Self {
+    pub fn from_normalized_parts(header: &'a [u8], full: Option<&'a [u8]>) -> Self {
         Self { header, full }
     }
 
     pub(super) fn into_parts(self) -> (&'a [u8], Option<&'a [u8]>) {
         (self.header, self.full)
+    }
+}
+
+#[derive(Debug)]
+pub struct PreparedMatchingMessage {
+    full: Option<Vec<u8>>,
+}
+
+impl PreparedMatchingMessage {
+    pub fn new(message: &Message, needs_full: bool) -> Self {
+        Self {
+            full: needs_full.then(|| message.matching_message()).flatten(),
+        }
+    }
+
+    pub fn views<'a>(&'a self, message: &'a Message) -> MatchingMessage<'a> {
+        MatchingMessage::from_normalized_parts(message.matching_header(), self.full.as_deref())
+    }
+
+    pub(super) fn complete<'a>(&'a self, message: &'a Message) -> CompleteMessage<'a> {
+        CompleteMessage::Buffered {
+            message,
+            matching_full: self.full.as_deref(),
+        }
     }
 }
 
@@ -92,7 +116,7 @@ impl ExternalActionInput<'_> {
 #[derive(Debug)]
 pub(super) struct OwnedCompleteMessage {
     pub(super) message: Message,
-    pub(super) matching_full: Option<Vec<u8>>,
+    pub(super) matching: PreparedMatchingMessage,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,7 +156,7 @@ pub(super) fn current_ordered_message<'a>(
     match replacement {
         Some(replacement) => CompleteMessage::Buffered {
             message: &replacement.message,
-            matching_full: replacement.matching_full.as_deref(),
+            matching_full: replacement.matching.full.as_deref(),
         },
         None => original,
     }
@@ -187,6 +211,22 @@ impl<'a> CompleteMessage<'a> {
         }
     }
 
+    pub(super) fn program_input(self, input: ConditionInput) -> Option<&'a [u8]> {
+        match input {
+            ConditionInput::Headers => Some(self.raw_header()),
+            ConditionInput::Body => self.body(),
+            ConditionInput::Message => self.raw(),
+        }
+    }
+
+    pub(super) fn matching_input(self, input: ConditionInput) -> Option<&'a [u8]> {
+        match input {
+            ConditionInput::Headers => Some(self.header_bytes()),
+            ConditionInput::Body => self.body(),
+            ConditionInput::Message => self.full(),
+        }
+    }
+
     pub(super) fn header_bytes(self) -> &'a [u8] {
         match self {
             Self::Buffered { message, .. } => message.matching_header(),
@@ -231,3 +271,7 @@ impl<'a> CompleteMessage<'a> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "message_tests.rs"]
+mod tests;

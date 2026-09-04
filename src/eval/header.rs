@@ -242,15 +242,9 @@ impl ExecutionPlan {
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
         let mut execution = FanoutPlanState::default();
-        let matching_full = self
-            .needs_message_contents()
-            .then(|| message.matching_message())
-            .flatten();
+        let matching = PreparedMatchingMessage::new(message, self.needs_message_contents());
         self.root.plan_complete(
-            CompleteMessage::Buffered {
-                message,
-                matching_full: matching_full.as_deref(),
-            },
+            matching.complete(message),
             &mut RuntimeVariables::default(),
             &mut NoTrace,
             &mut execution,
@@ -269,17 +263,11 @@ impl ExecutionPlan {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
-        let matching_full;
+        let matching;
         let message = match input {
             ResumeInput::Buffered(message) => {
-                matching_full = self
-                    .needs_message_contents()
-                    .then(|| message.matching_message())
-                    .flatten();
-                CompleteMessage::Buffered {
-                    message,
-                    matching_full: matching_full.as_deref(),
-                }
+                matching = PreparedMatchingMessage::new(message, self.needs_message_contents());
+                matching.complete(message)
             }
             ResumeInput::Streamed(message) => {
                 if continuation.requirements.needs_body_contents {

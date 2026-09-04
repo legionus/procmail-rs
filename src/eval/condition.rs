@@ -365,17 +365,25 @@ impl CompiledCondition {
                 })?;
                 return resolved.matches_complete(message, runtime);
             }
-            CompiledConditionKind::HeaderRegex(regex) => {
-                self.regex_matches(regex, message.header_bytes(), runtime)?
-            }
+            CompiledConditionKind::HeaderRegex(regex) => self.regex_matches(
+                regex,
+                message
+                    .matching_input(ConditionInput::Headers)
+                    .ok_or(EvalError::BodyWasNotBuffered)?,
+                runtime,
+            )?,
             CompiledConditionKind::BodyRegex(regex) => self.regex_matches(
                 regex,
-                message.body().ok_or(EvalError::BodyWasNotBuffered)?,
+                message
+                    .matching_input(ConditionInput::Body)
+                    .ok_or(EvalError::BodyWasNotBuffered)?,
                 runtime,
             )?,
             CompiledConditionKind::MessageRegex(regex) => self.regex_matches(
                 regex,
-                message.full().ok_or(EvalError::BodyWasNotBuffered)?,
+                message
+                    .matching_input(ConditionInput::Message)
+                    .ok_or(EvalError::BodyWasNotBuffered)?,
                 runtime,
             )?,
             CompiledConditionKind::VariableRegex { name, regex } => {

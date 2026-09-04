@@ -2,8 +2,8 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use crate::config::{
-    ActionInput, Assignment, AssignmentTarget, ConditionInput, Config, ContinuationMode,
-    ControlFlow, Destination, OutputEnding, PipeAction, RecipeOptions,
+    ActionInput, Assignment, AssignmentTarget, Config, ContinuationMode, ControlFlow, Destination,
+    OutputEnding, PipeAction, RecipeOptions,
 };
 use crate::limits::MessageLimits;
 use crate::message::{Message, MessageHead, StreamedMessage};
@@ -37,7 +37,9 @@ pub use explanation::{
 };
 use header::FanoutPlanState;
 use message::{CompleteMessage, OwnedCompleteMessage, current_ordered_message};
-pub use message::{ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage};
+pub use message::{
+    ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage, PreparedMatchingMessage,
+};
 pub use result::{
     CompletionState, Continuation, DeliveryAttemptError, DeliveryOutcome, DeliveryPlan, EvalError,
     HeaderEvaluation, OrderedExecutionError, PlannedDelivery,

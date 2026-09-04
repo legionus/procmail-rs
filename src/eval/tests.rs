@@ -96,14 +96,8 @@ fn evaluate(
     delivery: &mut impl Delivery,
 ) -> Result<Outcome, EvalError> {
     let plan = ExecutionPlan::compile(config);
-    let matching_full = plan
-        .needs_message_contents()
-        .then(|| message.matching_message())
-        .flatten();
-    let matching = Some(MatchingMessage::new(
-        message.matching_header(),
-        matching_full.as_deref(),
-    ));
+    let prepared_matching = PreparedMatchingMessage::new(message, plan.needs_message_contents());
+    let matching = Some(prepared_matching.views(message));
     let mut runtime = RuntimeVariables::default();
     let mut trace = NoTrace;
     let mut deliver = |destination: &Destination,
@@ -1886,7 +1880,10 @@ fn program_condition_uses_child_status_before_entering_block() {
             MappedMessageInput::new(
                 raw,
                 b"Subject: program\n condition\n\n".len(),
-                Some(MatchingMessage::new(matching_header, None)),
+                Some(MatchingMessage::from_normalized_parts(
+                    matching_header,
+                    None,
+                )),
             ),
             &mut runtime,
             ExecutionServices::new(

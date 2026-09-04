@@ -9,7 +9,7 @@ use std::path::Path;
 use procmail_rs::config::{self, Destination, OutputEnding};
 use procmail_rs::eval::{
     DeliveryAttemptError, DeliveryOutcome, ExecutionPlan, ExecutionServices, MappedMessageInput,
-    MatchingMessage,
+    PreparedMatchingMessage,
 };
 use procmail_rs::limits::MessageLimits;
 use procmail_rs::message::Message;
@@ -78,14 +78,8 @@ fn evaluate(
     let plan = ExecutionPlan::compile(config);
     let mut runtime = RuntimeVariables::default();
     let mut trace = NoTrace;
-    let matching_full = plan
-        .needs_message_contents()
-        .then(|| message.matching_message())
-        .flatten();
-    let matching = Some(MatchingMessage::new(
-        message.matching_header(),
-        matching_full.as_deref(),
-    ));
+    let prepared_matching = PreparedMatchingMessage::new(message, plan.needs_message_contents());
+    let matching = Some(prepared_matching.views(message));
     let mut delivery = |destination: &Destination,
                         _: &[u8],
                         _: OutputEnding,

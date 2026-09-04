@@ -30,11 +30,8 @@ type OrderedActionResult<E> = Result<(ActionExecution, SequenceControl), Ordered
 
 impl<'a, E, T> OrderedTreeExecution<'a, E, T> {
     fn replace_message(&mut self, message: Message) {
-        let matching_full = message.matching_message();
-        self.replacement = Some(OwnedCompleteMessage {
-            message,
-            matching_full,
-        });
+        let matching = PreparedMatchingMessage::new(&message, true);
+        self.replacement = Some(OwnedCompleteMessage { message, matching });
     }
 
     fn action_succeeded(&mut self, control: SequenceControl) -> OrderedActionResult<E> {
@@ -180,13 +177,10 @@ impl CompiledNode {
             )?;
             let condition = resolved.as_ref().unwrap_or(condition);
             let matched = if let Some((command, input)) = condition.program() {
-                let input = match input {
-                    ConditionInput::Headers => Some(message.raw_header()),
-                    ConditionInput::Body => message.body(),
-                    ConditionInput::Message => message.raw(),
-                }
-                .ok_or(EvalError::BodyWasNotBuffered)
-                .map_err(OrderedExecutionError::Evaluation)?;
+                let input = message
+                    .program_input(input)
+                    .ok_or(EvalError::BodyWasNotBuffered)
+                    .map_err(OrderedExecutionError::Evaluation)?;
                 let Some(executor) = context.external_condition.as_deref_mut() else {
                     return Err(OrderedExecutionError::Evaluation(
                         EvalError::ExternalConditionUnsupported {
