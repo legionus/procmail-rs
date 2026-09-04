@@ -236,7 +236,7 @@ impl DeliveryRuntime {
                 .require_complete()
                 .map_err(|error| OperationalError::Internal(error.to_string()))?;
             let outcome = execution
-                .execute_mapped_ordered_with_services(
+                .execute_ordered(
                     MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                     runtime,
                     services,

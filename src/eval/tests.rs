@@ -121,7 +121,7 @@ fn evaluate(
     };
     let services = ExecutionServices::new(&mut deliver, &mut trace);
     let outcome = plan
-        .execute_mapped_ordered_with_services(
+        .execute_ordered(
             MappedMessageInput::new(message.as_bytes(), message.header().len(), matching),
             &mut runtime,
             services,
@@ -211,15 +211,16 @@ fn ordered_header_edit_updates_later_delivery_bytes() {
     let mut runtime = RuntimeVariables::default();
     let mut delivered = Vec::new();
 
-    plan.execute_mapped_ordered_with_trace(
-        raw,
-        b"Subject: test\n\n".len(),
+    plan.execute_ordered(
+        MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
         &mut runtime,
-        &mut NoTrace,
-        &mut |destination, message, _, _, _, _| {
-            delivered.push((destination.path().to_owned(), message.to_vec()));
-            Ok::<_, DeliveryAttemptError<&str>>(())
-        },
+        ExecutionServices::new(
+            &mut |destination, message, _, _, _, _| {
+                delivered.push((destination.path().to_owned(), message.to_vec()));
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            &mut NoTrace,
+        ),
     )
     .unwrap();
 
@@ -243,18 +244,20 @@ fn external_action_observes_edited_headers() {
     let mut runtime = RuntimeVariables::default();
     let mut calls = 0usize;
 
-    plan.execute_mapped_ordered_with_external_trace(
+    plan.execute_ordered(
         MappedMessageInput::new(raw, b"X-State: old\n\n".len(), None),
         &mut runtime,
-        &mut NoTrace,
-        &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
-        &mut |_, _, _, input, _, _| {
+        ExecutionServices::new(
+            &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+            &mut NoTrace,
+        )
+        .with_external_action(&mut |_, _, _, input, _, _| {
             calls += 1;
             assert_eq!(input.header(), b"X-State: new\n\n");
             assert_eq!(input.body(), b"body");
             assert_eq!(input.selected(), b"X-State: new\n\nbody");
             Ok::<_, DeliveryAttemptError<&str>>(None)
-        },
+        }),
     )
     .unwrap();
 
@@ -332,15 +335,16 @@ fn runtime_shell_condition_reparses_match_as_a_size_test() {
     let mut runtime = RuntimeVariables::default();
     let mut paths = Vec::new();
 
-    plan.execute_mapped_ordered_with_trace(
-        raw,
-        b"X-Condition: < 128\n\n".len(),
+    plan.execute_ordered(
+        MappedMessageInput::new(raw, b"X-Condition: < 128\n\n".len(), None),
         &mut runtime,
-        &mut NoTrace,
-        &mut |destination, _, _, _, _, _| {
-            paths.push(destination.path().to_owned());
-            Ok::<_, DeliveryAttemptError<&str>>(())
-        },
+        ExecutionServices::new(
+            &mut |destination, _, _, _, _, _| {
+                paths.push(destination.path().to_owned());
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            &mut NoTrace,
+        ),
     )
     .unwrap();
 
@@ -361,25 +365,27 @@ fn runtime_shell_condition_can_reparse_to_a_program_test() {
     let mut paths = Vec::new();
     let mut commands = Vec::new();
 
-    plan.execute_mapped_ordered_with_processes_trace(
+    plan.execute_ordered(
         MappedMessageInput::new(raw, header_len, None),
         &mut runtime,
-        &mut NoTrace,
-        &mut |destination, _, _, _, _, _| {
-            paths.push(destination.path().to_owned());
-            Ok::<_, DeliveryAttemptError<&str>>(())
-        },
-        (
-            &mut |command, input, _, _| {
-                commands.push(command.to_owned());
-                assert_eq!(input, &raw[..header_len]);
-                Ok::<_, DeliveryAttemptError<&str>>(true)
+        ExecutionServices::new(
+            &mut |destination, _, _, _, _, _| {
+                paths.push(destination.path().to_owned());
+                Ok::<_, DeliveryAttemptError<&str>>(())
             },
-            &mut |_, _, _, _, _, _| panic!("recipe contains no pipe action"),
-            &mut |_, _, _, _, _, _, _| panic!("recipe contains no command capture"),
-            &mut |_, _| Ok::<_, &str>(()),
-            &mut |_, _| Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(())),
-        ),
+            &mut NoTrace,
+        )
+        .with_external_condition(&mut |command, input, _, _| {
+            commands.push(command.to_owned());
+            assert_eq!(input, &raw[..header_len]);
+            Ok::<_, DeliveryAttemptError<&str>>(true)
+        })
+        .with_external_action(&mut |_, _, _, _, _, _| panic!("recipe contains no pipe action"))
+        .with_capture(&mut |_, _, _, _, _, _, _| panic!("recipe contains no command capture"))
+        .with_global_lock(&mut |_, _| Ok::<_, &str>(()))
+        .with_local_lock(&mut |_, _| {
+            Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(()))
+        }),
     )
     .unwrap();
 
@@ -439,12 +445,14 @@ fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
     let mut trace = NoTrace;
     let mut commands = Vec::new();
 
-    plan.execute_mapped_ordered_with_capture_trace(
+    plan.execute_ordered(
         MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
         &mut runtime,
-        &mut trace,
-        &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
-        &mut |command, input, _, options, _, _, _| {
+        ExecutionServices::new(
+            &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+            &mut trace,
+        )
+        .with_capture(&mut |command, input, _, options, _, _, _| {
             commands.push(command.to_owned());
             assert_eq!(input, raw);
             assert_eq!(options, None);
@@ -458,7 +466,7 @@ fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
                 crate::external_filter::InputWrite::Complete,
                 crate::external_filter::ChildExit::Failure,
             ))
-        },
+        }),
     )
     .unwrap();
 
@@ -485,15 +493,17 @@ fn destination_command_substitution_uses_complete_message_and_runtime_values() {
     let mut runtime = RuntimeVariables::default();
     let mut delivered = None;
 
-    plan.execute_mapped_ordered_with_capture_trace(
+    plan.execute_ordered(
         MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
         &mut runtime,
-        &mut NoTrace,
-        &mut |destination, _, _, _, _, _| {
-            delivered = Some(destination.path().to_owned());
-            Ok::<_, DeliveryAttemptError<&str>>(())
-        },
-        &mut |command, input, _, options, limit, _, _| {
+        ExecutionServices::new(
+            &mut |destination, _, _, _, _, _| {
+                delivered = Some(destination.path().to_owned());
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            &mut NoTrace,
+        )
+        .with_capture(&mut |command, input, _, options, limit, _, _| {
             assert_eq!(command, "choose");
             assert_eq!(input, raw);
             assert_eq!(options, None);
@@ -503,7 +513,7 @@ fn destination_command_substitution_uses_complete_message_and_runtime_values() {
                 crate::external_filter::InputWrite::Complete,
                 crate::external_filter::ChildExit::Success,
             ))
-        },
+        }),
     )
     .unwrap();
 
@@ -520,22 +530,24 @@ fn destination_command_output_obeys_active_linebuf() {
         let plan = ExecutionPlan::compile(&config);
         let mut runtime = RuntimeVariables::default();
         let mut delivered = false;
-        let result = plan.execute_mapped_ordered_with_capture_trace(
+        let result = plan.execute_ordered(
             MappedMessageInput::new(b"X: y\n\nbody", 6, None),
             &mut runtime,
-            &mut NoTrace,
-            &mut |_, _, _, _, _, _| {
-                delivered = true;
-                Ok::<_, DeliveryAttemptError<&str>>(())
-            },
-            &mut |_, _, _, _, limit, _, _| {
+            ExecutionServices::new(
+                &mut |_, _, _, _, _, _| {
+                    delivered = true;
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+                &mut NoTrace,
+            )
+            .with_capture(&mut |_, _, _, _, limit, _, _| {
                 assert_eq!(limit, 128);
                 Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
                     vec![b'x'; length],
                     crate::external_filter::InputWrite::Complete,
                     crate::external_filter::ChildExit::Success,
                 ))
-            },
+            }),
         );
 
         if length <= 128 {
@@ -561,21 +573,23 @@ fn destination_command_rejects_non_utf8_output_before_delivery() {
         .unwrap();
     let plan = ExecutionPlan::compile(&config);
     let mut delivered = false;
-    let result = plan.execute_mapped_ordered_with_capture_trace(
+    let result = plan.execute_ordered(
         MappedMessageInput::new(b"X: y\n\nbody", 6, None),
         &mut RuntimeVariables::default(),
-        &mut NoTrace,
-        &mut |_, _, _, _, _, _| {
-            delivered = true;
-            Ok::<_, DeliveryAttemptError<&str>>(())
-        },
-        &mut |_, _, _, _, _, _, _| {
+        ExecutionServices::new(
+            &mut |_, _, _, _, _, _| {
+                delivered = true;
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            &mut NoTrace,
+        )
+        .with_capture(&mut |_, _, _, _, _, _, _| {
             Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
                 b"bad-\xff-path".to_vec(),
                 crate::external_filter::InputWrite::Complete,
                 crate::external_filter::ChildExit::Success,
             ))
-        },
+        }),
     );
 
     assert_eq!(
@@ -597,15 +611,17 @@ fn ordered_capture_uses_selected_area_strips_one_lf_and_continues() {
     let mut delivered = false;
 
     let outcome = plan
-        .execute_mapped_ordered_with_capture_trace(
+        .execute_ordered(
             MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
             &mut runtime,
-            &mut trace,
-            &mut |_, _, _, _, _, _| {
-                delivered = true;
-                Ok::<_, DeliveryAttemptError<&str>>(())
-            },
-            &mut |command, input, _, options, _, _, _| {
+            ExecutionServices::new(
+                &mut |_, _, _, _, _, _| {
+                    delivered = true;
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+                &mut trace,
+            )
+            .with_capture(&mut |command, input, _, options, _, _, _| {
                 assert_eq!(command, "capture");
                 assert_eq!(input, b"Subject: test\n\n");
                 assert_eq!(
@@ -617,7 +633,7 @@ fn ordered_capture_uses_selected_area_strips_one_lf_and_continues() {
                     crate::external_filter::InputWrite::Complete,
                     crate::external_filter::ChildExit::Success,
                 ))
-            },
+            }),
         )
         .unwrap();
 
@@ -785,12 +801,14 @@ fn failed_backquoted_fragment_does_not_publish_a_partial_value() {
     let raw = b"Subject: test\n\nbody";
     let mut runtime = RuntimeVariables::default();
 
-    let result = plan.execute_mapped_ordered_with_capture_trace(
+    let result = plan.execute_ordered(
         MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
         &mut runtime,
-        &mut NoTrace,
-        &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
-        &mut |command, _, _, _, _, _, _| {
+        ExecutionServices::new(
+            &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+            &mut NoTrace,
+        )
+        .with_capture(&mut |command, _, _, _, _, _, _| {
             if command == "first" {
                 Ok(CapturedCommand::new(
                     b"first-output".to_vec(),
@@ -800,7 +818,7 @@ fn failed_backquoted_fragment_does_not_publish_a_partial_value() {
             } else {
                 Err(DeliveryAttemptError::Recoverable("second failed"))
             }
-        },
+        }),
     );
 
     assert_eq!(
@@ -1729,19 +1747,20 @@ fn ordered_tree_binds_runtime_values_between_actual_actions() {
     let mut attempted = Vec::new();
 
     let outcome = plan
-        .execute_mapped_ordered_with_trace(
-            raw,
-            b"Subject: test\n\n".len(),
+        .execute_ordered(
+            MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
             &mut runtime,
-            &mut trace,
-            &mut |destination, _, _, _, runtime, _| {
-                let destination = destination
-                    .resolve_with(|name| runtime.get(name).map(str::to_owned))
-                    .unwrap();
-                attempted.push(destination.path().to_owned());
-                runtime.set("LASTFOLDER", destination.path());
-                Ok::<_, DeliveryAttemptError<&str>>(())
-            },
+            ExecutionServices::new(
+                &mut |destination, _, _, _, runtime, _| {
+                    let destination = destination
+                        .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                        .unwrap();
+                    attempted.push(destination.path().to_owned());
+                    runtime.set("LASTFOLDER", destination.path());
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+                &mut trace,
+            ),
         )
         .unwrap();
 
@@ -1760,19 +1779,20 @@ fn ordered_tree_uses_actual_failure_for_lowercase_chain() {
     let mut attempted = Vec::new();
 
     let outcome = plan
-        .execute_mapped_ordered_with_trace(
-            raw,
-            b"Subject: test\n\n".len(),
+        .execute_ordered(
+            MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
             &mut runtime,
-            &mut trace,
-            &mut |destination, _, _, _, _, _| {
-                attempted.push(destination.path().to_owned());
-                if destination.path() == "primary" {
-                    Err(DeliveryAttemptError::Recoverable("primary failed"))
-                } else {
-                    Ok(())
-                }
-            },
+            ExecutionServices::new(
+                &mut |destination, _, _, _, _, _| {
+                    attempted.push(destination.path().to_owned());
+                    if destination.path() == "primary" {
+                        Err(DeliveryAttemptError::Recoverable("primary failed"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut trace,
+            ),
         )
         .unwrap_err();
 
@@ -1792,19 +1812,20 @@ fn ordered_tree_uses_actual_failure_for_error_handler() {
     let mut attempted = Vec::new();
 
     let outcome = plan
-        .execute_mapped_ordered_with_trace(
-            raw,
-            b"Subject: test\n\n".len(),
+        .execute_ordered(
+            MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
             &mut runtime,
-            &mut trace,
-            &mut |destination, _, _, _, _, _| {
-                attempted.push(destination.path().to_owned());
-                if destination.path() == "primary" {
-                    Err(DeliveryAttemptError::Recoverable("primary failed"))
-                } else {
-                    Ok(())
-                }
-            },
+            ExecutionServices::new(
+                &mut |destination, _, _, _, _, _| {
+                    attempted.push(destination.path().to_owned());
+                    if destination.path() == "primary" {
+                        Err(DeliveryAttemptError::Recoverable("primary failed"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut trace,
+            ),
         )
         .unwrap();
 
@@ -1824,21 +1845,23 @@ fn successful_filter_replaces_bytes_for_later_conditions_and_delivery() {
     let mut external_calls = 0usize;
 
     let outcome = plan
-        .execute_mapped_ordered_with_external_trace(
+        .execute_ordered(
             MappedMessageInput::new(original, b"X-State: old\n\n".len(), None),
             &mut runtime,
-            &mut trace,
-            &mut |destination, message, _, _, _, _| {
-                delivered.push((destination.path().to_owned(), message.to_vec()));
-                Ok::<_, DeliveryAttemptError<&str>>(())
-            },
-            &mut |action, options, _, input, _, _| {
+            ExecutionServices::new(
+                &mut |destination, message, _, _, _, _| {
+                    delivered.push((destination.path().to_owned(), message.to_vec()));
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+                &mut trace,
+            )
+            .with_external_action(&mut |action, options, _, input, _, _| {
                 external_calls += 1;
                 assert_eq!(action.command, "rewrite");
                 assert_eq!(options.action_mode, crate::config::ActionMode::Filter);
                 assert_eq!(input.selected(), original);
                 Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(replacement.to_vec())))
-            },
+            }),
         )
         .unwrap();
 
@@ -1859,36 +1882,36 @@ fn program_condition_uses_child_status_before_entering_block() {
     let mut condition_calls = 0usize;
 
     let outcome = plan
-        .execute_mapped_ordered_with_processes_trace(
+        .execute_ordered(
             MappedMessageInput::new(
                 raw,
                 b"Subject: program\n condition\n\n".len(),
                 Some(MatchingMessage::new(matching_header, None)),
             ),
             &mut runtime,
-            &mut trace,
-            &mut |destination, _, _, _, _, _| {
-                delivered.push(destination.path().to_owned());
-                Ok::<_, DeliveryAttemptError<&str>>(())
-            },
-            (
-                &mut |command, input, _, _| {
-                    condition_calls += 1;
-                    assert_eq!(command, "test ! -e $LISTDIR");
-                    assert_eq!(input, b"Subject: program\n condition\n\n");
-                    Ok::<_, DeliveryAttemptError<&str>>(true)
+            ExecutionServices::new(
+                &mut |destination, _, _, _, _, _| {
+                    delivered.push(destination.path().to_owned());
+                    Ok::<_, DeliveryAttemptError<&str>>(())
                 },
-                &mut |_, _, _, _, _, _| {
-                    panic!("recipe contains no pipe action");
-                },
-                &mut |_, _, _, _, _, _, _| {
-                    panic!("recipe contains no command capture");
-                },
-                &mut |_, _| Ok::<_, &str>(()),
-                &mut |_, _| {
-                    Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(()))
-                },
-            ),
+                &mut trace,
+            )
+            .with_external_condition(&mut |command, input, _, _| {
+                condition_calls += 1;
+                assert_eq!(command, "test ! -e $LISTDIR");
+                assert_eq!(input, b"Subject: program\n condition\n\n");
+                Ok::<_, DeliveryAttemptError<&str>>(true)
+            })
+            .with_external_action(&mut |_, _, _, _, _, _| {
+                panic!("recipe contains no pipe action");
+            })
+            .with_capture(&mut |_, _, _, _, _, _, _| {
+                panic!("recipe contains no command capture");
+            })
+            .with_global_lock(&mut |_, _| Ok::<_, &str>(()))
+            .with_local_lock(&mut |_, _| {
+                Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(()))
+            }),
         )
         .unwrap();
 
@@ -1923,39 +1946,39 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
     let mut trace = NoTrace;
 
     let outcome = plan
-        .execute_mapped_ordered_with_processes_trace(
+        .execute_ordered(
             MappedMessageInput::new(raw, b"Subject: lock\n\n".len(), None),
             &mut runtime,
-            &mut trace,
-            &mut |destination, message, _, _, runtime, _| {
-                assert!(observed.get());
-                assert_eq!(
-                    destination
-                        .resolve_with(|name| runtime.get(name).map(str::to_owned))
-                        .unwrap(),
-                    Destination::Maildir("/mail/selected".into())
-                );
-                assert_eq!(message, raw);
-                Ok::<_, DeliveryAttemptError<&str>>(())
-            },
-            (
-                &mut |_, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(true),
-                &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(None),
-                &mut |_, _, _, _, _, _, _| {
-                    panic!("recipe contains no command capture");
+            ExecutionServices::new(
+                &mut |destination, message, _, _, runtime, _| {
+                    assert!(observed.get());
+                    assert_eq!(
+                        destination
+                            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                            .unwrap(),
+                        Destination::Maildir("/mail/selected".into())
+                    );
+                    assert_eq!(message, raw);
+                    Ok::<_, DeliveryAttemptError<&str>>(())
                 },
-                &mut |_, _| Ok::<_, &str>(()),
-                &mut |path, runtime| {
-                    assert_eq!(path, "/mail/block.lock");
-                    assert_eq!(runtime.get("LOCKMETHOD"), Some("flock"));
-                    assert_eq!(runtime.get("LOCKTIMEOUT"), Some("7"));
-                    assert_eq!(runtime.get("UMASK"), Some("077"));
-                    assert!(!held.replace(true));
-                    Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(Guard(
-                        held.clone(),
-                    )))
-                },
-            ),
+                &mut trace,
+            )
+            .with_external_condition(&mut |_, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(true))
+            .with_external_action(&mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(None))
+            .with_capture(&mut |_, _, _, _, _, _, _| {
+                panic!("recipe contains no command capture");
+            })
+            .with_global_lock(&mut |_, _| Ok::<_, &str>(()))
+            .with_local_lock(&mut |path, runtime| {
+                assert_eq!(path, "/mail/block.lock");
+                assert_eq!(runtime.get("LOCKMETHOD"), Some("flock"));
+                assert_eq!(runtime.get("LOCKTIMEOUT"), Some("7"));
+                assert_eq!(runtime.get("UMASK"), Some("077"));
+                assert!(!held.replace(true));
+                Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(Guard(
+                    held.clone(),
+                )))
+            }),
         )
         .unwrap();
 
@@ -1973,18 +1996,20 @@ fn failed_filter_keeps_old_message_for_error_handler() {
     let mut delivered = Vec::new();
 
     let outcome = plan
-        .execute_mapped_ordered_with_external_trace(
+        .execute_ordered(
             MappedMessageInput::new(original, b"Subject: original\n\n".len(), None),
             &mut runtime,
-            &mut trace,
-            &mut |destination, message, _, _, _, _| {
-                delivered.push((destination.path().to_owned(), message.to_vec()));
-                Ok::<_, DeliveryAttemptError<&str>>(())
-            },
-            &mut |_, _, _, input, _, _| {
+            ExecutionServices::new(
+                &mut |destination, message, _, _, _, _| {
+                    delivered.push((destination.path().to_owned(), message.to_vec()));
+                    Ok::<_, DeliveryAttemptError<&str>>(())
+                },
+                &mut trace,
+            )
+            .with_external_action(&mut |_, _, _, input, _, _| {
                 assert_eq!(input.selected(), original);
                 Err(DeliveryAttemptError::Recoverable("filter failed"))
-            },
+            }),
         )
         .unwrap();
 
@@ -2006,17 +2031,19 @@ fn pipe_action_receives_only_its_selected_message_area() {
         let mut trace = NoTrace;
 
         let outcome = plan
-            .execute_mapped_ordered_with_external_trace(
+            .execute_ordered(
                 MappedMessageInput::new(original, b"Subject: original\n\n".len(), None),
                 &mut runtime,
-                &mut trace,
-                &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
-                &mut |_, _, _, input, _, _| {
+                ExecutionServices::new(
+                    &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+                    &mut trace,
+                )
+                .with_external_action(&mut |_, _, _, input, _, _| {
                     assert_eq!(input.selected(), expected, "flags {flags}");
                     Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(
                         original.to_vec(),
                     )))
-                },
+                }),
             )
             .unwrap();
         assert!(outcome.original_delivered());
@@ -2032,15 +2059,16 @@ fn ordered_tree_does_not_handle_failure_after_publication() {
     let mut attempted = Vec::new();
 
     let error = plan
-        .execute_mapped_ordered_with_trace(
-            raw,
-            b"Subject: test\n\n".len(),
+        .execute_ordered(
+            MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
             &mut runtime,
-            &mut trace,
-            &mut |destination, _, _, _, _, _| {
-                attempted.push(destination.path().to_owned());
-                Err(DeliveryAttemptError::Fatal("durability failed"))
-            },
+            ExecutionServices::new(
+                &mut |destination, _, _, _, _, _| {
+                    attempted.push(destination.path().to_owned());
+                    Err(DeliveryAttemptError::Fatal("durability failed"))
+                },
+                &mut trace,
+            ),
         )
         .unwrap_err();
 

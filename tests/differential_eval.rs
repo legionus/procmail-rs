@@ -97,7 +97,7 @@ fn evaluate(
             .map_err(DeliveryAttemptError::Recoverable)
     };
     let services = ExecutionServices::new(&mut delivery, &mut trace);
-    plan.execute_mapped_ordered_with_services(
+    plan.execute_ordered(
         MappedMessageInput::new(message.as_bytes(), message.header().len(), matching),
         &mut runtime,
         services,
