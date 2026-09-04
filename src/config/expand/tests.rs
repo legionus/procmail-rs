@@ -834,6 +834,26 @@ fn resolves_runtime_defaults_without_rescanning_values() {
 }
 
 #[test]
+fn resolves_deferred_logfile_against_the_active_maildir() {
+    let config = parse("MAILDIR=/mail\nNAME=`printf logs/run`\nLOGFILE=$NAME\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let Statement::Assignment(logfile) = &config.statements[2] else {
+        panic!("expected LOGFILE assignment");
+    };
+
+    let resolved = logfile
+        .resolve_with(|name| match name {
+            "NAME" => Some("logs/run".to_owned()),
+            "MAILDIR" => Some("/mail".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(resolved, "/mail/logs/run");
+}
+
+#[test]
 fn bounds_expanded_paths_before_allocation_growth() {
     let source = format!(
         "A={}\nB={}\n:0\nmaildir:$A$B\n",

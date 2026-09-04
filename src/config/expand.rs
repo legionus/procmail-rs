@@ -33,6 +33,122 @@ struct PreparationContext<'a> {
     phase: PreparationPhase,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathPurpose {
+    Maildir,
+    Mbox,
+    File,
+    Discard,
+    Lockfile,
+    Logfile,
+    RcFile,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PathResolver<'a> {
+    purpose: PathPurpose,
+    description: &'static str,
+    line: usize,
+    base: Option<&'a str>,
+    typed_destination: bool,
+}
+
+impl<'a> PathResolver<'a> {
+    fn new(
+        purpose: PathPurpose,
+        description: &'static str,
+        line: usize,
+        base: Option<&'a str>,
+    ) -> Self {
+        Self {
+            purpose,
+            description,
+            line,
+            base,
+            typed_destination: true,
+        }
+    }
+
+    fn destination(
+        purpose: PathPurpose,
+        line: usize,
+        base: Option<&'a str>,
+        typed_destination: bool,
+    ) -> Self {
+        let description = match purpose {
+            PathPurpose::Maildir => "Maildir destination",
+            PathPurpose::Mbox => "mbox destination",
+            PathPurpose::File => "file destination",
+            PathPurpose::Discard => "discard destination",
+            _ => "destination",
+        };
+        Self {
+            purpose,
+            description,
+            line,
+            base,
+            typed_destination,
+        }
+    }
+
+    fn evaluate(
+        self,
+        expression: &ShellExpression,
+        lookup: &mut impl FnMut(&str) -> Option<String>,
+    ) -> Result<String, ExpansionError> {
+        let source =
+            evaluate_with_linebuf(expression, self.line, MAX_PATH_EXPRESSION_LEN, lookup)?.text;
+        self.resolve(&source)
+    }
+
+    fn resolve(self, source: &str) -> Result<String, ExpansionError> {
+        if source.is_empty() && self.allows_empty() {
+            return Ok(String::new());
+        }
+        if self.is_destination()
+            && !self.typed_destination
+            && source.bytes().any(|byte| byte.is_ascii_whitespace())
+        {
+            return Err(ExpansionError::new(
+                self.line,
+                "multiple unmarked mailbox destinations are not supported",
+            ));
+        }
+
+        // Validate only after the bounded join. Checking the relative spelling
+        // alone would miss unsafe components supplied by MAILDIR, while an
+        // ordinary path join could allocate beyond the path ceiling first.
+        let path = resolve_relative_path(source, self.base, self.line)?;
+        validate_filesystem_path(
+            &path,
+            self.line,
+            self.description,
+            self.purpose == PathPurpose::Maildir,
+        )?;
+        if self.purpose == PathPurpose::Discard && path != "/dev/null" {
+            return Err(ExpansionError::new(
+                self.line,
+                "discard destination must resolve exactly to /dev/null",
+            ));
+        }
+        Ok(path)
+    }
+
+    fn allows_empty(self) -> bool {
+        matches!(
+            self.purpose,
+            PathPurpose::Lockfile | PathPurpose::Logfile | PathPurpose::RcFile
+        )
+    }
+
+    fn is_destination(self) -> bool {
+        matches!(
+            self.purpose,
+            PathPurpose::Maildir | PathPurpose::Mbox | PathPurpose::File | PathPurpose::Discard
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpansionError {
     pub line: usize,
@@ -90,20 +206,14 @@ impl Assignment {
             _ => Ok(()),
         }
         .map_err(|message| ExpansionError::new(self.line, message))?;
-        if !matches!(
-            self.target,
-            AssignmentTarget::Maildir | AssignmentTarget::LockFile
-        ) {
-            return Ok(value);
-        }
+        let (purpose, description) = match self.target {
+            AssignmentTarget::Maildir => (PathPurpose::Maildir, "MAILDIR"),
+            AssignmentTarget::LockFile => (PathPurpose::Lockfile, "LOCKFILE"),
+            AssignmentTarget::LogFile => (PathPurpose::Logfile, "LOGFILE"),
+            _ => return Ok(value),
+        };
         let base = lookup("MAILDIR");
-        let value = resolve_relative_path(&value, base.as_deref(), self.line)?;
-        if self.target == AssignmentTarget::Maildir {
-            validate_filesystem_path(&value, self.line, "MAILDIR", true)?;
-        } else if !value.is_empty() {
-            validate_filesystem_path(&value, self.line, "LOCKFILE", false)?;
-        }
-        Ok(value)
+        PathResolver::new(purpose, description, self.line, base.as_deref()).resolve(&value)
     }
 }
 
@@ -119,20 +229,12 @@ impl RcFileExpression {
             parsed = parse_expression(&self.value, self.line)?;
             &parsed
         };
-        let value =
-            evaluate_with_linebuf(expression, self.line, MAX_PATH_EXPRESSION_LEN, &mut lookup)?
-                .text;
-        if value.is_empty() {
-            return Ok(value);
-        }
-
         // procmail treats MAILDIR as its current directory. Resolve against
         // its value at the moment the statement executes; when it is unset,
         // leave the path relative so the loader uses the process directory.
         let base = lookup("MAILDIR");
-        let value = resolve_relative_path(&value, base.as_deref(), self.line)?;
-        validate_filesystem_path(&value, self.line, "rc file", false)?;
-        Ok(value)
+        PathResolver::new(PathPurpose::RcFile, "rc file", self.line, base.as_deref())
+            .evaluate(expression, &mut lookup)
     }
 }
 
@@ -203,11 +305,11 @@ impl Destination {
         source: String,
         runtime_maildir: Option<&str>,
     ) -> Result<Self, ExpansionError> {
-        let (expression, description, allows_trailing_slash) = match self {
-            Self::Maildir(expression) => (expression, "Maildir destination", true),
-            Self::Mbox(expression) => (expression, "mbox destination", false),
-            Self::File(expression) => (expression, "file destination", false),
-            Self::Discard(expression) => (expression, "discard destination", false),
+        let (expression, purpose) = match self {
+            Self::Maildir(expression) => (expression, PathPurpose::Maildir),
+            Self::Mbox(expression) => (expression, PathPurpose::Mbox),
+            Self::File(expression) => (expression, PathPurpose::File),
+            Self::Discard(expression) => (expression, PathPurpose::Discard),
         };
         if !expression
             .expansion
@@ -219,19 +321,14 @@ impl Destination {
                 "destination has no command substitution",
             ));
         }
-        if !expression.typed_destination && source.bytes().any(|byte| byte.is_ascii_whitespace()) {
-            return Err(ExpansionError::new(
-                expression.line,
-                "multiple unmarked mailbox destinations are not supported",
-            ));
-        }
         let base = if expression.runtime_base {
             runtime_maildir
         } else {
             expression.base.as_deref()
         };
-        let path = resolve_relative_path(&source, base, expression.line)?;
-        validate_filesystem_path(&path, expression.line, description, allows_trailing_slash)?;
+        let path =
+            PathResolver::destination(purpose, expression.line, base, expression.typed_destination)
+                .resolve(&source)?;
         let resolved = PathExpression {
             source: path,
             base: None,
@@ -246,13 +343,7 @@ impl Destination {
             Self::Mbox(_) => Self::Mbox(resolved),
             Self::File(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
             Self::File(_) => Self::Mbox(resolved),
-            Self::Discard(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
-            Self::Discard(_) => {
-                return Err(ExpansionError::new(
-                    expression.line,
-                    "discard destination must resolve exactly to /dev/null",
-                ));
-            }
+            Self::Discard(_) => Self::Discard(resolved),
         })
     }
 
@@ -305,11 +396,11 @@ impl Destination {
         &self,
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, ExpansionError> {
-        let (expression, description, allows_trailing_slash) = match self {
-            Self::Maildir(expression) => (expression, "Maildir destination", true),
-            Self::Mbox(expression) => (expression, "mbox destination", false),
-            Self::File(expression) => (expression, "file destination", false),
-            Self::Discard(expression) => (expression, "discard destination", false),
+        let (expression, purpose) = match self {
+            Self::Maildir(expression) => (expression, PathPurpose::Maildir),
+            Self::Mbox(expression) => (expression, PathPurpose::Mbox),
+            Self::File(expression) => (expression, PathPurpose::File),
+            Self::Discard(expression) => (expression, PathPurpose::Discard),
         };
         if expression
             .expansion
@@ -328,27 +419,15 @@ impl Destination {
             parsed = parse_expression(&expression.source, expression.line)?;
             &parsed
         };
-        let source = evaluate_with_linebuf(
-            compiled,
-            expression.line,
-            MAX_PATH_EXPRESSION_LEN,
-            &mut lookup,
-        )?
-        .text;
+        let runtime_base = expression.runtime_base.then(|| lookup("MAILDIR")).flatten();
+        let base = runtime_base.as_deref().or(expression.base.as_deref());
         // Procmail splits an unmarked mailbox action into directory targets,
         // so whitespace introduced by a runtime value cannot safely mean one
         // filename here. Explicit backend syntax supplies that missing
         // distinction and may therefore retain whitespace as path data.
-        if !expression.typed_destination && source.bytes().any(|byte| byte.is_ascii_whitespace()) {
-            return Err(ExpansionError::new(
-                expression.line,
-                "multiple unmarked mailbox destinations are not supported",
-            ));
-        }
-        let runtime_base = expression.runtime_base.then(|| lookup("MAILDIR")).flatten();
-        let base = runtime_base.as_deref().or(expression.base.as_deref());
-        let path = resolve_relative_path(&source, base, expression.line)?;
-        validate_filesystem_path(&path, expression.line, description, allows_trailing_slash)?;
+        let path =
+            PathResolver::destination(purpose, expression.line, base, expression.typed_destination)
+                .evaluate(compiled, &mut lookup)?;
         let resolved = PathExpression {
             source: path,
             base: None,
@@ -363,13 +442,7 @@ impl Destination {
             Self::Mbox(_) => Self::Mbox(resolved),
             Self::File(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
             Self::File(_) => Self::Mbox(resolved),
-            Self::Discard(_) if resolved.source == "/dev/null" => Self::Discard(resolved),
-            Self::Discard(_) => {
-                return Err(ExpansionError::new(
-                    expression.line,
-                    "discard destination must resolve exactly to /dev/null",
-                ));
-            }
+            Self::Discard(_) => Self::Discard(resolved),
         };
         Ok(destination)
     }
@@ -405,16 +478,10 @@ impl PathExpression {
             parsed = parse_expression(&self.source, self.line)?;
             &parsed
         };
-        let source =
-            evaluate_with_linebuf(compiled, self.line, MAX_PATH_EXPRESSION_LEN, &mut lookup)?.text;
-        if source.is_empty() {
-            return Ok(source);
-        }
         let runtime_base = self.runtime_base.then(|| lookup("MAILDIR")).flatten();
         let base = runtime_base.as_deref().or(self.base.as_deref());
-        let path = resolve_relative_path(&source, base, self.line)?;
-        validate_filesystem_path(&path, self.line, "lockfile", false)?;
-        Ok(path)
+        PathResolver::new(PathPurpose::Lockfile, "lockfile", self.line, base)
+            .evaluate(compiled, &mut lookup)
     }
 }
 
@@ -559,34 +626,30 @@ fn expand_config(
                     linebuf = parse_linebuf(&assignment.value, assignment.line)?;
                 }
                 if assignment.target == AssignmentTarget::Maildir {
-                    assignment.value = resolve_relative_path(
-                        &assignment.value,
-                        maildir.as_deref(),
+                    assignment.value = PathResolver::new(
+                        PathPurpose::Maildir,
+                        "MAILDIR",
                         assignment.line,
-                    )?;
-                    validate_filesystem_path(&assignment.value, assignment.line, "MAILDIR", true)?;
+                        maildir.as_deref(),
+                    )
+                    .resolve(&assignment.value)?;
                     maildir = Some(assignment.value.clone());
                 } else if matches!(
                     assignment.target,
                     AssignmentTarget::LogFile | AssignmentTarget::LockFile
-                ) && !assignment.value.is_empty()
-                {
-                    assignment.value = resolve_relative_path(
-                        &assignment.value,
-                        maildir.as_deref(),
-                        assignment.line,
-                    )?;
-                    let description = if assignment.target == AssignmentTarget::LogFile {
-                        "LOGFILE"
+                ) {
+                    let (purpose, description) = if assignment.target == AssignmentTarget::LogFile {
+                        (PathPurpose::Logfile, "LOGFILE")
                     } else {
-                        "LOCKFILE"
+                        (PathPurpose::Lockfile, "LOCKFILE")
                     };
-                    validate_filesystem_path(
-                        &assignment.value,
-                        assignment.line,
+                    assignment.value = PathResolver::new(
+                        purpose,
                         description,
-                        false,
-                    )?;
+                        assignment.line,
+                        maildir.as_deref(),
+                    )
+                    .resolve(&assignment.value)?;
                 }
                 variables.insert(
                     assignment.name.clone(),
@@ -756,11 +819,11 @@ fn prepare_recipe(
 
     match &mut recipe.action {
         RecipeAction::Deliver(destination) => {
-            let (expression, description, allows_trailing_slash) = match destination {
-                Destination::Maildir(expression) => (expression, "Maildir destination", true),
-                Destination::Mbox(expression) => (expression, "mbox destination", false),
-                Destination::File(expression) => (expression, "file destination", false),
-                Destination::Discard(expression) => (expression, "discard destination", false),
+            let expression = match destination {
+                Destination::Maildir(expression)
+                | Destination::Mbox(expression)
+                | Destination::File(expression)
+                | Destination::Discard(expression) => expression,
             };
             expression.base = context.maildir.map(str::to_owned);
             expression.line = recipe.action_line;
@@ -795,16 +858,9 @@ fn prepare_recipe(
             expression.runtime_dependent = has_runtime_reference;
             expression.runtime_base = context.dynamic.contains("MAILDIR");
             expression.expansion = Some(parsed);
-            let expression_line = expression.line;
             if context.phase == PreparationPhase::Eager && !has_runtime_reference {
                 let resolved = destination
                     .resolve_with(|name| context.known.get(name).map(|value| value.text.clone()))?;
-                validate_filesystem_path(
-                    resolved.path(),
-                    expression_line,
-                    description,
-                    allows_trailing_slash,
-                )?;
                 if matches!(resolved, Destination::Discard(_))
                     && let Destination::File(expression) = destination
                 {
