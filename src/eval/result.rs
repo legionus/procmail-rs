@@ -151,6 +151,10 @@ pub enum EvalError {
     DestinationCommandOutputIsNotUtf8 {
         line: usize,
     },
+    RuntimeCondition {
+        line: usize,
+        message: String,
+    },
     MatchValuesTooLarge {
         size: usize,
     },
@@ -209,6 +213,12 @@ impl fmt::Display for EvalError {
                 write!(
                     formatter,
                     "line {line}: destination command output is not valid UTF-8"
+                )
+            }
+            Self::RuntimeCondition { line, message } => {
+                write!(
+                    formatter,
+                    "line {line}: cannot reparse expanded condition: {message}"
                 )
             }
             Self::MatchValuesTooLarge { size } => write!(

@@ -2284,10 +2284,6 @@ fn known_unsupported_constructs_fail_check_before_message_input() {
     ));
     cases.extend([
         (
-            ":0\n* $^To:.*$LOGNAME\nmaildir:unused\n".to_owned(),
-            "rules.rc:line 2: shell-expanded recipe conditions are not supported".to_owned(),
-        ),
-        (
             ":0\n* 20^1 ^From:\nmaildir:unused\n".to_owned(),
             "rules.rc:line 2: weighted recipe conditions are not supported".to_owned(),
         ),
@@ -3955,6 +3951,52 @@ fn filter_expands_explicit_command_line_variables() {
     assert!(output.status.success(), "{:?}", output.stderr);
     assert_eq!(delivered_messages(&maildir), [input.to_vec()]);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn filter_reparses_shell_expanded_condition_with_regex_quoted_value() {
+    for (subject, folder) in [("a.b", "matched"), ("axb", "fallback")] {
+        let path = config_file("");
+        let base = path.parent().unwrap();
+        create_maildir(&base.join("matched"));
+        create_maildir(&base.join("fallback"));
+        fs::write(
+            &path,
+            format!(
+                "MAILDIR={}\n:0\n* $^Subject: $\\NEEDLE$\nmatched/\n:0\nfallback/\n",
+                base.display()
+            ),
+        )
+        .unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&path)
+            .args(["--set", "NEEDLE=a.b"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(format!("Subject: {subject}\n\nbody").as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        assert_eq!(delivered_messages(&base.join(folder)).len(), 1);
+        let other = if folder == "matched" {
+            "fallback"
+        } else {
+            "matched"
+        };
+        assert!(delivered_messages(&base.join(other)).is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
 }
 
 #[test]

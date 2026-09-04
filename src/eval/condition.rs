@@ -5,7 +5,10 @@ use regex::bytes::Regex;
 
 use super::message::CompleteMessage;
 use super::{ConditionExplanation, ConditionKindExplanation, EvalError, InputRequirements};
-use crate::config::{ConditionInput, ConditionKind, Recipe, RegexCondition};
+use crate::config::{
+    CaseMode, Condition, ConditionInput, ConditionKind, Recipe, RegexCondition,
+    ShellExpandedCondition,
+};
 use crate::message::MessageHead;
 use crate::runtime::RuntimeVariables;
 use crate::trace::{ConditionKind as TraceConditionKind, TraceEvent, TraceSink};
@@ -21,6 +24,11 @@ pub(super) struct CompiledCondition {
 
 #[derive(Debug, Clone)]
 enum CompiledConditionKind {
+    ShellExpanded {
+        condition: ShellExpandedCondition,
+        area: RegexArea,
+        case_sensitive: bool,
+    },
     HeaderRegex(Regex),
     BodyRegex(Regex),
     MessageRegex(Regex),
@@ -42,74 +50,152 @@ pub(super) fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
         ConditionInput::Body => RegexArea::Body,
         ConditionInput::Message => RegexArea::Message,
     };
-    let mut conditions = Vec::with_capacity(recipe.conditions.len());
+    recipe
+        .conditions
+        .iter()
+        .map(|condition| {
+            compile_condition(
+                condition,
+                area,
+                recipe.options.case_mode == CaseMode::Sensitive,
+            )
+        })
+        .collect()
+}
 
-    for condition in &recipe.conditions {
-        let regex_condition = match &condition.kind {
-            ConditionKind::Regex(regex)
-            | ConditionKind::AreaRegex { regex, .. }
-            | ConditionKind::VariableRegex { regex, .. } => Some(regex),
-            ConditionKind::Program(_)
-            | ConditionKind::SmallerThan(_)
-            | ConditionKind::LargerThan(_) => None,
-        };
-        let kind = match &condition.kind {
-            ConditionKind::SmallerThan(size) => CompiledConditionKind::SmallerThan(*size),
-            ConditionKind::LargerThan(size) => CompiledConditionKind::LargerThan(*size),
-            ConditionKind::Regex(regex) => {
-                // Parsing already validated and compiled this expression.
-                // Cloning Regex shares its read-only compiled program, so
-                // execution planning cannot repeat attacker-controlled
-                // compilation work after configuration validation.
-                let regex = regex.compiled().clone();
-                match area {
-                    RegexArea::Headers => CompiledConditionKind::HeaderRegex(regex),
-                    RegexArea::Body => CompiledConditionKind::BodyRegex(regex),
-                    RegexArea::Message => CompiledConditionKind::MessageRegex(regex),
-                }
+fn compile_condition(
+    condition: &Condition,
+    area: RegexArea,
+    case_sensitive: bool,
+) -> CompiledCondition {
+    let regex_condition = match &condition.kind {
+        ConditionKind::Regex(regex)
+        | ConditionKind::AreaRegex { regex, .. }
+        | ConditionKind::VariableRegex { regex, .. } => Some(regex),
+        ConditionKind::ShellExpanded(_)
+        | ConditionKind::Program(_)
+        | ConditionKind::SmallerThan(_)
+        | ConditionKind::LargerThan(_) => None,
+    };
+    let kind = match &condition.kind {
+        ConditionKind::ShellExpanded(condition) => CompiledConditionKind::ShellExpanded {
+            condition: condition.clone(),
+            area,
+            case_sensitive,
+        },
+        ConditionKind::SmallerThan(size) => CompiledConditionKind::SmallerThan(*size),
+        ConditionKind::LargerThan(size) => CompiledConditionKind::LargerThan(*size),
+        ConditionKind::Regex(regex) => {
+            // Parsing already validated and compiled this expression.
+            // Cloning Regex shares its read-only compiled program, so
+            // execution planning cannot repeat attacker-controlled
+            // compilation work after configuration validation.
+            let regex = regex.compiled().clone();
+            match area {
+                RegexArea::Headers => CompiledConditionKind::HeaderRegex(regex),
+                RegexArea::Body => CompiledConditionKind::BodyRegex(regex),
+                RegexArea::Message => CompiledConditionKind::MessageRegex(regex),
             }
-            ConditionKind::AreaRegex { area, regex } => {
-                let regex = regex.compiled().clone();
-                match area {
-                    ConditionInput::Headers => CompiledConditionKind::HeaderRegex(regex),
-                    ConditionInput::Body => CompiledConditionKind::BodyRegex(regex),
-                    ConditionInput::Message => CompiledConditionKind::MessageRegex(regex),
-                }
+        }
+        ConditionKind::AreaRegex { area, regex } => {
+            let regex = regex.compiled().clone();
+            match area {
+                ConditionInput::Headers => CompiledConditionKind::HeaderRegex(regex),
+                ConditionInput::Body => CompiledConditionKind::BodyRegex(regex),
+                ConditionInput::Message => CompiledConditionKind::MessageRegex(regex),
             }
-            ConditionKind::VariableRegex { name, regex } => CompiledConditionKind::VariableRegex {
-                name: name.clone(),
-                regex: regex.compiled().clone(),
+        }
+        ConditionKind::VariableRegex { name, regex } => CompiledConditionKind::VariableRegex {
+            name: name.clone(),
+            regex: regex.compiled().clone(),
+        },
+        ConditionKind::Program(command) => CompiledConditionKind::Program {
+            command: command.clone(),
+            input: match area {
+                RegexArea::Headers => ConditionInput::Headers,
+                RegexArea::Body => ConditionInput::Body,
+                RegexArea::Message => ConditionInput::Message,
             },
-            ConditionKind::Program(command) => CompiledConditionKind::Program {
-                command: command.clone(),
-                input: recipe.options.condition_input,
-            },
-        };
-        conditions.push(CompiledCondition {
-            line: condition.line,
-            negated: condition.negated,
-            kind,
-            match_capture: regex_condition.and_then(RegexCondition::match_capture),
-            capture_indexes: regex_condition
-                .map(|regex| regex.capture_indexes().to_vec())
-                .unwrap_or_default(),
-        });
+        },
+    };
+    CompiledCondition {
+        line: condition.line,
+        negated: condition.negated,
+        kind,
+        match_capture: regex_condition.and_then(RegexCondition::match_capture),
+        capture_indexes: regex_condition
+            .map(|regex| regex.capture_indexes().to_vec())
+            .unwrap_or_default(),
     }
-
-    conditions
 }
 
 impl CompiledCondition {
     pub(super) fn requires_ordered_execution(&self) -> bool {
-        matches!(self.kind, CompiledConditionKind::Program { .. })
+        matches!(
+            self.kind,
+            CompiledConditionKind::Program { .. } | CompiledConditionKind::ShellExpanded { .. }
+        )
     }
 
     pub(super) fn needs_message_contents(&self) -> bool {
-        matches!(self.kind, CompiledConditionKind::MessageRegex(_))
+        matches!(
+            self.kind,
+            CompiledConditionKind::MessageRegex(_) | CompiledConditionKind::ShellExpanded { .. }
+        )
+    }
+
+    pub(super) fn resolve_shell_expansion(
+        &self,
+        runtime: &RuntimeVariables,
+    ) -> Result<Option<Self>, EvalError> {
+        let CompiledConditionKind::ShellExpanded {
+            condition,
+            area,
+            case_sensitive,
+        } = &self.kind
+        else {
+            return Ok(None);
+        };
+        let mut condition = condition.clone();
+        let mut negated = self.negated;
+
+        // Reparsed text may itself begin with the expansion marker when a
+        // variable supplies a complete condition. Bound those repeated passes
+        // so hostile runtime values cannot create unbounded reparsing work.
+        for _ in 0..=crate::config::MAX_EXPANSION_DEPTH {
+            let expanded =
+                crate::config::expand::expand_shell_condition(&condition, self.line, runtime)
+                    .map_err(EvalError::Expansion)?;
+            let parsed = crate::config::parse_reparsed_condition(
+                expanded.trim_start(),
+                self.line,
+                *case_sensitive,
+            )
+            .map_err(|error| EvalError::RuntimeCondition {
+                line: error.line,
+                message: error.message,
+            })?;
+            negated ^= parsed.negated;
+            if let ConditionKind::ShellExpanded(next) = parsed.kind {
+                condition = next;
+                continue;
+            }
+            let mut compiled = compile_condition(&parsed, *area, *case_sensitive);
+            compiled.negated = negated;
+            return Ok(Some(compiled));
+        }
+        Err(EvalError::RuntimeCondition {
+            line: self.line,
+            message: format!(
+                "condition expansion exceeds the hard depth limit of {}",
+                crate::config::MAX_EXPANSION_DEPTH
+            ),
+        })
     }
 
     pub(super) fn program(&self) -> Option<(&str, ConditionInput)> {
         match &self.kind {
+            CompiledConditionKind::ShellExpanded { .. } => None,
             CompiledConditionKind::Program { command, input } => Some((command, *input)),
             _ => None,
         }
@@ -132,6 +218,7 @@ impl CompiledCondition {
             PartialMatch::Deferred => return,
         };
         let kind = match &self.kind {
+            CompiledConditionKind::ShellExpanded { .. } => TraceConditionKind::ShellExpanded,
             CompiledConditionKind::HeaderRegex(_) => TraceConditionKind::HeaderRegex,
             CompiledConditionKind::BodyRegex(_) => TraceConditionKind::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => TraceConditionKind::MessageRegex,
@@ -152,6 +239,7 @@ impl CompiledCondition {
 
     pub(super) fn explain(&self) -> ConditionExplanation {
         let kind = match &self.kind {
+            CompiledConditionKind::ShellExpanded { .. } => ConditionKindExplanation::ShellExpanded,
             CompiledConditionKind::HeaderRegex(_) => ConditionKindExplanation::HeaderRegex,
             CompiledConditionKind::BodyRegex(_) => ConditionKindExplanation::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => ConditionKindExplanation::MessageRegex,
@@ -168,6 +256,11 @@ impl CompiledCondition {
 
     pub(super) fn requirements(&self) -> InputRequirements {
         match self.kind {
+            CompiledConditionKind::ShellExpanded { .. } => InputRequirements {
+                needs_headers: true,
+                needs_body_contents: true,
+                needs_end_of_message: true,
+            },
             CompiledConditionKind::HeaderRegex(_) => InputRequirements {
                 needs_headers: true,
                 ..InputRequirements::default()
@@ -207,6 +300,7 @@ impl CompiledCondition {
         runtime: &mut RuntimeVariables,
     ) -> Result<PartialMatch, EvalError> {
         let matched = match &self.kind {
+            CompiledConditionKind::ShellExpanded { .. } => return Ok(PartialMatch::Deferred),
             CompiledConditionKind::HeaderRegex(regex) => {
                 self.regex_matches(regex, head.matching_header(), runtime)?
             }
@@ -248,6 +342,15 @@ impl CompiledCondition {
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, EvalError> {
         let matched = match &self.kind {
+            CompiledConditionKind::ShellExpanded { .. } => {
+                let resolved = self.resolve_shell_expansion(runtime)?.ok_or_else(|| {
+                    EvalError::RuntimeCondition {
+                        line: self.line,
+                        message: "expanded condition did not resolve".to_owned(),
+                    }
+                })?;
+                return resolved.matches_complete(message, runtime);
+            }
             CompiledConditionKind::HeaderRegex(regex) => {
                 self.regex_matches(regex, message.header_bytes(), runtime)?
             }

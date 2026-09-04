@@ -179,6 +179,111 @@ fn computes_static_input_requirements() {
 }
 
 #[test]
+fn static_shell_condition_escapes_variable_text_and_stays_header_only() {
+    let config = config::parse("NEEDLE=a.b\n:0\n* $^Subject: $\\NEEDLE$\nmaildir:selected\n")
+        .unwrap()
+        .expand()
+        .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    assert_eq!(
+        plan.requirements(),
+        InputRequirements {
+            needs_headers: true,
+            ..InputRequirements::default()
+        }
+    );
+
+    for (subject, selected) in [("a.b", true), ("axb", false)] {
+        let raw = format!("Subject: {subject}\n\nbody");
+        let mut head = head(raw.as_bytes());
+        let result = plan.evaluate_headers_editing_with_trace(
+            &mut head,
+            &mut RuntimeVariables::default(),
+            &mut NoTrace,
+        );
+        match (result, selected) {
+            (HeaderEvaluation::Decided(delivery), true) => {
+                assert_eq!(
+                    destinations(&delivery),
+                    [Destination::Maildir("selected".into())]
+                );
+            }
+            (HeaderEvaluation::Decided(delivery), false) => {
+                assert!(delivery.deliveries().is_empty());
+            }
+            (other, _) => panic!("unexpected evaluation for {subject:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn runtime_shell_condition_reparses_match_as_a_size_test() {
+    let config =
+        config::parse(":0 c\n* ^X-Condition: \\/(.*)$\nmbox:first\n:0\n* $$MATCH\nmbox:second\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let raw = b"X-Condition: < 128\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+    let mut paths = Vec::new();
+
+    plan.execute_mapped_ordered_with_trace(
+        raw,
+        b"X-Condition: < 128\n\n".len(),
+        &mut runtime,
+        &mut NoTrace,
+        &mut |destination, _, _, _, _, _| {
+            paths.push(destination.path().to_owned());
+            Ok::<_, DeliveryAttemptError<&str>>(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(paths, ["first", "second"]);
+}
+
+#[test]
+fn runtime_shell_condition_can_reparse_to_a_program_test() {
+    let config =
+        config::parse(":0 c\n* ^X-Condition: \\/(.*)$\nmbox:first\n:0\n* $$MATCH\nmbox:second\n")
+            .unwrap()
+            .expand()
+            .unwrap();
+    let plan = ExecutionPlan::compile(&config);
+    let raw = b"X-Condition: ? selected-command\n\nbody";
+    let header_len = b"X-Condition: ? selected-command\n\n".len();
+    let mut runtime = RuntimeVariables::default();
+    let mut paths = Vec::new();
+    let mut commands = Vec::new();
+
+    plan.execute_mapped_ordered_with_processes_trace(
+        MappedMessageInput::new(raw, header_len, None),
+        &mut runtime,
+        &mut NoTrace,
+        &mut |destination, _, _, _, _, _| {
+            paths.push(destination.path().to_owned());
+            Ok::<_, DeliveryAttemptError<&str>>(())
+        },
+        (
+            &mut |command, input, _, _| {
+                commands.push(command.to_owned());
+                assert_eq!(input, &raw[..header_len]);
+                Ok::<_, DeliveryAttemptError<&str>>(true)
+            },
+            &mut |_, _, _, _, _, _| panic!("recipe contains no pipe action"),
+            &mut |_, _, _, _, _, _, _| panic!("recipe contains no command capture"),
+            &mut |_, _| Ok::<_, &str>(()),
+            &mut |_, _| Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(())),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(commands, ["selected-command"]);
+    assert_eq!(paths, ["first", "second"]);
+}
+
+#[test]
 fn backquoted_assignments_require_the_complete_message() {
     for source in [
         "VALUE=`extract`\n:0\nmaildir:selected\n",

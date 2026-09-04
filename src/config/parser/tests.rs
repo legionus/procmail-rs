@@ -467,10 +467,6 @@ fn rejects_recipe_without_action() {
 fn rejects_conditions_that_would_otherwise_change_meaning() {
     for (source, message) in [
         (
-            ":0\n* $^To:.*$LOGNAME\nmailbox\n",
-            "shell-expanded recipe conditions are not supported",
-        ),
-        (
             ":0\n* ! 20^1 ^From:\nmailbox\n",
             "weighted recipe conditions are not supported",
         ),
@@ -485,6 +481,26 @@ fn rejects_conditions_that_would_otherwise_change_meaning() {
     }
 
     assert!(parse(":0\n* 20^subject\nmailbox\n").is_ok());
+}
+
+#[test]
+fn parses_shell_expanded_condition_for_later_bounded_reparsing() {
+    let config = parse(":0\n* ! $^To:.*<$\\LOGNAME>\nmailbox\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let ConditionKind::ShellExpanded(condition) = &recipe.conditions[0].kind else {
+        panic!("expected shell-expanded condition");
+    };
+    assert!(recipe.conditions[0].negated);
+    assert_eq!(condition.source, "^To:.*<$\\LOGNAME>");
+
+    let error = parse(":0\n* $^Subject: `printf value`\nmailbox\n").unwrap_err();
+    assert_eq!(error.line, 2);
+    assert_eq!(
+        error.message,
+        "backquoted commands in shell-expanded conditions are not supported"
+    );
 }
 
 #[test]

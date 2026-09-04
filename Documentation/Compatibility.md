@@ -39,7 +39,7 @@ a supported regex, assignment value, or destination.
 | Recipe header | `:0` followed by flags and an optional `: lockfile` |
 | Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
-| Conditions | Byte regex, leading `!` negation, `? shell command`, `< size`, `> size`, `H ?? regex`, `B ?? regex`, and `$NAME ?? regex` |
+| Conditions | Byte regex, leading `!` negation, shell-expanded `$` conditions, `? shell command`, `< size`, `> size`, `H ?? regex`, `B ?? regex`, and `$NAME ?? regex` |
 | Actions | Explicit Maildir or mbox delivery, including bounded backquoted destination commands; explicit discard through an unmarked `/dev/null`; trusted shell pipe action; a sole `|` for stdout delivery; command-output capture with `NAME=| command`; `{ ... }` block; and the procmail-rs `headers { ... }` extension |
 | Regex additions | Procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `^^`, capture assignment with `\/`, and numbered `MATCH1` through the configured capture ceiling |
 | Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
@@ -60,7 +60,7 @@ a review source; installed procmail-rs tests do not depend on it.
 | Documented procmail behavior | Current status | Compatibility consequence |
 | --- | --- | --- |
 | Ordinary regex, `!`, `?`, `<`, `>`, and `NAME ??` conditions | Supported within the limits described above. | Program conditions use the configured trusted shell and finite `TIMEOUT`. |
-| A condition beginning with `$` is expanded using shell substitution rules inside double quotes and then reparsed as a condition. | Explicitly rejected. | Implementing it requires bounded intermediate expansion followed by parsing as a condition rather than a regex. |
+| A condition beginning with `$` is expanded using shell substitution rules inside double quotes and then reparsed as a condition. | Supported with the project's bounded variable syntax, including procmail's `$\NAME` regex quoting. | The intermediate text is limited by active `LINEBUF`. Backquoted commands and unsupported special parameters are rejected explicitly. Runtime-dependent forms conservatively require complete staging because the resulting condition type is not known before evaluation. |
 | `w^x` weighted regex, program, and length conditions; final score in `$=` | Explicitly rejected as one unsupported condition category. | Implement all scoring forms together with bounded match counting, checked numeric handling, and `$=` so a mixed recipe cannot receive partial scoring behavior. |
 | A trailing backslash continues a condition; shell-expanded conditions retain continuation whitespace. | Explicitly rejected. | Bounded continuation support must preserve the distinct whitespace rule for shell-expanded conditions. |
 | Procmail ERE operators and its `^`, `$`, `^^`, `\<`, `\>`, and `\/` extensions | Partly supported through the Rust byte-regex engine and explicit translations. | Procmail chooses the leftmost shortest match except while computing `MATCH`; the Rust engine has different disambiguation. Procmail treats `{` as an ordinary byte and does not support named character classes, while the Rust engine accepts counted repetition and POSIX classes. These differences can change both decisions and captures and need differential fixtures or explicit rejection. |
@@ -108,13 +108,10 @@ for all supported manual constructs, nor do they compare regex match spans and
 2. Align the regex dialect where it can be done without weakening bounds:
    reject or translate counted repetition and named character classes, then
    investigate leftmost-shortest matching and `MATCH` selection separately.
-3. Implement the shell-expanded `$` condition with bounded intermediate text
-   and reparsing. This is broadly used in `procmailex(5)` for safely inserting
-   variable text into a condition.
-4. Decide whether weighted scoring is needed by real migration rc files. If it
+3. Decide whether weighted scoring is needed by real migration rc files. If it
    is, implement all three scoring categories and `$=` together; partial
    scoring support would make mixed recipes misleading.
-5. Consider ordinary directory folders, MH folders, and multi-folder delivery
+4. Consider ordinary directory folders, MH folders, and multi-folder delivery
    only after their naming, locking, rollback, hardlink, and partial-publication
    behavior has dedicated tests. Do not recover compatibility by inspecting a
    bare path and choosing a backend from mutable filesystem metadata.
@@ -124,6 +121,40 @@ environment-prefix assignments, quoting, expansion, redirection, and pipelines
 therefore follow that shell rather than an internal command tokenizer. Rc
 variable expansion remains the limited syntax listed above and does not become
 general shell evaluation.
+
+## Shell-expanded conditions
+
+A condition beginning with `$` expands its remainder using double-quoted
+shell-like rules and reparses the bounded result as a condition:
+
+```text
+:0
+* $^To:.*<$\LOGNAME>
+maildir:addressed/
+```
+
+The forms `$NAME`, `${NAME}`, and `${NAME:-expression}` use the runtime values
+active when the condition is reached. Procmail's `$\NAME` form inserts the
+value as a literal regex fragment, including a leading empty noncapturing group
+that prevents the value from becoming `!`, `$`, `?`, a size test, scoring text,
+or a special search-area prefix. Inserted values are not scanned again during
+that expansion pass. A complete expanded result beginning with `$` starts a
+new bounded expansion-and-reparse pass, up to the shared expansion-depth
+ceiling.
+
+Every intermediate result is limited by active `LINEBUF`. The reparsed result
+must be one of the supported condition forms and remains subject to the regex
+length, compiled-size, capture, and program-command limits. Statically known
+results are parsed and regex-compiled before stdin is read. A condition using
+`MATCH`, `LASTFOLDER`, command output, or another runtime-produced value is
+resolved only when evaluation reaches it and conservatively requires the
+complete message because it may become a body regex, size test, or program
+condition.
+
+Backquoted commands, unsupported special parameters, and continued physical
+condition lines remain explicitly rejected. Ordinary substitution requires
+UTF-8 runtime data; `$\NAME` can safely quote arbitrary bytes into an ASCII
+byte-regex fragment.
 
 ## Command output assignments
 

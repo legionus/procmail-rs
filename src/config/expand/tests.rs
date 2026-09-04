@@ -60,6 +60,80 @@ fn runtime_byte_expansion_rejects_missing_and_excessively_nested_values() {
     );
 }
 
+#[test]
+fn shell_condition_expansion_obeys_linebuf_at_the_boundary() {
+    for length in [127, 128, 129] {
+        let mut runtime = crate::runtime::RuntimeVariables::default();
+        runtime.set("LINEBUF", "128");
+        runtime.set("VALUE", "x".repeat(length));
+        let condition = ShellExpandedCondition {
+            source: "$VALUE".to_owned(),
+            expansion: None,
+        };
+        let result = expand_shell_condition(&condition, 7, &runtime);
+
+        if length <= 128 {
+            assert_eq!(result.unwrap(), "x".repeat(length));
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.line, 7);
+            assert_eq!(
+                error.message,
+                "expanded value exceeds the active LINEBUF limit of 128 bytes"
+            );
+        }
+    }
+}
+
+#[test]
+fn shell_condition_regex_quoting_accepts_binary_without_reinterpreting_it() {
+    let mut runtime = crate::runtime::RuntimeVariables::default();
+    runtime.set_bytes("VALUE", b"a.\xff".to_vec());
+    let quoted = ShellExpandedCondition {
+        source: "$\\VALUE".to_owned(),
+        expansion: None,
+    };
+    let expanded = expand_shell_condition(&quoted, 5, &runtime).unwrap();
+    let parsed = super::super::parse_reparsed_condition(&expanded, 5, true).unwrap();
+    let ConditionKind::Regex(regex) = parsed.kind else {
+        panic!("expected quoted byte regex");
+    };
+    assert!(regex.compiled().is_match(b"a.\xff"));
+    assert!(!regex.compiled().is_match(b"axb\xff"));
+
+    let unquoted = ShellExpandedCondition {
+        source: "$VALUE".to_owned(),
+        expansion: None,
+    };
+    let error = expand_shell_condition(&unquoted, 6, &runtime).unwrap_err();
+    assert_eq!(error.line, 6);
+    assert_eq!(
+        error.message,
+        "shell-expanded condition contains non-UTF-8 variable data"
+    );
+}
+
+#[test]
+fn static_shell_condition_is_reparsed_before_message_input() {
+    let error = parse("BROKEN=[\n:0\n* $$BROKEN\nmaildir:unused\n")
+        .unwrap()
+        .expand()
+        .unwrap_err();
+    assert_eq!(error.line, 3);
+    assert!(error.message.contains("invalid regular expression"));
+}
+
+#[test]
+fn nested_static_shell_condition_is_reparsed_before_message_input() {
+    let supplied = [SuppliedVariable::from_environment("HOME", "$$INNER".to_owned()).unwrap()];
+    let error = parse("INNER=[\n:0\n* $$HOME\nmaildir:unused\n")
+        .unwrap()
+        .expand_with(&supplied)
+        .unwrap_err();
+    assert_eq!(error.line, 3);
+    assert!(error.message.contains("invalid regular expression"));
+}
+
 fn parse_wide(input: &str) -> Result<Config, super::super::ParseError> {
     let mut state = super::super::RcParseState::default();
     state.limits.linebuf = super::super::MAX_LINEBUF;

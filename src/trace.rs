@@ -398,6 +398,7 @@ fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result
 
 fn condition_kind_name(kind: ConditionKind) -> &'static str {
     match kind {
+        ConditionKind::ShellExpanded => "shell-expanded",
         ConditionKind::HeaderRegex => "header-regex",
         ConditionKind::BodyRegex => "body-regex",
         ConditionKind::MessageRegex => "message-regex",
@@ -602,6 +603,7 @@ pub enum VariableSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionKind {
+    ShellExpanded,
     HeaderRegex,
     BodyRegex,
     MessageRegex,

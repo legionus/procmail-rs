@@ -61,6 +61,7 @@ fn common_event(event: &TraceEvent) -> Option<String> {
 
 fn condition_kind(kind: ConditionKind) -> &'static str {
     match kind {
+        ConditionKind::ShellExpanded => "shell-expanded",
         ConditionKind::HeaderRegex => "header-regex",
         ConditionKind::BodyRegex => "body-regex",
         ConditionKind::MessageRegex => "message-regex",

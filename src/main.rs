@@ -435,6 +435,7 @@ fn write_plan_explanation(
         }
         for condition in recipe.conditions() {
             let kind = match condition.kind() {
+                ConditionKindExplanation::ShellExpanded => "shell-expanded",
                 ConditionKindExplanation::HeaderRegex => "header-regex",
                 ConditionKindExplanation::BodyRegex => "body-regex",
                 ConditionKindExplanation::MessageRegex => "message-regex",

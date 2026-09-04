@@ -83,6 +83,7 @@ impl ConditionExplanation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionKindExplanation {
+    ShellExpanded,
     HeaderRegex,
     BodyRegex,
     MessageRegex,

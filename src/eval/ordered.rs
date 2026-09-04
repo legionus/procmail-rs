@@ -156,6 +156,10 @@ impl CompiledNode {
     {
         for (index, condition) in self.conditions.iter().enumerate() {
             let message = current_ordered_message(context.message, context.replacement.as_ref());
+            let resolved = condition
+                .resolve_shell_expansion(context.runtime)
+                .map_err(OrderedExecutionError::Evaluation)?;
+            let condition = resolved.as_ref().unwrap_or(condition);
             let matched = if let Some((command, input)) = condition.program() {
                 let input = match input {
                     ConditionInput::Headers => Some(message.raw_header()),

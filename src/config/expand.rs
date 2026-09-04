@@ -8,7 +8,8 @@ use std::path::Path;
 use super::{
     Assignment, AssignmentTarget, Config, Destination, ExpansionExpression, ExpansionPart,
     HeaderAction, HeaderOperation, HeaderValue, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
-    MAX_PATH_EXPRESSION_LEN, PathExpression, RcFileExpression, Recipe, RecipeAction, Statement,
+    MAX_PATH_EXPRESSION_LEN, PathExpression, RcFileExpression, Recipe, RecipeAction,
+    ShellConditionExpression, ShellConditionPart, ShellExpandedCondition, Statement,
     SuppliedVariable, VariablePolicy, VariableSource, assignment_value_limit, variable_policy,
 };
 
@@ -688,6 +689,7 @@ fn expand_recipe(
     variables: &BTreeMap<String, ExpandedValue>,
     maildir: Option<&str>,
 ) -> Result<(), ExpansionError> {
+    prepare_shell_conditions(recipe, variables, &BTreeSet::new())?;
     if let Some(expression) = &mut recipe.lock {
         prepare_lock_expression(
             expression,
@@ -867,6 +869,7 @@ fn prepare_runtime_recipe(
     dynamic: &BTreeSet<String>,
     maildir: Option<&str>,
 ) -> Result<(), ExpansionError> {
+    prepare_shell_conditions(recipe, known, dynamic)?;
     if let Some(expression) = &mut recipe.lock {
         prepare_lock_expression(expression, recipe.line, known, dynamic, maildir)?;
         if expression.source.is_empty() && matches!(recipe.action, RecipeAction::Pipe(_)) {
@@ -1051,6 +1054,214 @@ fn validate_runtime_references(
         }
     }
     Ok(())
+}
+
+fn validate_shell_condition_references(
+    expression: &ShellConditionExpression,
+    line: usize,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+) -> Result<(), ExpansionError> {
+    for part in &expression.parts {
+        let ShellConditionPart::Variable { name, default, .. } = part else {
+            continue;
+        };
+        if known.contains_key(name)
+            || dynamic.contains(name)
+            || variable_policy(name) == VariablePolicy::RuntimeOnly
+        {
+            continue;
+        }
+        if let Some(default) = default {
+            validate_shell_condition_references(default, line, known, dynamic)?;
+        } else {
+            return Err(ExpansionError::new(
+                line,
+                format!("variable {name} is not defined"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_shell_conditions(
+    recipe: &mut Recipe,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+) -> Result<(), ExpansionError> {
+    for condition in &mut recipe.conditions {
+        let mut runtime = crate::runtime::RuntimeVariables::default();
+        for (name, value) in known {
+            runtime.set(name.clone(), value.text.clone());
+        }
+
+        // A known value may supply another complete `$` condition. Resolve the
+        // entire static chain now so malformed configuration still fails before
+        // stdin is consumed, while the pass limit bounds adversarial recursion.
+        for pass in 0..=MAX_EXPANSION_DEPTH {
+            let super::ConditionKind::ShellExpanded(shell) = &condition.kind else {
+                break;
+            };
+            let expression = parse_shell_condition_expression(&shell.source, condition.line)?;
+            validate_shell_condition_references(&expression, condition.line, known, dynamic)?;
+            if !shell_condition_is_static(&expression, known, dynamic) {
+                if let super::ConditionKind::ShellExpanded(shell) = &mut condition.kind {
+                    shell.expansion = Some(expression);
+                }
+                break;
+            }
+            if pass == MAX_EXPANSION_DEPTH {
+                return Err(ExpansionError::new(
+                    condition.line,
+                    format!(
+                        "condition expansion exceeds the hard depth limit of {MAX_EXPANSION_DEPTH}"
+                    ),
+                ));
+            }
+            let prepared = ShellExpandedCondition {
+                source: shell.source.clone(),
+                expansion: Some(expression),
+            };
+            let expanded = expand_shell_condition(&prepared, condition.line, &runtime)?;
+            let parsed = super::parse_reparsed_condition(
+                expanded.trim_start(),
+                condition.line,
+                recipe.options.case_mode == super::CaseMode::Sensitive,
+            )
+            .map_err(|error| ExpansionError::new(error.line, error.message))?;
+            condition.negated ^= parsed.negated;
+            condition.kind = parsed.kind;
+        }
+    }
+    Ok(())
+}
+
+fn shell_condition_is_static(
+    expression: &ShellConditionExpression,
+    known: &BTreeMap<String, ExpandedValue>,
+    dynamic: &BTreeSet<String>,
+) -> bool {
+    expression.parts.iter().all(|part| match part {
+        ShellConditionPart::Literal(_) => true,
+        ShellConditionPart::Variable { name, default, .. } => {
+            if dynamic.contains(name) || variable_policy(name) == VariablePolicy::RuntimeOnly {
+                return false;
+            }
+            match known.get(name) {
+                Some(value) if !value.text.is_empty() => true,
+                Some(_) => default
+                    .as_ref()
+                    .is_none_or(|default| shell_condition_is_static(default, known, dynamic)),
+                None => default
+                    .as_ref()
+                    .is_some_and(|default| shell_condition_is_static(default, known, dynamic)),
+            }
+        }
+    })
+}
+
+pub(crate) fn expand_shell_condition(
+    condition: &ShellExpandedCondition,
+    line: usize,
+    runtime: &crate::runtime::RuntimeVariables,
+) -> Result<String, ExpansionError> {
+    let parsed;
+    let expression = if let Some(expression) = condition.expansion.as_ref() {
+        expression
+    } else {
+        parsed = parse_shell_condition_expression(&condition.source, line)?;
+        &parsed
+    };
+    let linebuf = runtime
+        .get("LINEBUF")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(super::DEFAULT_LINEBUF);
+    let bytes = evaluate_shell_condition(expression, line, linebuf, runtime, 0)
+        .map_err(|error| relabel_linebuf_error(error, linebuf, usize::MAX))?;
+    String::from_utf8(bytes).map_err(|_| {
+        ExpansionError::new(
+            line,
+            "shell-expanded condition contains non-UTF-8 variable data",
+        )
+    })
+}
+
+fn evaluate_shell_condition(
+    expression: &ShellConditionExpression,
+    line: usize,
+    limit: usize,
+    runtime: &crate::runtime::RuntimeVariables,
+    depth: usize,
+) -> Result<Vec<u8>, ExpansionError> {
+    check_expansion_depth(depth, line)?;
+    let mut output = Vec::new();
+    for part in &expression.parts {
+        match part {
+            ShellConditionPart::Literal(text) => {
+                push_bounded(&mut output, text.as_bytes(), limit, line)?;
+            }
+            ShellConditionPart::Variable {
+                name,
+                regex_escape,
+                default,
+            } => {
+                let value = runtime.get_bytes(name);
+                if let Some(value) = value.filter(|value| !value.is_empty()) {
+                    if *regex_escape {
+                        push_regex_escaped(&mut output, value, limit, line)?;
+                    } else {
+                        push_bounded(&mut output, value, limit, line)?;
+                    }
+                } else if let Some(default) = default {
+                    let selected =
+                        evaluate_shell_condition(default, line, limit, runtime, depth + 1)?;
+                    push_bounded(&mut output, &selected, limit, line)?;
+                } else if let Some(value) = value {
+                    push_bounded(&mut output, value, limit, line)?;
+                } else {
+                    return Err(ExpansionError::new(
+                        line,
+                        format!("variable {name} is not defined"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn push_regex_escaped(
+    output: &mut Vec<u8>,
+    value: &[u8],
+    limit: usize,
+    line: usize,
+) -> Result<(), ExpansionError> {
+    push_bounded(output, b"(?:)", limit, line)?;
+    if let Ok(value) = std::str::from_utf8(value) {
+        for character in value.chars() {
+            if matches!(
+                character,
+                '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$'
+            ) {
+                push_bounded(output, b"\\", limit, line)?;
+            }
+            let mut encoded = [0; 4];
+            push_bounded(
+                output,
+                character.encode_utf8(&mut encoded).as_bytes(),
+                limit,
+                line,
+            )?;
+        }
+        return Ok(());
+    }
+
+    push_bounded(output, b"(?-u:", limit, line)?;
+    for byte in value {
+        let escaped = format!("\\x{byte:02x}");
+        push_bounded(output, escaped.as_bytes(), limit, line)?;
+    }
+    push_bounded(output, b")", limit, line)
 }
 
 fn validate_filesystem_path(
@@ -1376,6 +1587,163 @@ fn check_expansion_depth(depth: usize, line: usize) -> Result<(), ExpansionError
         ));
     }
     Ok(())
+}
+
+fn parse_shell_condition_expression(
+    input: &str,
+    line: usize,
+) -> Result<ShellConditionExpression, ExpansionError> {
+    let mut index = 0;
+    let expression = parse_shell_condition_until(input, &mut index, line, 0, false)?;
+    debug_assert_eq!(index, input.len());
+    Ok(expression)
+}
+
+fn parse_shell_condition_until(
+    input: &str,
+    index: &mut usize,
+    line: usize,
+    depth: usize,
+    stop_at_brace: bool,
+) -> Result<ShellConditionExpression, ExpansionError> {
+    check_expansion_depth(depth, line)?;
+    let bytes = input.as_bytes();
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+
+    // The leading condition marker asks procmail to process the remainder as
+    // though it were inside double quotes. Interpret only the substitutions
+    // supported by this project, while preserving ordinary regex backslashes
+    // and rejecting command execution instead of giving it a new meaning.
+    while *index < bytes.len() {
+        if stop_at_brace && bytes[*index] == b'}' {
+            break;
+        }
+        if bytes[*index] == b'`' {
+            return Err(ExpansionError::new(
+                line,
+                "backquoted commands in shell-expanded conditions are not supported",
+            ));
+        }
+        if bytes[*index] == b'\\' {
+            if let Some(next @ (b'$' | b'`' | b'"' | b'\\')) = bytes.get(*index + 1).copied() {
+                literal.push(char::from(next));
+                *index += 2;
+                continue;
+            }
+            literal.push('\\');
+            *index += 1;
+            continue;
+        }
+        if bytes[*index] != b'$' {
+            let character = input[*index..].chars().next().ok_or_else(|| {
+                ExpansionError::new(line, "shell-expanded condition contains invalid UTF-8")
+            })?;
+            literal.push(character);
+            *index += character.len_utf8();
+            continue;
+        }
+
+        if !literal.is_empty() {
+            parts.push(ShellConditionPart::Literal(std::mem::take(&mut literal)));
+        }
+        *index += 1;
+        let regex_escape = if bytes.get(*index) == Some(&b'\\') {
+            *index += 1;
+            true
+        } else {
+            false
+        };
+        let Some(first) = bytes.get(*index).copied() else {
+            if regex_escape {
+                return Err(ExpansionError::new(
+                    line,
+                    "regex-escaped condition variable is missing its name",
+                ));
+            }
+            literal.push('$');
+            continue;
+        };
+        let (name, default) = if first == b'{' {
+            if regex_escape {
+                return Err(ExpansionError::new(
+                    line,
+                    "regex-escaped condition variables use $\\NAME syntax",
+                ));
+            }
+            *index += 1;
+            let name_start = *index;
+            while *index < bytes.len() && is_name_continue(bytes[*index]) {
+                *index += 1;
+            }
+            let name = &input[name_start..*index];
+            validate_reference_name(name, line)?;
+            match bytes.get(*index..*index + 2) {
+                Some(b":-") => {
+                    *index += 2;
+                    let default = parse_shell_condition_until(input, index, line, depth + 1, true)?;
+                    if bytes.get(*index) != Some(&b'}') {
+                        return Err(ExpansionError::new(
+                            line,
+                            "variable reference is missing '}'",
+                        ));
+                    }
+                    *index += 1;
+                    (name.to_owned(), Some(default))
+                }
+                _ if bytes.get(*index) == Some(&b'}') => {
+                    *index += 1;
+                    (name.to_owned(), None)
+                }
+                _ => {
+                    return Err(ExpansionError::new(
+                        line,
+                        "unsupported parameter expansion; use ${NAME} or ${NAME:-expression}",
+                    ));
+                }
+            }
+        } else {
+            if !is_name_start(first) {
+                if matches!(first, b'?' | b'#' | b'$' | b'-' | b'=' | b'@')
+                    || first.is_ascii_digit()
+                {
+                    return Err(ExpansionError::new(
+                        line,
+                        "unsupported special parameter in shell-expanded condition",
+                    ));
+                }
+                literal.push('$');
+                continue;
+            }
+            let name_start = *index;
+            *index += 1;
+            while *index < bytes.len() && is_name_continue(bytes[*index]) {
+                *index += 1;
+            }
+            (input[name_start..*index].to_owned(), None)
+        };
+        if variable_policy(&name) == VariablePolicy::Unsupported {
+            return Err(ExpansionError::new(
+                line,
+                format!("procmail variable {name} is not supported"),
+            ));
+        }
+        parts.push(ShellConditionPart::Variable {
+            name,
+            regex_escape,
+            default,
+        });
+    }
+    if !literal.is_empty() {
+        parts.push(ShellConditionPart::Literal(literal));
+    }
+    if stop_at_brace && *index == bytes.len() {
+        return Err(ExpansionError::new(
+            line,
+            "variable reference is missing '}'",
+        ));
+    }
+    Ok(ShellConditionExpression { parts })
 }
 
 fn parse_expression(input: &str, line: usize) -> Result<ExpansionExpression, ExpansionError> {

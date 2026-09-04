@@ -11,7 +11,7 @@ use regex::bytes::Regex;
 
 pub use expand::ExpansionError;
 pub use parser::parse;
-pub(crate) use parser::parse_with_state;
+pub(crate) use parser::{parse_reparsed_condition, parse_with_state};
 pub use variables::{
     AssignmentTarget, DEFAULT_LOCK_EXT, MAX_COMMAND_LINE_VARIABLES, MAX_LOCK_TIMEOUT_SECONDS,
     MAX_PROCESS_TIMEOUT_SECONDS, MessageLimitVariable, RcLimitVariable, SuppliedVariable,
@@ -239,17 +239,18 @@ fn statements_have_pipe_actions(statements: &[Statement]) -> bool {
 fn statements_have_external_commands(statements: &[Statement]) -> bool {
     statements.iter().any(|statement| match statement {
         Statement::Recipe(recipe) => {
-            recipe
-                .conditions
-                .iter()
-                .any(|condition| matches!(condition.kind, ConditionKind::Program(_)))
-                || match &recipe.action {
-                    RecipeAction::Pipe(action) => !action.command.is_empty(),
-                    RecipeAction::Capture(_) => true,
-                    RecipeAction::Block(children) => statements_have_external_commands(children),
-                    RecipeAction::Deliver(destination) => destination.command_parts().is_some(),
-                    RecipeAction::Headers(_) => false,
-                }
+            recipe.conditions.iter().any(|condition| {
+                matches!(
+                    condition.kind,
+                    ConditionKind::Program(_) | ConditionKind::ShellExpanded(_)
+                )
+            }) || match &recipe.action {
+                RecipeAction::Pipe(action) => !action.command.is_empty(),
+                RecipeAction::Capture(_) => true,
+                RecipeAction::Block(children) => statements_have_external_commands(children),
+                RecipeAction::Deliver(destination) => destination.command_parts().is_some(),
+                RecipeAction::Headers(_) => false,
+            }
         }
         Statement::Assignment(assignment) => assignment.target == AssignmentTarget::Trap,
         Statement::CommandAssignment(_) => true,
@@ -446,6 +447,7 @@ pub struct Condition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConditionKind {
+    ShellExpanded(ShellExpandedCondition),
     Regex(RegexCondition),
     AreaRegex {
         area: ConditionInput,
@@ -458,6 +460,27 @@ pub enum ConditionKind {
     Program(String),
     SmallerThan(usize),
     LargerThan(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellExpandedCondition {
+    pub(crate) source: String,
+    pub(crate) expansion: Option<ShellConditionExpression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShellConditionExpression {
+    pub(crate) parts: Vec<ShellConditionPart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShellConditionPart {
+    Literal(String),
+    Variable {
+        name: String,
+        regex_escape: bool,
+        default: Option<ShellConditionExpression>,
+    },
 }
 
 #[derive(Debug, Clone)]

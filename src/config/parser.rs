@@ -465,9 +465,12 @@ fn parse_recipe(
         validate_header_action_recipe(&recipe_flags, lock.as_deref(), start + 1)?;
         options.continuation = ContinuationMode::Continue;
     }
-    let has_program_condition = conditions
-        .iter()
-        .any(|condition| matches!(condition.kind, ConditionKind::Program(_)));
+    let has_program_condition = conditions.iter().any(|condition| {
+        matches!(
+            condition.kind,
+            ConditionKind::Program(_) | ConditionKind::ShellExpanded(_)
+        )
+    });
     if !is_command_action
         && !is_headers
         && action != "{"
@@ -1150,12 +1153,6 @@ fn parse_condition(
     if input.is_empty() {
         return Err(ParseError::new(line, "condition is empty"));
     }
-    if input.starts_with('$') {
-        return Err(ParseError::new(
-            line,
-            "shell-expanded recipe conditions are not supported",
-        ));
-    }
     if has_scoring_prefix(input) {
         return Err(ParseError::new(
             line,
@@ -1163,7 +1160,21 @@ fn parse_condition(
         ));
     }
 
-    let (kind, is_regex) = if let Some(value) = input.strip_prefix('<') {
+    let (kind, is_regex) = if let Some(source) = input.strip_prefix('$') {
+        if source.contains('`') {
+            return Err(ParseError::new(
+                line,
+                "backquoted commands in shell-expanded conditions are not supported",
+            ));
+        }
+        (
+            ConditionKind::ShellExpanded(super::ShellExpandedCondition {
+                source: source.to_owned(),
+                expansion: None,
+            }),
+            true,
+        )
+    } else if let Some(value) = input.strip_prefix('<') {
         (ConditionKind::SmallerThan(parse_size(value, line)?), false)
     } else if let Some(value) = input.strip_prefix('>') {
         (ConditionKind::LargerThan(parse_size(value, line)?), false)
@@ -1253,6 +1264,14 @@ fn parse_condition(
         },
         is_regex,
     ))
+}
+
+pub(crate) fn parse_reparsed_condition(
+    input: &str,
+    line: usize,
+    case_sensitive: bool,
+) -> Result<Condition, ParseError> {
+    parse_condition(input, line, case_sensitive, 0, 0, 1).map(|(condition, _)| condition)
 }
 
 fn has_scoring_prefix(input: &str) -> bool {
