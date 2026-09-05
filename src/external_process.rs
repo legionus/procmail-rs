@@ -6,7 +6,7 @@ use std::io::{BufReader, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,6 +71,33 @@ struct ProgramIoOptions {
     stderr: Stdio,
     append_lf: bool,
     body_input: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ProcessInput<'a> {
+    bytes: &'a [u8],
+    output_ending: OutputEnding,
+    append_lf: bool,
+    body_input: bool,
+}
+
+struct ChildLifecycle {
+    child: Child,
+    stdin: ChildStdin,
+    timeout: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct CompletedChild {
+    input_write: InputWrite,
+    child_exit: ChildExit,
+    exit_code: Option<u8>,
+}
+
+struct OutputConsumption<T> {
+    value: T,
+    failed: bool,
+    timed_out: bool,
 }
 
 // These settings jointly describe how one filter invocation consumes and
@@ -229,6 +256,139 @@ impl fmt::Display for ExternalProcessError {
 
 impl std::error::Error for ExternalProcessError {}
 
+impl ChildLifecycle {
+    fn spawn(
+        policy: &ShellPolicy,
+        environment: &ProcessEnvironment,
+        command: &str,
+        timeout: Duration,
+        stdout: Stdio,
+        stderr: Stdio,
+    ) -> Result<Self, ExternalProcessError> {
+        let invocation = policy
+            .authorize(environment)
+            .map_err(|error| process_error(error.to_string()))?;
+        let mut child = Command::new(invocation.path())
+            .arg(invocation.flags())
+            .arg(command)
+            .env_clear()
+            .envs(environment.values())
+            .stdin(Stdio::piped())
+            .stdout(stdout)
+            .stderr(stderr)
+            .process_group(0)
+            .spawn()
+            .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            process_error("external command did not provide its requested stdin pipe")
+        })?;
+        Ok(Self {
+            child,
+            stdin,
+            timeout,
+        })
+    }
+
+    fn take_stdout(&mut self) -> Result<ChildStdout, ExternalProcessError> {
+        self.child.stdout.take().ok_or_else(|| {
+            process_error("external command did not provide its requested stdout pipe")
+        })
+    }
+
+    fn run_with_piped_output<T>(
+        mut self,
+        input: ProcessInput<'_>,
+        consume: impl FnOnce(ChildStdout) -> T,
+    ) -> Result<(CompletedChild, T), ExternalProcessError> {
+        let stdout = self.take_stdout()?;
+
+        // The child may write before consuming all input. Keep input, output,
+        // and timeout supervision active together so finite pipe capacity
+        // cannot prevent the timeout path from reaching the process group.
+        let (input_write, output, waited) = thread::scope(|scope| {
+            let writer = scope.spawn(move || write_process_input(self.stdin, input));
+            let waiter = scope.spawn(move || wait_for_process_group(&mut self.child, self.timeout));
+            let output = consume(stdout);
+            (writer.join(), output, waiter.join())
+        });
+        let input_write = joined_input(input_write)?;
+        let (status, timed_out) =
+            waited.map_err(|_| process_error("external command wait worker failed"))??;
+        Ok((complete_child(input_write, status, timed_out), output))
+    }
+
+    fn run_with_timed_output<T>(
+        mut self,
+        input: ProcessInput<'_>,
+        consume: impl FnOnce(Instant) -> OutputConsumption<T>,
+    ) -> Result<(CompletedChild, T), ExternalProcessError> {
+        let (input_write, consumed, waited) = thread::scope(|scope| {
+            let writer = scope.spawn(move || write_process_input(self.stdin, input));
+            let started = Instant::now();
+            let consumed = consume(started);
+            let waited = if consumed.failed {
+                terminate_process_group(&mut self.child).map(|status| (status, consumed.timed_out))
+            } else {
+                let remaining = self.timeout.saturating_sub(started.elapsed());
+                wait_for_process_group(&mut self.child, remaining)
+            };
+            (writer.join(), consumed, waited)
+        });
+        let input_write = joined_input(input_write)?;
+        let (status, wait_timed_out) = waited
+            .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?;
+        let completed = complete_child(input_write, status, consumed.timed_out || wait_timed_out);
+        Ok((completed, consumed.value))
+    }
+
+    fn run_without_output(
+        mut self,
+        input: ProcessInput<'_>,
+    ) -> Result<CompletedChild, ExternalProcessError> {
+        // Supervision runs while stdin is written because an uncooperative
+        // command can stop reading before the pipe is drained.
+        let (input_write, waited) = thread::scope(|scope| {
+            let waiter = scope.spawn(move || wait_for_process_group(&mut self.child, self.timeout));
+            let input_write = write_process_input(self.stdin, input);
+            (input_write, waiter.join())
+        });
+        let input_write = input_write
+            .map(|()| InputWrite::Complete)
+            .unwrap_or(InputWrite::Failed);
+        let (status, timed_out) =
+            waited.map_err(|_| process_error("external command wait worker failed"))??;
+        Ok(complete_child(input_write, status, timed_out))
+    }
+}
+
+fn write_process_input(mut stdin: ChildStdin, input: ProcessInput<'_>) -> std::io::Result<()> {
+    write_action_input(
+        &mut stdin,
+        input.bytes,
+        input.output_ending,
+        input.append_lf,
+        input.body_input,
+    )
+}
+
+fn joined_input(
+    result: thread::Result<std::io::Result<()>>,
+) -> Result<InputWrite, ExternalProcessError> {
+    match result {
+        Ok(Ok(())) => Ok(InputWrite::Complete),
+        Ok(Err(_)) => Ok(InputWrite::Failed),
+        Err(_) => Err(process_error("external command input worker failed")),
+    }
+}
+
+fn complete_child(input_write: InputWrite, status: ExitStatus, timed_out: bool) -> CompletedChild {
+    CompletedChild {
+        input_write,
+        child_exit: classify_child_exit(status, timed_out),
+        exit_code: status.code().and_then(|code| u8::try_from(code).ok()),
+    }
+}
+
 pub fn run_filter(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,
@@ -237,73 +397,36 @@ pub fn run_filter(
     options: FilterOptions,
     stderr: Stdio,
 ) -> Result<FilterRun, ExternalProcessError> {
-    let invocation = policy
-        .authorize(environment)
-        .map_err(|error| process_error(error.to_string()))?;
-    let mut command_builder = Command::new(invocation.path());
-    let mut child = command_builder
-        .arg(invocation.flags())
-        .arg(command)
-        .env_clear()
-        .envs(environment.values())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(stderr)
-        .process_group(0)
-        .spawn()
-        .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
-    drop(command_builder);
-    let mut child_stdin = child
-        .stdin
-        .take()
-        .expect("piped child stdin is available after spawn");
-    let child_stdout = child
-        .stdout
-        .take()
-        .expect("piped child stdout is available after spawn");
-
-    // The command may produce output before it consumes all input. Pump stdin
-    // on a scoped thread while this thread drains and validates stdout so
-    // neither finite pipe buffer can make an otherwise progressing filter
-    // wait forever for procmail-rs.
-    let (input_write, output, status) = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || {
-            write_action_input(
-                &mut child_stdin,
-                input,
-                options.output_ending,
-                false,
-                options.action_input == ActionInput::Body,
-            )
-        });
-        let waiter = scope.spawn(move || wait_for_process_group(&mut child, options.timeout));
+    let lifecycle = ChildLifecycle::spawn(
+        policy,
+        environment,
+        command,
+        options.timeout,
+        Stdio::piped(),
+        stderr,
+    )?;
+    let process_input = ProcessInput {
+        bytes: input,
+        output_ending: options.output_ending,
+        append_lf: false,
+        body_input: options.action_input == ActionInput::Body,
+    };
+    let (completed, output) = lifecycle.run_with_piped_output(process_input, |child_stdout| {
         // Body-only output has no header separator. Prefix a private separator
         // while parsing stdout so arbitrary body bytes are governed by body
         // limits instead of being mistaken for an unterminated header field.
-        let output = if options.action_input == ActionInput::Body {
+        if options.action_input == ActionInput::Body {
             let reader = std::io::Cursor::new(&b"\n"[..]).chain(child_stdout);
             Message::read_from(&mut BufReader::new(reader), options.limits)
         } else {
             Message::read_from(&mut BufReader::new(child_stdout), options.limits)
-        };
-        let input_write = writer.join();
-        let status = waiter.join();
-        (input_write, output, status)
-    });
-
-    let (status, timed_out) = status
-        .map_err(|_| process_error("external command wait worker failed"))?
-        .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?;
-    let input_write = match input_write {
-        Ok(Ok(())) => InputWrite::Complete,
-        Ok(Err(_)) => InputWrite::Failed,
-        Err(_) => return Err(process_error("external command input worker failed")),
-    };
+        }
+    })?;
 
     Ok(FilterRun {
-        input_write,
+        input_write: completed.input_write,
         output,
-        child_exit: classify_child_exit(status, timed_out),
+        child_exit: completed.child_exit,
     })
 }
 
@@ -353,47 +476,31 @@ pub fn run_capture_with_timeout(
     options: CaptureOptions,
     stderr: Stdio,
 ) -> Result<CaptureRun, ExternalProcessError> {
-    let invocation = policy
-        .authorize(environment)
-        .map_err(|error| process_error(error.to_string()))?;
     let (mut output_reader, output_writer) = UnixStream::pair()
         .map_err(|error| process_error(format!("cannot create command output channel: {error}")))?;
     output_reader
         .set_read_timeout(Some(PROCESS_POLL_INTERVAL))
         .map_err(|error| process_error(format!("cannot bound command output wait: {error}")))?;
     let output_writer: OwnedFd = output_writer.into();
-    let mut command_builder = Command::new(invocation.path());
-    let mut child = command_builder
-        .arg(invocation.flags())
-        .arg(command)
-        .env_clear()
-        .envs(environment.values())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(output_writer))
-        .stderr(stderr)
-        .process_group(0)
-        .spawn()
-        .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
-    drop(command_builder);
-    let mut child_stdin = child
-        .stdin
-        .take()
-        .expect("piped child stdin is available after spawn");
-    // A command can block unless stdin and stdout progress independently. A
-    // timed socket also lets this thread supervise descendants that retain
-    // stdout after the direct shell exits; a plain blocking pipe read would
-    // otherwise wait forever without reaching the process-group timeout.
-    let (input_write, output, status, timed_out) = thread::scope(|scope| {
-        let writer = scope.spawn(move || {
-            write_action_input(
-                &mut child_stdin,
-                input,
-                options.output_ending,
-                false,
-                options.action_input == ActionInput::Body,
-            )
-        });
-        let started = Instant::now();
+    let lifecycle = ChildLifecycle::spawn(
+        policy,
+        environment,
+        command,
+        options.timeout,
+        Stdio::from(output_writer),
+        stderr,
+    )?;
+    let process_input = ProcessInput {
+        bytes: input,
+        output_ending: options.output_ending,
+        append_lf: false,
+        body_input: options.action_input == ActionInput::Body,
+    };
+
+    // The timed socket keeps output consumption interruptible even when a
+    // descendant retains stdout after the direct shell exits. Parsing and
+    // byte limits remain properties of the capture consumer.
+    let (completed, output) = lifecycle.run_with_timed_output(process_input, |started| {
         let output = read_bounded_output_until(
             &mut output_reader,
             options.output_limit,
@@ -405,31 +512,18 @@ pub fn run_capture_with_timeout(
         let timed_out = output
             .as_ref()
             .is_err_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
-        let waited = if output_failed {
-            terminate_process_group(&mut child).map(|status| (status, timed_out))
-        } else {
-            let remaining = options.timeout.saturating_sub(started.elapsed());
-            wait_for_process_group(&mut child, remaining)
-        };
-        let input_write = writer.join();
-        (input_write, output, waited, timed_out)
-    });
-
-    let input_write = match input_write {
-        Ok(Ok(())) => InputWrite::Complete,
-        Ok(Err(_)) => InputWrite::Failed,
-        Err(_) => return Err(process_error("external command input worker failed")),
-    };
-    let (status, wait_timed_out) = status
-        .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?;
-    let timed_out = timed_out || wait_timed_out;
-    let exit_code = status.code().and_then(|code| u8::try_from(code).ok());
+        OutputConsumption {
+            value: output,
+            failed: output_failed,
+            timed_out,
+        }
+    })?;
 
     Ok(CaptureRun {
-        input_write,
+        input_write: completed.input_write,
         output,
-        child_exit: classify_child_exit(status, timed_out),
-        exit_code,
+        child_exit: completed.child_exit,
+        exit_code: completed.exit_code,
     })
 }
 
@@ -526,52 +620,17 @@ fn run_program_with_streams(
         append_lf,
         body_input,
     } = options;
-    let invocation = policy
-        .authorize(environment)
-        .map_err(|error| process_error(error.to_string()))?;
-    let mut command_builder = Command::new(invocation.path());
-    let mut child = command_builder
-        .arg(invocation.flags())
-        .arg(command)
-        .env_clear()
-        .envs(environment.values())
-        .stdin(Stdio::piped())
-        .stdout(stdout)
-        .stderr(stderr)
-        .process_group(0)
-        .spawn()
-        .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
-    let mut child_stdin = child
-        .stdin
-        .take()
-        .expect("piped child stdin is available after spawn");
-
-    // Wait supervision must run while stdin is written. A command that never
-    // reads can otherwise fill the pipe and prevent this thread from reaching
-    // the timeout code that is supposed to terminate it.
-    let (input_write, waited) = thread::scope(|scope| {
-        let waiter = scope.spawn(move || wait_for_process_group(&mut child, timeout));
-        let input_write = match write_action_input(
-            &mut child_stdin,
-            input,
-            output_ending,
-            append_lf,
-            body_input,
-        ) {
-            Ok(()) => InputWrite::Complete,
-            Err(_) => InputWrite::Failed,
-        };
-        drop(child_stdin);
-        (input_write, waiter.join())
-    });
-    let (status, timed_out) =
-        waited.map_err(|_| process_error("external command wait worker failed"))??;
-
-    let exit_code = status.code().and_then(|code| u8::try_from(code).ok());
+    let lifecycle = ChildLifecycle::spawn(policy, environment, command, timeout, stdout, stderr)?;
+    let completed = lifecycle.run_without_output(ProcessInput {
+        bytes: input,
+        output_ending,
+        append_lf,
+        body_input,
+    })?;
     Ok(ProgramRun {
-        input_write,
-        child_exit: classify_child_exit(status, timed_out),
-        exit_code,
+        input_write: completed.input_write,
+        child_exit: completed.child_exit,
+        exit_code: completed.exit_code,
     })
 }
 
