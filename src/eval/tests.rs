@@ -455,11 +455,7 @@ fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
             } else {
                 b"z\n".to_vec()
             };
-            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                output,
-                crate::external_filter::InputWrite::Complete,
-                crate::external_filter::ChildExit::Failure,
-            ))
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(output))
         }),
     )
     .unwrap();
@@ -502,11 +498,7 @@ fn destination_command_substitution_uses_complete_message_and_runtime_values() {
             assert_eq!(input, raw);
             assert_eq!(options, None);
             assert_eq!(limit, crate::config::DEFAULT_LINEBUF);
-            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                b"selected\n\n".to_vec(),
-                crate::external_filter::InputWrite::Complete,
-                crate::external_filter::ChildExit::Success,
-            ))
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(b"selected\n\n".to_vec()))
         }),
     )
     .unwrap();
@@ -536,11 +528,7 @@ fn destination_command_output_obeys_active_linebuf() {
             )
             .with_capture(&mut |_, _, _, _, limit, _, _| {
                 assert_eq!(limit, 128);
-                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                    vec![b'x'; length],
-                    crate::external_filter::InputWrite::Complete,
-                    crate::external_filter::ChildExit::Success,
-                ))
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(vec![b'x'; length]))
             }),
         );
 
@@ -578,11 +566,7 @@ fn destination_command_rejects_non_utf8_output_before_delivery() {
             &mut NoTrace,
         )
         .with_capture(&mut |_, _, _, _, _, _, _| {
-            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                b"bad-\xff-path".to_vec(),
-                crate::external_filter::InputWrite::Complete,
-                crate::external_filter::ChildExit::Success,
-            ))
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(b"bad-\xff-path".to_vec()))
         }),
     );
 
@@ -622,11 +606,7 @@ fn ordered_capture_uses_selected_area_strips_one_lf_and_continues() {
                     options.unwrap().child_status,
                     crate::config::ChildStatusMode::WaitQuietly
                 );
-                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                    b"value\n\n\n".to_vec(),
-                    crate::external_filter::InputWrite::Complete,
-                    crate::external_filter::ChildExit::Success,
-                ))
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(b"value\n\n\n".to_vec()))
             }),
         )
         .unwrap();
@@ -657,11 +637,7 @@ fn header_capture_runs_without_body_staging_and_updates_later_paths() {
                 called = true;
                 assert_eq!(command, "capture");
                 assert_eq!(input, b"Subject: test\n\n");
-                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                    b"selected\n".to_vec(),
-                    crate::external_filter::InputWrite::Complete,
-                    crate::external_filter::ChildExit::Success,
-                ))
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(b"selected\n".to_vec()))
             },
         )
         .unwrap();
@@ -725,11 +701,7 @@ fn successful_header_capture_selects_success_handler() {
             &mut runtime,
             &mut NoTrace,
             &mut |_, _, _, _, _, _, _| {
-                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                    b"value".to_vec(),
-                    crate::external_filter::InputWrite::Complete,
-                    crate::external_filter::ChildExit::Success,
-                ))
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(b"value".to_vec()))
             },
         )
         .unwrap();
@@ -761,11 +733,7 @@ fn header_capture_validates_output_limit_before_replacing_value() {
             &mut NoTrace,
             &mut |_, _, _, _, limit, _, _| {
                 assert_eq!(limit, 128);
-                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                    vec![b'x'; length],
-                    crate::external_filter::InputWrite::Complete,
-                    crate::external_filter::ChildExit::Success,
-                ))
+                Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(vec![b'x'; length]))
             },
         );
 
@@ -804,11 +772,7 @@ fn failed_backquoted_fragment_does_not_publish_a_partial_value() {
         )
         .with_capture(&mut |command, _, _, _, _, _, _| {
             if command == "first" {
-                Ok(CapturedCommand::new(
-                    b"first-output".to_vec(),
-                    crate::external_filter::InputWrite::Complete,
-                    crate::external_filter::ChildExit::Success,
-                ))
+                Ok(CapturedCommand::new(b"first-output".to_vec()))
             } else {
                 Err(DeliveryAttemptError::Recoverable("second failed"))
             }
@@ -838,11 +802,7 @@ fn metadata_trace_excludes_capture_command_output_and_message_values() {
         &mut runtime,
         &mut trace,
         &mut |_, _, _, _, _, _, _| {
-            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(
-                b"output-secret".to_vec(),
-                crate::external_filter::InputWrite::Complete,
-                crate::external_filter::ChildExit::Success,
-            ))
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(b"output-secret".to_vec()))
         },
     );
     assert!(matches!(result, Ok(HeaderEvaluation::Decided(_))));

@@ -15,7 +15,7 @@ pub mod config;
 pub mod delivery;
 pub mod environment;
 pub mod eval;
-pub mod external_filter;
+pub mod external_command;
 pub mod external_process;
 pub(crate) mod header_edit;
 pub mod hostname;

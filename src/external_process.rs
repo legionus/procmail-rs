@@ -5,7 +5,7 @@ use std::fmt;
 use std::io::{BufReader, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use rustix::process::{Pid, Signal, kill_process_group};
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use crate::config::{ActionInput, AssignmentTarget, Config, OutputEnding, Statement};
 use crate::environment::{ProcessEnvironment, ShellPolicy};
-use crate::external_filter::{ChildExit, FilterOutput, InputWrite};
+use crate::external_command::{ChildExit, CommandOutcome, FilterOutput, InputWrite};
 use crate::limits::MessageLimits;
 use crate::message::{Message, MessageReadError};
 
@@ -156,12 +156,8 @@ impl FilterOptions {
 }
 
 impl ProgramRun {
-    pub fn input_write(self) -> InputWrite {
-        self.input_write
-    }
-
-    pub fn child_exit(self) -> ChildExit {
-        self.child_exit
+    pub fn outcome(self) -> CommandOutcome {
+        CommandOutcome::new(self.input_write, self.child_exit)
     }
 
     pub fn exit_code(self) -> Option<u8> {
@@ -170,10 +166,6 @@ impl ProgramRun {
 }
 
 impl CaptureRun {
-    pub fn input_write(&self) -> InputWrite {
-        self.input_write
-    }
-
     pub fn output(&self) -> Result<&[u8], &std::io::Error> {
         self.output.as_deref()
     }
@@ -182,8 +174,8 @@ impl CaptureRun {
         self.output
     }
 
-    pub fn child_exit(&self) -> ChildExit {
-        self.child_exit
+    pub fn outcome(&self) -> CommandOutcome {
+        CommandOutcome::new(self.input_write, self.child_exit)
     }
 
     pub fn exit_code(&self) -> Option<u8> {
@@ -192,10 +184,6 @@ impl CaptureRun {
 }
 
 impl FilterRun {
-    pub fn input_write(&self) -> InputWrite {
-        self.input_write
-    }
-
     pub fn output_state(&self) -> FilterOutput {
         match self.output {
             Ok(_) => FilterOutput::CompleteAndValid,
@@ -211,8 +199,20 @@ impl FilterRun {
         self.output
     }
 
-    pub fn child_exit(&self) -> ChildExit {
-        self.child_exit
+    pub fn outcome(&self) -> CommandOutcome {
+        CommandOutcome::new(self.input_write, self.child_exit)
+    }
+}
+
+fn classify_child_exit(status: std::process::ExitStatus, timed_out: bool) -> ChildExit {
+    if timed_out {
+        ChildExit::TimedOut
+    } else if status.success() {
+        ChildExit::Success
+    } else if status.signal().is_some() {
+        ChildExit::Signaled
+    } else {
+        ChildExit::ExitFailure
     }
 }
 
@@ -303,13 +303,7 @@ pub fn run_filter(
     Ok(FilterRun {
         input_write,
         output,
-        child_exit: if timed_out {
-            ChildExit::TimedOut
-        } else if status.success() {
-            ChildExit::Success
-        } else {
-            ChildExit::Failure
-        },
+        child_exit: classify_child_exit(status, timed_out),
     })
 }
 
@@ -434,13 +428,7 @@ pub fn run_capture_with_timeout(
     Ok(CaptureRun {
         input_write,
         output,
-        child_exit: if timed_out {
-            ChildExit::TimedOut
-        } else if status.success() {
-            ChildExit::Success
-        } else {
-            ChildExit::Failure
-        },
+        child_exit: classify_child_exit(status, timed_out),
         exit_code,
     })
 }
@@ -582,13 +570,7 @@ fn run_program_with_streams(
     let exit_code = status.code().and_then(|code| u8::try_from(code).ok());
     Ok(ProgramRun {
         input_write,
-        child_exit: if timed_out {
-            ChildExit::TimedOut
-        } else if status.success() {
-            ChildExit::Success
-        } else {
-            ChildExit::Failure
-        },
+        child_exit: classify_child_exit(status, timed_out),
         exit_code,
     })
 }

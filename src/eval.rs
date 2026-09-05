@@ -56,21 +56,11 @@ use tree::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedCommand {
     output: Vec<u8>,
-    input_write: crate::external_filter::InputWrite,
-    child_exit: crate::external_filter::ChildExit,
 }
 
 impl CapturedCommand {
-    pub fn new(
-        output: Vec<u8>,
-        input_write: crate::external_filter::InputWrite,
-        child_exit: crate::external_filter::ChildExit,
-    ) -> Self {
-        Self {
-            output,
-            input_write,
-            child_exit,
-        }
+    pub fn new(output: Vec<u8>) -> Self {
+        Self { output }
     }
 
     pub fn output(&self) -> &[u8] {
@@ -79,14 +69,6 @@ impl CapturedCommand {
 
     pub fn into_output(self) -> Vec<u8> {
         self.output
-    }
-
-    pub fn input_write(&self) -> crate::external_filter::InputWrite {
-        self.input_write
-    }
-
-    pub fn child_exit(&self) -> crate::external_filter::ChildExit {
-        self.child_exit
     }
 }
 

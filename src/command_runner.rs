@@ -7,7 +7,7 @@ use std::process::Stdio;
 use procmail_rs::config::{ActionInput, ActionMode, OutputEnding, RecipeOptions, WriteErrorMode};
 use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{CapturedCommand, DeliveryAttemptError, ExternalActionInput};
-use procmail_rs::external_filter::{ChildExit, FilterOutput, decide_filter, decide_program};
+use procmail_rs::external_command::{ChildExit, CommandOutcomePolicy, FilterOutput};
 use procmail_rs::external_process::{
     CaptureOptions, CaptureRun, FilterOptions, FilterRun, ProgramOptions, ProgramRun,
     run_capture_with_timeout, run_filter, run_program_with_timeout, run_trap_with_timeout,
@@ -106,7 +106,10 @@ impl CommandRunner {
                 "condition returned non-program output",
             ));
         };
-        Ok(run.child_exit() == ChildExit::Success)
+        Ok(run
+            .outcome()
+            .decide(CommandOutcomePolicy::Condition)
+            .accepted())
     }
 
     pub fn capture(
@@ -131,33 +134,29 @@ impl CommandRunner {
         let CommandRun::Capture(run) = self.run(request, runtime)? else {
             return Err(internal_runner_error("capture returned non-capture output"));
         };
-        let input_write = run.input_write();
-        let child_exit = run.child_exit();
-
-        if child_exit == ChildExit::TimedOut {
-            report_child_failure(runtime, child_exit).map_err(log_error)?;
-            return Err(recoverable_error("command assignment exceeded TIMEOUT"));
+        let outcome = run.outcome();
+        let policy = recipe_options.map_or(CommandOutcomePolicy::ExpansionCapture, |options| {
+            CommandOutcomePolicy::RecipeCapture {
+                child_status: options.child_status,
+                write_errors: options.write_errors,
+            }
+        });
+        let decision = outcome.decide(policy);
+        if decision.report_child_failure() {
+            report_child_failure(runtime, outcome.child_exit()).map_err(log_error)?;
         }
-        if let Some(options) = recipe_options {
-            let decision = decide_program(
-                options.child_status,
-                options.write_errors,
-                input_write,
-                child_exit,
-            );
-            if decision.report_child_failure() {
-                report_child_failure(runtime, child_exit).map_err(log_error)?;
-            }
-            if !decision.succeeded() {
-                return Err(recoverable_error(
-                    "command capture did not complete successfully",
-                ));
-            }
+        if !decision.accepted() {
+            let message = if outcome.child_exit() == ChildExit::TimedOut {
+                "command assignment exceeded TIMEOUT"
+            } else {
+                "command capture did not complete successfully"
+            };
+            return Err(recoverable_error(message));
         }
         let output = run.into_output().map_err(|error| {
             recoverable_error(format!("command returned invalid captured output: {error}"))
         })?;
-        Ok(CapturedCommand::new(output, input_write, child_exit))
+        Ok(CapturedCommand::new(output))
     }
 
     pub fn action(
@@ -187,16 +186,15 @@ impl CommandRunner {
         };
         match self.run(request, runtime)? {
             CommandRun::Program(run) => {
-                let decision = decide_program(
-                    options.child_status,
-                    options.write_errors,
-                    run.input_write(),
-                    run.child_exit(),
-                );
+                let outcome = run.outcome();
+                let decision = outcome.decide(CommandOutcomePolicy::Pipe {
+                    child_status: options.child_status,
+                    write_errors: options.write_errors,
+                });
                 if decision.report_child_failure() {
-                    report_child_failure(runtime, run.child_exit()).map_err(log_error)?;
+                    report_child_failure(runtime, outcome.child_exit()).map_err(log_error)?;
                 }
-                if !decision.succeeded() {
+                if !decision.accepted() {
                     return Err(recoverable_error(
                         "external program did not complete successfully",
                     ));
@@ -225,12 +223,14 @@ impl CommandRunner {
         let result = self.run_trap(&command, message, runtime);
         match result {
             Ok(run) if exitcode_was_empty => {
-                if run.child_exit() == ChildExit::TimedOut {
+                let outcome = run.outcome();
+                let decision = outcome.decide(CommandOutcomePolicy::Trap);
+                if outcome.child_exit() == ChildExit::TimedOut {
                     report_trap_diagnostic(runtime, "TRAP exceeded TIMEOUT");
                 }
                 if let Some(code) = run.exit_code().filter(|code| *code != 0) {
                     runtime.set("EXITCODE", code.to_string());
-                } else if run.child_exit() != ChildExit::Success {
+                } else if !decision.accepted() {
                     runtime.set(
                         "EXITCODE",
                         (ExitStatus::TemporaryDelivery as u8).to_string(),
@@ -238,7 +238,7 @@ impl CommandRunner {
                 }
             }
             Ok(run) => {
-                if run.child_exit() == ChildExit::TimedOut {
+                if run.outcome().child_exit() == ChildExit::TimedOut {
                     report_trap_diagnostic(runtime, "TRAP exceeded TIMEOUT");
                 }
             }
@@ -377,15 +377,14 @@ fn finish_filter(
     limits: MessageLimits,
     runtime: &RuntimeVariables,
 ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
-    let decision = decide_filter(
-        options.child_status,
-        options.write_errors,
-        run.input_write(),
-        run.output_state(),
-        run.child_exit(),
-    );
+    let outcome = run.outcome();
+    let decision = outcome.decide(CommandOutcomePolicy::Filter {
+        child_status: options.child_status,
+        write_errors: options.write_errors,
+        output: run.output_state(),
+    });
     if decision.report_child_failure() {
-        report_child_failure(runtime, run.child_exit()).map_err(log_error)?;
+        report_child_failure(runtime, outcome.child_exit()).map_err(log_error)?;
     }
     if run.output_state() == FilterOutput::Failed {
         return match run.into_output() {
@@ -397,7 +396,7 @@ fn finish_filter(
             )),
         };
     }
-    if !decision.succeeded() {
+    if !decision.replace_message() {
         return Err(recoverable_error(
             "external filter did not complete successfully",
         ));
@@ -464,10 +463,11 @@ fn log_error(error: io::Error) -> DeliveryAttemptError<OperationalError> {
 }
 
 fn report_child_failure(runtime: &RuntimeVariables, child_exit: ChildExit) -> io::Result<()> {
-    let diagnostic = if child_exit == ChildExit::TimedOut {
-        b"procmail-rs: external command exceeded TIMEOUT\n".as_slice()
-    } else {
-        b"procmail-rs: external command exited unsuccessfully\n".as_slice()
+    let diagnostic: &[u8] = match child_exit {
+        ChildExit::Success => return Ok(()),
+        ChildExit::ExitFailure => b"procmail-rs: external command exited unsuccessfully\n",
+        ChildExit::Signaled => b"procmail-rs: external command terminated by a signal\n",
+        ChildExit::TimedOut => b"procmail-rs: external command exceeded TIMEOUT\n",
     };
     CommandLog::new(runtime)
         .write_diagnostic(diagnostic)

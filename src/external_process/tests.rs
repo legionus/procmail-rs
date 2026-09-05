@@ -47,8 +47,8 @@ fn runs_with_only_the_bounded_runtime_environment() {
     )
     .unwrap();
 
-    assert_eq!(run.input_write(), InputWrite::Complete);
-    assert_eq!(run.child_exit(), ChildExit::Success);
+    assert_eq!(run.outcome().input_write(), InputWrite::Complete);
+    assert_eq!(run.outcome().child_exit(), ChildExit::Success);
     assert_eq!(
         run.output().unwrap().as_bytes(),
         b"X-Token: expected\n\nbody"
@@ -75,7 +75,7 @@ fn pumps_large_input_and_output_concurrently() {
     )
     .unwrap();
 
-    assert_eq!(run.input_write(), InputWrite::Complete);
+    assert_eq!(run.outcome().input_write(), InputWrite::Complete);
     assert_eq!(run.output().unwrap().as_bytes(), input);
 }
 
@@ -99,7 +99,7 @@ fn streams_command_stderr_to_the_supplied_descriptor() {
     )
     .unwrap();
 
-    assert_eq!(run.child_exit(), ChildExit::Success);
+    assert_eq!(run.outcome().child_exit(), ChildExit::Success);
     assert_eq!(fs::read(&path).unwrap(), b"filter diagnostic");
     fs::remove_file(path).unwrap();
 }
@@ -121,7 +121,7 @@ fn reports_status_and_keeps_complete_output_separate() {
     )
     .unwrap();
 
-    assert_eq!(run.child_exit(), ChildExit::Failure);
+    assert_eq!(run.outcome().child_exit(), ChildExit::ExitFailure);
     assert_eq!(run.output_state(), FilterOutput::CompleteAndValid);
 }
 
@@ -242,8 +242,8 @@ fn regular_program_discards_stdout_and_reports_completion() {
     )
     .unwrap();
 
-    assert_eq!(run.input_write(), InputWrite::Complete);
-    assert_eq!(run.child_exit(), ChildExit::Success);
+    assert_eq!(run.outcome().input_write(), InputWrite::Complete);
+    assert_eq!(run.outcome().child_exit(), ChildExit::Success);
 }
 
 #[test]
@@ -259,8 +259,25 @@ fn regular_program_reports_failed_exit_without_parsing_output() {
     )
     .unwrap();
 
-    assert_eq!(run.child_exit(), ChildExit::Failure);
+    assert_eq!(run.outcome().child_exit(), ChildExit::ExitFailure);
     assert_eq!(run.exit_code(), Some(19));
+}
+
+#[test]
+fn regular_program_distinguishes_signal_termination_from_exit_failure() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let run = run_program(
+        &policy,
+        &environment,
+        "kill -TERM $$",
+        b"",
+        ProgramOptions::new(OutputEnding::Preserve, ActionInput::Message),
+        Stdio::null(),
+    )
+    .unwrap();
+
+    assert_eq!(run.outcome().child_exit(), ChildExit::Signaled);
+    assert_eq!(run.exit_code(), None);
 }
 
 #[test]
@@ -278,7 +295,7 @@ fn timeout_terminates_a_program_and_its_process_group() {
     )
     .unwrap();
 
-    assert_eq!(run.child_exit(), ChildExit::TimedOut);
+    assert_eq!(run.outcome().child_exit(), ChildExit::TimedOut);
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
@@ -300,7 +317,7 @@ fn timeout_interrupts_filter_output_waiting() {
     )
     .unwrap();
 
-    assert_eq!(run.child_exit(), ChildExit::TimedOut);
+    assert_eq!(run.outcome().child_exit(), ChildExit::TimedOut);
 }
 
 #[test]
@@ -319,8 +336,8 @@ fn timeout_interrupts_a_blocked_program_input_write() {
     )
     .unwrap();
 
-    assert_eq!(run.input_write(), InputWrite::Failed);
-    assert_eq!(run.child_exit(), ChildExit::TimedOut);
+    assert_eq!(run.outcome().input_write(), InputWrite::Failed);
+    assert_eq!(run.outcome().child_exit(), ChildExit::TimedOut);
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
@@ -338,8 +355,8 @@ fn capture_pumps_binary_input_and_output_concurrently() {
     )
     .unwrap();
 
-    assert_eq!(run.input_write(), InputWrite::Complete);
-    assert_eq!(run.child_exit(), ChildExit::Success);
+    assert_eq!(run.outcome().input_write(), InputWrite::Complete);
+    assert_eq!(run.outcome().child_exit(), ChildExit::Success);
     assert_eq!(run.exit_code(), Some(0));
     assert_eq!(run.output().unwrap(), input);
 }
@@ -420,7 +437,7 @@ fn capture_streams_stderr_and_obeys_timeout() {
     )
     .unwrap();
 
-    assert_eq!(run.child_exit(), ChildExit::TimedOut);
+    assert_eq!(run.outcome().child_exit(), ChildExit::TimedOut);
     assert_eq!(fs::read(&path).unwrap(), b"diagnostic");
     fs::remove_file(path).unwrap();
 }
@@ -439,7 +456,7 @@ fn capture_times_out_when_a_background_descendant_keeps_stdout_open() {
     )
     .unwrap();
 
-    assert_eq!(run.child_exit(), ChildExit::TimedOut);
+    assert_eq!(run.outcome().child_exit(), ChildExit::TimedOut);
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
