@@ -4,8 +4,8 @@
 use super::*;
 
 fn parse_wide(input: &str) -> Result<Config, ParseError> {
-    let mut state = RcParseState::default();
-    state.limits.linebuf = super::super::MAX_LINEBUF;
+    let mut state = ParseBudget::default();
+    state.set_linebuf(super::super::MAX_LINEBUF);
     parse_with_state(input, &mut state)
 }
 use crate::config::{MAX_SHELL_SETTING_LEN, ShellPart};

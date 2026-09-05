@@ -11,8 +11,8 @@ use super::{
     ContinuationMode, ControlFlow, Destination, HeaderAction, HeaderOperation, HeaderValue,
     MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION,
     MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_CAPTURES,
-    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseError, PathExpression,
-    PipeAction, RcFileExpression, RcLimits, RcParseCounts, RcParseState, Recipe, RecipeAction,
+    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseBudget, ParseError,
+    PathExpression, PipeAction, RcFileExpression, RcLimits, RcParseCounts, Recipe, RecipeAction,
     RecipeOptions, RegexCondition, ShellExpression, Statement, VariablePolicy, VariableSource,
     WriteErrorMode, variable_policy,
 };
@@ -26,14 +26,11 @@ use super::{
 };
 
 pub fn parse(input: &str) -> Result<Config, ParseError> {
-    let mut state = RcParseState::default();
+    let mut state = ParseBudget::default();
     parse_with_state(input, &mut state)
 }
 
-pub(crate) fn parse_with_state(
-    input: &str,
-    state: &mut RcParseState,
-) -> Result<Config, ParseError> {
+pub(crate) fn parse_with_state(input: &str, state: &mut ParseBudget) -> Result<Config, ParseError> {
     if input.len() > MAX_RC_SIZE {
         return Err(ParseError::limit(
             1,
@@ -42,14 +39,14 @@ pub(crate) fn parse_with_state(
     }
 
     let lines: Vec<&str> = input.lines().collect();
-    let initial = state.counts;
-    let initial_linebuf = state.limits.linebuf;
+    let initial = state.snapshot();
+    let initial_linebuf = state.linebuf();
     let (statements, _) = parse_statements(&lines, 0, 0, state)?;
 
     Ok(Config {
         statements,
         initial_variables: Vec::new(),
-        parse_counts: state.counts.subtract(initial)?,
+        parse_counts: state.counts_since(initial)?,
         initial_linebuf,
     })
 }
@@ -81,16 +78,157 @@ impl RcParseCounts {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AssignmentUse {
+    Statement,
+    CaptureAction,
+}
+
+impl ParseBudget {
+    // Charge syntax before allocating its parsed representation, but apply a
+    // limit-changing assignment only after that assignment has consumed the
+    // preceding assignment budget. Keeping both steps here preserves source
+    // order and prevents nested parsing from temporarily hiding its usage.
+    fn snapshot(&self) -> RcParseCounts {
+        self.counts
+    }
+
+    fn counts_since(&self, earlier: RcParseCounts) -> Result<RcParseCounts, ParseError> {
+        self.counts.subtract(earlier)
+    }
+
+    fn linebuf(&self) -> usize {
+        self.limits.linebuf
+    }
+
+    fn check_line(&self, line: &str, line_number: usize) -> Result<(), ParseError> {
+        check_linebuf(line, line_number, self.linebuf())
+    }
+
+    fn check_statement(&self, line: usize) -> Result<(), ParseError> {
+        check_count_limit(
+            self.counts.statements,
+            self.limits.statements,
+            line,
+            "statement",
+        )
+    }
+
+    fn charge_recipe(&mut self, line: usize) -> Result<(), ParseError> {
+        check_count_limit(self.counts.recipes, self.limits.recipes, line, "recipe")?;
+        self.counts.recipes = self
+            .counts
+            .recipes
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(line, "rc recipe count overflows"))?;
+        self.counts.statements = self
+            .counts
+            .statements
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(line, "rc statement count overflows"))?;
+        Ok(())
+    }
+
+    fn charge_assignment(&mut self, line: usize, usage: AssignmentUse) -> Result<(), ParseError> {
+        check_count_limit(
+            self.counts.assignments,
+            self.limits.assignments,
+            line,
+            "assignment",
+        )?;
+        self.counts.assignments = self
+            .counts
+            .assignments
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(line, "rc assignment count overflows"))?;
+        if matches!(usage, AssignmentUse::Statement) {
+            self.counts.statements = self
+                .counts
+                .statements
+                .checked_add(1)
+                .ok_or_else(|| ParseError::new(line, "rc statement count overflows"))?;
+        }
+        Ok(())
+    }
+
+    fn check_condition(&self, recipe_count: usize, line: usize) -> Result<(), ParseError> {
+        if recipe_count >= self.limits.conditions_per_recipe {
+            return Err(ParseError::limit(
+                line,
+                format!(
+                    "recipe condition count exceeds the active limit of {}",
+                    self.limits.conditions_per_recipe
+                ),
+            ));
+        }
+        let total = self
+            .counts
+            .conditions
+            .checked_add(recipe_count)
+            .ok_or_else(|| ParseError::new(line, "rc condition count overflows"))?;
+        check_count_limit(total, self.limits.conditions, line, "condition")
+    }
+
+    fn check_regex(&self, recipe_count: usize, line: usize) -> Result<(), ParseError> {
+        let total = self
+            .counts
+            .regexes
+            .checked_add(recipe_count)
+            .ok_or_else(|| ParseError::new(line, "rc regex count overflows"))?;
+        check_count_limit(total, self.limits.regexes, line, "regex")
+    }
+
+    fn record_recipe_contents(
+        &mut self,
+        conditions: usize,
+        regexes: usize,
+        line: usize,
+    ) -> Result<(), ParseError> {
+        self.counts.conditions = self
+            .counts
+            .conditions
+            .checked_add(conditions)
+            .ok_or_else(|| ParseError::new(line, "rc condition count overflows"))?;
+        self.counts.regexes = self
+            .counts
+            .regexes
+            .checked_add(regexes)
+            .ok_or_else(|| ParseError::new(line, "rc regex count overflows"))?;
+        Ok(())
+    }
+
+    fn check_nesting(&self, depth: usize, line: usize) -> Result<usize, ParseError> {
+        let next = depth
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(line, "recipe nesting depth overflows"))?;
+        if next > self.limits.nesting_depth {
+            return Err(ParseError::limit(
+                line,
+                format!(
+                    "recipe nesting depth {next} exceeds the active limit of {}",
+                    self.limits.nesting_depth
+                ),
+            ));
+        }
+        Ok(next)
+    }
+
+    fn apply_assignment(&mut self, assignment: &Assignment) -> Result<(), ParseError> {
+        apply_rc_limit(assignment, &mut self.limits)?;
+        apply_linebuf(assignment, &mut self.limits)
+    }
+}
+
 fn parse_statements(
     lines: &[&str],
     mut index: usize,
     depth: usize,
-    state: &mut RcParseState,
+    state: &mut ParseBudget,
 ) -> Result<(Vec<Statement>, usize), ParseError> {
     let mut statements = Vec::new();
     while index < lines.len() {
         let line_number = index + 1;
-        check_linebuf(lines[index], line_number, state.limits.linebuf)?;
+        state.check_line(lines[index], line_number)?;
         let line = lines[index].trim();
 
         if line.is_empty() || line.starts_with('#') {
@@ -108,30 +246,10 @@ fn parse_statements(
             return Ok((statements, index + 1));
         }
 
-        check_count_limit(
-            state.counts.statements,
-            state.limits.statements,
-            line_number,
-            "statement",
-        )?;
+        state.check_statement(line_number)?;
 
         if line.starts_with(':') {
-            check_count_limit(
-                state.counts.recipes,
-                state.limits.recipes,
-                line_number,
-                "recipe",
-            )?;
-            state.counts.recipes = state
-                .counts
-                .recipes
-                .checked_add(1)
-                .ok_or_else(|| ParseError::new(line_number, "rc recipe count overflows"))?;
-            state.counts.statements = state
-                .counts
-                .statements
-                .checked_add(1)
-                .ok_or_else(|| ParseError::new(line_number, "rc statement count overflows"))?;
+            state.charge_recipe(line_number)?;
             let (recipe, next) = parse_recipe(lines, index, depth, state)?;
             statements.push(Statement::Recipe(recipe));
             index = next;
@@ -139,12 +257,7 @@ fn parse_statements(
         }
 
         if let Some(assignment) = parse_assignment(line, line_number)? {
-            check_count_limit(
-                state.counts.assignments,
-                state.limits.assignments,
-                line_number,
-                "assignment",
-            )?;
+            state.charge_assignment(line_number, AssignmentUse::Statement)?;
             if depth != 0
                 && matches!(
                     assignment.target,
@@ -200,19 +313,8 @@ fn parse_statements(
                     _ => Statement::Assignment(assignment),
                 },
             };
-            state.counts.assignments = state
-                .counts
-                .assignments
-                .checked_add(1)
-                .ok_or_else(|| ParseError::new(line_number, "rc assignment count overflows"))?;
-            state.counts.statements = state
-                .counts
-                .statements
-                .checked_add(1)
-                .ok_or_else(|| ParseError::new(line_number, "rc statement count overflows"))?;
             if let Statement::Assignment(assignment) = &statement {
-                apply_rc_limit(assignment, &mut state.limits)?;
-                apply_linebuf(assignment, &mut state.limits)?;
+                state.apply_assignment(assignment)?;
             }
             statements.push(statement);
             index += 1;
@@ -374,7 +476,7 @@ fn parse_recipe(
     lines: &[&str],
     start: usize,
     depth: usize,
-    state: &mut RcParseState,
+    state: &mut ParseBudget,
 ) -> Result<(Recipe, usize), ParseError> {
     let header = lines[start].trim();
     let rest = header
@@ -386,7 +488,7 @@ fn parse_recipe(
     let mut index = start + 1;
 
     while index < lines.len() {
-        check_linebuf(lines[index], index + 1, state.limits.linebuf)?;
+        state.check_line(lines[index], index + 1)?;
         let line = lines[index].trim();
         if line.is_empty() || line.starts_with('#') {
             index += 1;
@@ -397,14 +499,13 @@ fn parse_recipe(
             // or compile a regular expression. The local and file-wide
             // budgets are separate because either shape can make later plan
             // construction disproportionately expensive.
-            check_condition_limits(conditions.len(), state, index + 1)?;
+            state.check_condition(conditions.len(), index + 1)?;
             let (condition, is_regex) = parse_condition(
                 condition,
                 index + 1,
                 options.case_mode == CaseMode::Sensitive,
-                state.counts.regexes,
                 regex_count,
-                state.limits.regexes,
+                state,
             )?;
             conditions.push(condition);
             regex_count = regex_count
@@ -419,7 +520,7 @@ fn parse_recipe(
     let action = lines
         .get(index)
         .map(|line| {
-            check_linebuf(line, index + 1, state.limits.linebuf)?;
+            state.check_line(line, index + 1)?;
             Ok(line.trim())
         })
         .transpose()?
@@ -428,16 +529,7 @@ fn parse_recipe(
     // Charge the parent recipe before descending into a block so nested
     // parsing cannot temporarily hide conditions or regexes from file-wide
     // limits.
-    state.counts.conditions = state
-        .counts
-        .conditions
-        .checked_add(conditions.len())
-        .ok_or_else(|| ParseError::new(start + 1, "rc condition count overflows"))?;
-    state.counts.regexes = state
-        .counts
-        .regexes
-        .checked_add(regex_count)
-        .ok_or_else(|| ParseError::new(start + 1, "rc regex count overflows"))?;
+    state.record_recipe_contents(conditions.len(), regex_count, start + 1)?;
 
     if action.starts_with('!') {
         return Err(ParseError::new(
@@ -504,17 +596,7 @@ fn parse_recipe(
     }
 
     let (action, next) = if let Some((name, target)) = capture {
-        check_count_limit(
-            state.counts.assignments,
-            state.limits.assignments,
-            index + 1,
-            "assignment",
-        )?;
-        state.counts.assignments = state
-            .counts
-            .assignments
-            .checked_add(1)
-            .ok_or_else(|| ParseError::new(index + 1, "rc assignment count overflows"))?;
+        state.charge_assignment(index + 1, AssignmentUse::CaptureAction)?;
         let command_text = action
             .split_once("=|")
             .map(|(_, command)| command)
@@ -524,7 +606,7 @@ fn parse_recipe(
             lines,
             index,
             command_text,
-            state.limits.linebuf,
+            state.linebuf(),
             "capture action command",
         )?;
         (
@@ -537,7 +619,7 @@ fn parse_recipe(
             next,
         )
     } else if is_pipe {
-        let (command, next) = parse_pipe_command(lines, index, state.limits.linebuf)?;
+        let (command, next) = parse_pipe_command(lines, index, state.linebuf())?;
         if command.is_empty() && options.action_mode == ActionMode::Filter {
             return Err(ParseError::new(
                 index + 1,
@@ -546,21 +628,10 @@ fn parse_recipe(
         }
         (RecipeAction::Pipe(PipeAction { command }), next)
     } else if is_headers {
-        let (action, next) = parse_header_action(lines, index, state.limits.linebuf)?;
+        let (action, next) = parse_header_action(lines, index, state.linebuf())?;
         (RecipeAction::Headers(action), next)
     } else if action == "{" {
-        let next_depth = depth
-            .checked_add(1)
-            .ok_or_else(|| ParseError::new(index + 1, "recipe nesting depth overflows"))?;
-        if next_depth > state.limits.nesting_depth {
-            return Err(ParseError::limit(
-                index + 1,
-                format!(
-                    "recipe nesting depth {next_depth} exceeds the active limit of {}",
-                    state.limits.nesting_depth
-                ),
-            ));
-        }
+        let next_depth = state.check_nesting(depth, index + 1)?;
         if lock.as_deref() == Some("") {
             return Err(ParseError::new(
                 start + 1,
@@ -952,37 +1023,6 @@ fn parse_command_continuation(
     Ok((command, index + 1))
 }
 
-fn check_condition_limits(
-    recipe_count: usize,
-    state: &RcParseState,
-    line: usize,
-) -> Result<(), ParseError> {
-    if recipe_count >= state.limits.conditions_per_recipe {
-        return Err(ParseError::limit(
-            line,
-            format!(
-                "recipe condition count exceeds the active limit of {}",
-                state.limits.conditions_per_recipe
-            ),
-        ));
-    }
-    let total = state
-        .counts
-        .conditions
-        .checked_add(recipe_count)
-        .ok_or_else(|| ParseError::new(line, "rc condition count overflows"))?;
-    if total >= state.limits.conditions {
-        return Err(ParseError::limit(
-            line,
-            format!(
-                "rc condition count exceeds the active limit of {}",
-                state.limits.conditions
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn parse_recipe_header(
     rest: &str,
     line: usize,
@@ -1099,9 +1139,8 @@ fn parse_condition(
     input: &str,
     line: usize,
     case_sensitive: bool,
-    prior_regexes: usize,
     recipe_regexes: usize,
-    regex_limit: usize,
+    budget: &ParseBudget,
 ) -> Result<(Condition, bool), ParseError> {
     let mut input = input.trim();
     if input.ends_with('\\') {
@@ -1143,15 +1182,7 @@ fn parse_condition(
         validate_program_condition(command, line)?;
         (ConditionKind::Program(command.to_owned()), false)
     } else {
-        let total_regexes = prior_regexes
-            .checked_add(recipe_regexes)
-            .ok_or_else(|| ParseError::new(line, "rc regex count overflows"))?;
-        if total_regexes >= regex_limit {
-            return Err(ParseError::limit(
-                line,
-                format!("rc regex count exceeds the active limit of {regex_limit}"),
-            ));
-        }
+        budget.check_regex(recipe_regexes, line)?;
         let (target, pattern) = condition_regex_target(input, line)?;
         if pattern.len() > MAX_REGEX_PATTERN_LEN {
             return Err(ParseError::new(
@@ -1231,7 +1262,8 @@ pub(crate) fn parse_reparsed_condition(
     line: usize,
     case_sensitive: bool,
 ) -> Result<Condition, ParseError> {
-    parse_condition(input, line, case_sensitive, 0, 0, 1).map(|(condition, _)| condition)
+    parse_condition(input, line, case_sensitive, 0, &ParseBudget::default())
+        .map(|(condition, _)| condition)
 }
 
 fn has_scoring_prefix(input: &str) -> bool {

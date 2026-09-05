@@ -138,9 +138,25 @@ impl RcLimits {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct RcParseState {
-    pub(crate) counts: RcParseCounts,
-    pub(crate) limits: RcLimits,
+pub(crate) struct ParseBudget {
+    counts: RcParseCounts,
+    limits: RcLimits,
+}
+
+impl ParseBudget {
+    pub(crate) fn reset(&mut self, counts: RcParseCounts) {
+        self.counts = counts;
+        self.limits = RcLimits::default();
+    }
+
+    pub(crate) fn replace_limits(&mut self, limits: RcLimits) {
+        self.limits = limits;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_linebuf(&mut self, linebuf: usize) {
+        self.limits.linebuf = linebuf;
+    }
 }
 
 impl Config {

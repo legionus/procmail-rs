@@ -12,8 +12,8 @@ use rustix::fd::OwnedFd;
 use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 
 use crate::config::{
-    self, AssignmentTarget, Config, MAX_RC_SIZE, RcFileExpression, RcLimitVariable, RcLimits,
-    RcParseState, RecipeAction, Statement,
+    self, AssignmentTarget, Config, MAX_RC_SIZE, ParseBudget, RcFileExpression, RcLimitVariable,
+    RcLimits, RecipeAction, Statement,
 };
 use crate::runtime::RuntimeVariables;
 
@@ -31,7 +31,7 @@ pub struct RcFileLoader {
     trusted_uid: u32,
     files_read: usize,
     bytes_read: usize,
-    parse_state: RcParseState,
+    parse_state: ParseBudget,
 }
 
 #[derive(Debug)]
@@ -75,7 +75,7 @@ impl RcFileLoader {
                 trusted_uid: metadata.uid(),
                 files_read: 1,
                 bytes_read: source_len,
-                parse_state: RcParseState::default(),
+                parse_state: ParseBudget::default(),
             },
             loaded,
         ))
@@ -217,8 +217,7 @@ impl RcFileLoader {
     }
 
     pub fn account_root_config(&mut self, config: &Config) -> Result<(), RcFileError> {
-        self.parse_state.counts = config.parse_counts();
-        self.parse_state.limits = RcLimits::default();
+        self.parse_state.reset(config.parse_counts());
         Ok(())
     }
 
@@ -260,7 +259,7 @@ impl RcFileLoader {
                 ));
             }
         }
-        self.parse_state.limits = limits;
+        self.parse_state.replace_limits(limits);
         Ok(())
     }
 

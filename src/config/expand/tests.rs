@@ -162,8 +162,8 @@ fn nested_static_shell_condition_is_reparsed_before_message_input() {
 }
 
 fn parse_wide(input: &str) -> Result<Config, super::super::ParseError> {
-    let mut state = super::super::RcParseState::default();
-    state.limits.linebuf = super::super::MAX_LINEBUF;
+    let mut state = super::super::ParseBudget::default();
+    state.set_linebuf(super::super::MAX_LINEBUF);
     super::super::parse_with_state(input, &mut state)
 }
 use crate::config::{ConditionKind, DEFAULT_LINEBUF, MAX_SHELL_SETTING_LEN, parse};
