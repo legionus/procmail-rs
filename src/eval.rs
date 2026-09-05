@@ -21,6 +21,8 @@ mod ordered;
 mod result;
 mod runtime_rc;
 mod services;
+#[cfg(test)]
+mod test_services;
 mod tree;
 
 fn runtime_setting_eval_error(error: RuntimeSettingError) -> EvalError {
@@ -47,7 +49,9 @@ pub use result::{
 use result::{ContinuationFrame, DeliveryContinuation};
 pub use runtime_rc::MAX_RUNTIME_RC_WARNINGS;
 use runtime_rc::{RcExecutionContext, RuntimeRcState};
-pub use services::{ExecutionServices, ExecutionServicesError, RecipeLockGuard};
+pub use services::{OrderedExecutionHost, RecipeLockGuard};
+#[cfg(test)]
+pub use test_services::ExecutionServices;
 use tree::{
     ActionExecution, CompiledAction, CompiledAssignment, CompiledNode, CompiledSequence,
     CompiledStatement, SequenceState,

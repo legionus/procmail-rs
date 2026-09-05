@@ -6,10 +6,11 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
-use procmail_rs::config::{self, Destination, OutputEnding};
+use procmail_rs::config::{self, Destination, OutputEnding, PipeAction, RecipeOptions};
 use procmail_rs::eval::{
-    DeliveryAttemptError, DeliveryOutcome, ExecutionPlan, ExecutionServices, MappedMessageInput,
-    PreparedMatchingMessage,
+    CapturedCommand, CompletionState, DeliveryAttemptError, DeliveryOutcome, ExecutionPlan,
+    ExternalActionInput, FinalMessage, MappedMessageInput, OrderedExecutionHost,
+    PreparedMatchingMessage, RecipeLockGuard,
 };
 use procmail_rs::limits::MessageLimits;
 use procmail_rs::message::Message;
@@ -22,6 +23,89 @@ const FIXTURES: &str = "tests/fixtures/differential_eval";
 struct Recorder {
     selected: Vec<String>,
     failures: BTreeSet<String>,
+}
+
+struct RecorderHost<'a> {
+    recorder: &'a mut Recorder,
+    trace: NoTrace,
+}
+
+impl OrderedExecutionHost for RecorderHost<'_> {
+    type Error = String;
+    type Trace = NoTrace;
+
+    fn trace(&mut self) -> &mut Self::Trace {
+        &mut self.trace
+    }
+
+    fn deliver(
+        &mut self,
+        destination: &Destination,
+        _: &[u8],
+        _: OutputEnding,
+        _: Option<&str>,
+        _: &mut RuntimeVariables,
+    ) -> Result<(), DeliveryAttemptError<Self::Error>> {
+        self.recorder
+            .deliver(destination)
+            .map_err(DeliveryAttemptError::Recoverable)
+    }
+
+    fn external_action(
+        &mut self,
+        _: &PipeAction,
+        _: RecipeOptions,
+        _: Option<&str>,
+        _: ExternalActionInput<'_>,
+        _: &mut RuntimeVariables,
+    ) -> Result<Option<Message>, DeliveryAttemptError<Self::Error>> {
+        panic!("fixture unexpectedly requested an external action")
+    }
+
+    fn capture(
+        &mut self,
+        _: &str,
+        _: &[u8],
+        _: OutputEnding,
+        _: Option<RecipeOptions>,
+        _: usize,
+        _: &mut RuntimeVariables,
+    ) -> Result<CapturedCommand, DeliveryAttemptError<Self::Error>> {
+        panic!("fixture unexpectedly requested command capture")
+    }
+
+    fn external_condition(
+        &mut self,
+        _: &str,
+        _: &[u8],
+        _: &mut RuntimeVariables,
+    ) -> Result<bool, DeliveryAttemptError<Self::Error>> {
+        panic!("fixture unexpectedly requested an external condition")
+    }
+
+    fn replace_global_lock(
+        &mut self,
+        _: &str,
+        _: &mut RuntimeVariables,
+    ) -> Result<(), Self::Error> {
+        panic!("fixture unexpectedly requested a global lock")
+    }
+
+    fn acquire_local_lock(
+        &mut self,
+        _: &str,
+        _: &mut RuntimeVariables,
+    ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<Self::Error>> {
+        panic!("fixture unexpectedly requested a local lock")
+    }
+
+    fn complete(
+        &mut self,
+        _: FinalMessage<'_>,
+        _: &mut RuntimeVariables,
+        _: CompletionState<'_, Self::Error>,
+    ) {
+    }
 }
 
 impl Recorder {
@@ -77,24 +161,16 @@ fn evaluate(
 ) -> DeliveryOutcome {
     let plan = ExecutionPlan::compile(config);
     let mut runtime = RuntimeVariables::default();
-    let mut trace = NoTrace;
     let prepared_matching = PreparedMatchingMessage::new(message, plan.needs_message_contents());
     let matching = Some(prepared_matching.views(message));
-    let mut delivery = |destination: &Destination,
-                        _: &[u8],
-                        _: OutputEnding,
-                        _: Option<&str>,
-                        _: &mut RuntimeVariables,
-                        _: &mut NoTrace| {
-        recorder
-            .deliver(destination)
-            .map_err(DeliveryAttemptError::Recoverable)
+    let host = RecorderHost {
+        recorder,
+        trace: NoTrace,
     };
-    let services = ExecutionServices::new(&mut delivery, &mut trace);
     plan.execute_ordered(
         MappedMessageInput::new(message.as_bytes(), message.header().len(), matching),
         &mut runtime,
-        services,
+        host,
     )
     .unwrap()
 }

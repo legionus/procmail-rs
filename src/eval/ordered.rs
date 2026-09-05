@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use super::services::{
-    CommandCaptureExecutor, DeliveryExecutor, ExternalActionExecutor, ExternalConditionExecutor,
-    GlobalLockExecutor, LocalLockExecutor,
-};
+use super::services::OrderedExecutionHost;
 use super::*;
 use crate::bounded_bytes::BoundedBytesError;
 use crate::config::shell_eval::{
@@ -15,16 +12,10 @@ struct OrderedTreeExecution<'a, E, T> {
     message: CompleteMessage<'a>,
     replacement: Option<OwnedCompleteMessage>,
     runtime: &'a mut RuntimeVariables,
-    trace: &'a mut T,
-    deliver: &'a mut DeliveryExecutor<'a, E, T>,
+    host: &'a mut dyn OrderedExecutionHost<Error = E, Trace = T>,
     published: usize,
     original_delivered: bool,
     pending_error: Option<E>,
-    external: Option<&'a mut ExternalActionExecutor<'a, E, T>>,
-    capture: Option<&'a mut CommandCaptureExecutor<'a, E, T>>,
-    external_condition: Option<&'a mut ExternalConditionExecutor<'a, E, T>>,
-    global_lock: Option<&'a mut GlobalLockExecutor<'a, E>>,
-    local_lock: Option<&'a mut LocalLockExecutor<'a, E>>,
     rc: RcExecutionContext<'a>,
     limits: MessageLimits,
 }
@@ -94,13 +85,13 @@ impl CompiledSequence {
                 recipe.execution_gate(state) && recipe.matches_ordered(context)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let (action, control) = if conditions_matched {
-                context.trace.record(TraceEvent::RecipeEvaluated {
+                context.host.trace().record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
                 recipe.execute_ordered_action(context)?
             } else {
-                context.trace.record(TraceEvent::RecipeEvaluated {
+                context.host.trace().record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Skipped,
                 });
@@ -166,8 +157,7 @@ impl CompiledNode {
                             limit,
                         },
                         context.runtime,
-                        context.trace,
-                        &mut context.capture,
+                        context.host,
                     )?;
                     String::from_utf8(bytes)
                         .map_err(|_| EvalError::RuntimeCondition {
@@ -184,14 +174,10 @@ impl CompiledNode {
                     .program_input(input)
                     .ok_or(EvalError::BodyWasNotBuffered)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                let Some(executor) = context.external_condition.as_deref_mut() else {
-                    return Err(OrderedExecutionError::Evaluation(
-                        EvalError::ExternalConditionUnsupported {
-                            line: condition.line,
-                        },
-                    ));
-                };
-                match executor(command, input, context.runtime, context.trace) {
+                match context
+                    .host
+                    .external_condition(command, input, context.runtime)
+                {
                     Ok(matched) => condition.apply_negation(matched),
                     Err(DeliveryAttemptError::Recoverable(error))
                     | Err(DeliveryAttemptError::Fatal(error)) => {
@@ -207,7 +193,7 @@ impl CompiledNode {
                 self.line,
                 index,
                 PartialMatch::from_bool(matched),
-                context.trace,
+                context.host.trace(),
             );
             if !matched {
                 return Ok(false);
@@ -233,19 +219,13 @@ impl CompiledNode {
                     .map_err(OrderedExecutionError::Evaluation)?;
                 let limit =
                     active_command_value_limit(context.runtime, action.target, action.line)?;
-                let executor = context.capture.as_deref_mut().ok_or_else(|| {
-                    OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
-                        line: self.line,
-                    })
-                })?;
-                let captured = executor(
+                let captured = context.host.capture(
                     &action.command,
                     input,
                     options.output_ending,
                     Some(*options),
                     limit,
                     context.runtime,
-                    context.trace,
                 );
                 match captured {
                     Ok(captured) => {
@@ -261,7 +241,7 @@ impl CompiledNode {
                             value,
                             Some(action.line),
                             TraceVariableSource::RcFile,
-                            context.trace,
+                            context.host.trace(),
                         );
                         context.action_succeeded(SequenceControl::Continue)
                     }
@@ -307,12 +287,6 @@ impl CompiledNode {
                     .action_input(options.action_input)
                     .ok_or(EvalError::BodyWasNotBuffered)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                let Some(external) = context.external.as_deref_mut() else {
-                    return Err(OrderedExecutionError::Evaluation(
-                        EvalError::ExternalActionUnsupported { line: self.line },
-                    ));
-                };
-
                 // Keep the old message alive until the external executor has
                 // completed and validated all output. Only an accepted filter
                 // result replaces the owned current version used by later
@@ -329,13 +303,12 @@ impl CompiledNode {
                     .resolve_lock(context.runtime)
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                match external(
+                match context.host.external_action(
                     action,
                     *options,
                     lock.as_deref(),
                     action_input,
                     context.runtime,
-                    context.trace,
                 ) {
                     Ok(replacement) => {
                         if options.action_mode == crate::config::ActionMode::Filter {
@@ -393,8 +366,7 @@ impl CompiledNode {
                             limit,
                         },
                         context.runtime,
-                        context.trace,
-                        &mut context.capture,
+                        context.host,
                     )?;
                     let source = String::from_utf8(bytes)
                         .map_err(|_| EvalError::DestinationCommandOutputIsNotUtf8 {
@@ -418,13 +390,12 @@ impl CompiledNode {
                     .resolve_lock(context.runtime)
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                match (context.deliver)(
+                match context.host.deliver(
                     &destination,
                     message,
                     *output_ending,
                     lock.as_deref(),
                     context.runtime,
-                    context.trace,
                 ) {
                     Ok(()) => {
                         context.published += 1;
@@ -449,12 +420,7 @@ impl CompiledNode {
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
                 let _guard = if let Some(path) = lock.as_deref() {
-                    let executor = context.local_lock.as_mut().ok_or_else(|| {
-                        OrderedExecutionError::Evaluation(EvalError::LocalLockExecutorUnavailable {
-                            line: self.line,
-                        })
-                    })?;
-                    match executor(path, context.runtime) {
+                    match context.host.acquire_local_lock(path, context.runtime) {
                         Ok(guard) => Some(guard),
                         Err(DeliveryAttemptError::Recoverable(error)) => {
                             return context.action_failed(error);
@@ -490,7 +456,7 @@ where
                 execute_command_assignment(assignment, context)?;
             }
             CompiledStatement::Assignment(assignment) => {
-                execute_assignment(assignment, context.runtime, context.trace)
+                execute_assignment(assignment, context.runtime, context.host.trace())
                     .map_err(OrderedExecutionError::Evaluation)?;
                 if assignment.assignment.target == AssignmentTarget::LockFile {
                     let value = context
@@ -498,18 +464,14 @@ where
                         .get("LOCKFILE")
                         .unwrap_or_default()
                         .to_owned();
-                    let global_lock = context.global_lock.as_mut().ok_or_else(|| {
-                        OrderedExecutionError::Evaluation(EvalError::RuntimeSettingUnavailable {
-                            line: assignment.assignment.line,
-                            name: "LOCKFILE",
-                        })
-                    })?;
-                    global_lock(&value, context.runtime)
+                    context
+                        .host
+                        .replace_global_lock(&value, context.runtime)
                         .map_err(OrderedExecutionError::Delivery)?;
                 }
             }
             CompiledStatement::Host(assignment) => {
-                if !execute_host_assignment(assignment, context.runtime, context.trace)
+                if !execute_host_assignment(assignment, context.runtime, context.host.trace())
                     .map_err(OrderedExecutionError::Evaluation)?
                 {
                     context.original_delivered = true;
@@ -579,8 +541,7 @@ where
             limit,
         },
         context.runtime,
-        context.trace,
-        &mut context.capture,
+        context.host,
     )?;
 
     context.runtime.set_bytes_with_trace(
@@ -588,7 +549,7 @@ where
         value,
         Some(assignment.line),
         TraceVariableSource::RcFile,
-        context.trace,
+        context.host.trace(),
     );
     Ok(())
 }
@@ -601,11 +562,10 @@ struct ShellExpressionInput<'a> {
     limit: usize,
 }
 
-fn evaluate_shell_expression<'service, E, T>(
+fn evaluate_shell_expression<E, T>(
     input: ShellExpressionInput<'_>,
     runtime: &mut RuntimeVariables,
-    trace: &mut T,
-    capture: &mut Option<&'service mut CommandCaptureExecutor<'service, E, T>>,
+    host: &mut dyn OrderedExecutionHost<Error = E, Trace = T>,
 ) -> Result<Vec<u8>, OrderedExecutionError<E>>
 where
     T: TraceSink,
@@ -615,22 +575,20 @@ where
         value_name: input.value_name,
         message: input.message,
         runtime,
-        trace,
-        capture,
+        host,
     };
     shell_eval::evaluate(input.expression, input.limit, &mut context).map(|value| value.bytes)
 }
 
-struct OrderedExpressionEvaluation<'context, 'input, 'service, E, T> {
+struct OrderedExpressionEvaluation<'context, 'input, E, T> {
     line: usize,
     value_name: &'input str,
     message: &'input [u8],
     runtime: &'context mut RuntimeVariables,
-    trace: &'context mut T,
-    capture: &'context mut Option<&'service mut CommandCaptureExecutor<'service, E, T>>,
+    host: &'context mut dyn OrderedExecutionHost<Error = E, Trace = T>,
 }
 
-impl<E, T> EvaluationContext for OrderedExpressionEvaluation<'_, '_, '_, E, T>
+impl<E, T> EvaluationContext for OrderedExpressionEvaluation<'_, '_, E, T>
 where
     T: TraceSink,
 {
@@ -648,25 +606,20 @@ where
     }
 
     fn command(&mut self, command: &str, remaining: usize) -> Result<Vec<u8>, Self::Error> {
-        let executor = self.capture.as_deref_mut().ok_or_else(|| {
-            OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
-                line: self.line,
-            })
-        })?;
-        let captured = executor(
-            command,
-            self.message,
-            OutputEnding::Preserve,
-            None,
-            remaining,
-            self.runtime,
-            self.trace,
-        )
-        .map_err(|error| match error {
-            DeliveryAttemptError::Recoverable(error) | DeliveryAttemptError::Fatal(error) => {
-                OrderedExecutionError::Delivery(error)
-            }
-        })?;
+        let captured =
+            self.host
+                .capture(
+                    command,
+                    self.message,
+                    OutputEnding::Preserve,
+                    None,
+                    remaining,
+                    self.runtime,
+                )
+                .map_err(|error| match error {
+                    DeliveryAttemptError::Recoverable(error)
+                    | DeliveryAttemptError::Fatal(error) => OrderedExecutionError::Delivery(error),
+                })?;
         validate_captured_value(
             captured.into_output(),
             remaining,
@@ -743,44 +696,28 @@ pub(super) fn active_command_value_limit<E>(
 }
 
 impl ExecutionPlan {
-    pub fn execute_ordered<'a, E, T>(
+    pub fn execute_ordered<'a, H>(
         &'a self,
         message: MappedMessageInput<'a>,
         runtime: &'a mut RuntimeVariables,
-        services: ExecutionServices<'a, E, T>,
-    ) -> Result<DeliveryOutcome, OrderedExecutionError<E>>
+        mut host: H,
+    ) -> Result<DeliveryOutcome, OrderedExecutionError<H::Error>>
     where
-        T: TraceSink,
+        H: OrderedExecutionHost,
     {
         let message = message
             .complete_message(self.needs_message_contents())
             .ok_or(OrderedExecutionError::Evaluation(
                 EvalError::BodyWasNotBuffered,
             ))?;
-        let ExecutionServices {
-            delivery,
-            trace,
-            external,
-            capture,
-            external_condition,
-            global_lock,
-            local_lock,
-            mut completion,
-        } = services;
         let mut context = OrderedTreeExecution {
             message,
             replacement: None,
             runtime,
-            trace,
-            deliver: delivery,
+            host: &mut host,
             published: 0,
             original_delivered: false,
             pending_error: None,
-            external,
-            capture,
-            external_condition,
-            global_lock,
-            local_lock,
             rc: self.rc_context(),
             limits: self
                 .message_limits
@@ -804,25 +741,20 @@ impl ExecutionPlan {
         // bytes belong to mapped staging. Invoke completion while either
         // owner is still alive so callers such as TRAP can consume the final
         // message without allocating another message-sized buffer.
-        if let Some(completion) = completion.as_mut() {
-            let Some(message) =
-                current_ordered_message(context.message, context.replacement.as_ref()).raw()
-            else {
-                return Err(OrderedExecutionError::Evaluation(
-                    EvalError::BodyWasNotBuffered,
-                ));
-            };
-            let state = match &result {
-                Ok(outcome) => CompletionState::Completed(*outcome),
-                Err(error) => CompletionState::Failed(error),
-            };
-            completion(
-                FinalMessage::new(message),
-                context.runtime,
-                context.trace,
-                state,
-            );
-        }
+        let Some(message) =
+            current_ordered_message(context.message, context.replacement.as_ref()).raw()
+        else {
+            return Err(OrderedExecutionError::Evaluation(
+                EvalError::BodyWasNotBuffered,
+            ));
+        };
+        let state = match &result {
+            Ok(outcome) => CompletionState::Completed(*outcome),
+            Err(error) => CompletionState::Failed(error),
+        };
+        context
+            .host
+            .complete(FinalMessage::new(message), context.runtime, state);
         result
     }
 }

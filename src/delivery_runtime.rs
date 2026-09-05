@@ -12,9 +12,9 @@ use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
 use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
 use procmail_rs::eval::{
-    CompletionState, DeliveryAttemptError, DeliveryPlan, ExecutionPlan, ExecutionServices,
+    CapturedCommand, CompletionState, DeliveryAttemptError, DeliveryPlan, ExecutionPlan,
     ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage, OrderedExecutionError,
-    PlannedDelivery, RecipeLockGuard,
+    OrderedExecutionHost, PlannedDelivery, RecipeLockGuard,
 };
 use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
 use procmail_rs::runtime::{PublicationResult, RuntimeSettings, RuntimeVariables};
@@ -32,6 +32,134 @@ pub(super) struct DeliveryRuntime {
     uid: u32,
     global_lock: Option<LocalLock>,
     publications: PublicationTracker,
+}
+
+struct OrderedDeliveryHost<'a, T> {
+    command_runner: CommandRunner,
+    durability: Durability,
+    uid: u32,
+    global_lock: &'a mut Option<LocalLock>,
+    trace: &'a mut T,
+}
+
+impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
+    type Error = OperationalError;
+    type Trace = T;
+
+    fn trace(&mut self) -> &mut Self::Trace {
+        self.trace
+    }
+
+    fn deliver(
+        &mut self,
+        destination: &Destination,
+        message: &[u8],
+        output_ending: OutputEnding,
+        lock: Option<&str>,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<(), DeliveryAttemptError<Self::Error>> {
+        let _local_lock = acquire_recipe_lock(lock, Some(destination), runtime, self.uid)
+            .map_err(DeliveryAttemptError::Recoverable)?;
+        let result = if destination.supports_fanout_delivery() {
+            deliver_one_sink(destination, message, self.durability, runtime, self.trace)
+        } else {
+            deliver_file_destination(
+                destination,
+                message,
+                output_ending,
+                self.durability,
+                runtime,
+                self.trace,
+            )
+        };
+        result.map_err(|error| {
+            if error.can_handle {
+                DeliveryAttemptError::Recoverable(error.error)
+            } else {
+                DeliveryAttemptError::Fatal(error.error)
+            }
+        })
+    }
+
+    fn external_action(
+        &mut self,
+        action: &procmail_rs::config::PipeAction,
+        options: RecipeOptions,
+        lock: Option<&str>,
+        input: ExternalActionInput<'_>,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<Option<procmail_rs::message::Message>, DeliveryAttemptError<Self::Error>> {
+        let _local_lock = acquire_recipe_lock(lock, None, runtime, self.uid)
+            .map_err(DeliveryAttemptError::Recoverable)?;
+        self.command_runner
+            .action(action.command.as_str(), options, input, runtime)
+    }
+
+    fn capture(
+        &mut self,
+        command: &str,
+        input: &[u8],
+        output_ending: OutputEnding,
+        options: Option<RecipeOptions>,
+        limit: usize,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<CapturedCommand, DeliveryAttemptError<Self::Error>> {
+        self.command_runner
+            .capture(command, input, output_ending, options, limit, runtime)
+    }
+
+    fn external_condition(
+        &mut self,
+        command: &str,
+        input: &[u8],
+        runtime: &mut RuntimeVariables,
+    ) -> Result<bool, DeliveryAttemptError<Self::Error>> {
+        self.command_runner.condition(command, input, runtime)
+    }
+
+    fn replace_global_lock(
+        &mut self,
+        path: &str,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<(), Self::Error> {
+        // Replacing LOCKFILE first releases the preceding global lock. Clear
+        // its visible value on failure so later statements cannot treat an
+        // unheld path as an active lock.
+        *self.global_lock = None;
+        if path.is_empty() {
+            return Ok(());
+        }
+        match acquire_configured_lock(path, runtime, self.uid) {
+            Ok(lock) => {
+                *self.global_lock = Some(lock);
+                Ok(())
+            }
+            Err(error) => {
+                runtime.set("LOCKFILE".to_owned(), String::new());
+                Err(error)
+            }
+        }
+    }
+
+    fn acquire_local_lock(
+        &mut self,
+        path: &str,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<Self::Error>> {
+        acquire_configured_lock(path, runtime, self.uid)
+            .map(|lock| Box::new(lock) as Box<dyn RecipeLockGuard>)
+            .map_err(DeliveryAttemptError::Recoverable)
+    }
+
+    fn complete(
+        &mut self,
+        message: FinalMessage<'_>,
+        runtime: &mut RuntimeVariables,
+        state: CompletionState<'_, Self::Error>,
+    ) {
+        self.command_runner
+            .trap(message.as_bytes(), runtime, completion_exit_status(state));
+    }
 }
 
 #[derive(Default)]
@@ -179,113 +307,18 @@ impl DeliveryRuntime {
             .map(|header| MatchingMessage::from_normalized_parts(header, matching_raw));
 
         if execution.requires_ordered_delivery() {
-            let command_runner = CommandRunner::new(self.limits);
-            let durability = self.durability;
-            let uid = self.uid;
-            let global_lock = &mut self.global_lock;
-            let mut delivery = |destination: &Destination,
-                                message: &[u8],
-                                output_ending: OutputEnding,
-                                lock: Option<&str>,
-                                runtime: &mut RuntimeVariables,
-                                trace: &mut T| {
-                let _local_lock = acquire_recipe_lock(lock, Some(destination), runtime, uid)
-                    .map_err(DeliveryAttemptError::Recoverable)?;
-                let result = if destination.supports_fanout_delivery() {
-                    deliver_one_sink(destination, message, durability, runtime, trace)
-                } else {
-                    deliver_file_destination(
-                        destination,
-                        message,
-                        output_ending,
-                        durability,
-                        runtime,
-                        trace,
-                    )
-                };
-                result.map_err(|error| {
-                    if error.can_handle {
-                        DeliveryAttemptError::Recoverable(error.error)
-                    } else {
-                        DeliveryAttemptError::Fatal(error.error)
-                    }
-                })
+            let host = OrderedDeliveryHost {
+                command_runner: CommandRunner::new(self.limits),
+                durability: self.durability,
+                uid: self.uid,
+                global_lock: &mut self.global_lock,
+                trace,
             };
-            let mut condition =
-                |command: &str, input: &[u8], runtime: &mut RuntimeVariables, _: &mut T| {
-                    command_runner.condition(command, input, runtime)
-                };
-            let mut action = |action: &procmail_rs::config::PipeAction,
-                              recipe_options: RecipeOptions,
-                              lock: Option<&str>,
-                              input: ExternalActionInput<'_>,
-                              runtime: &mut RuntimeVariables,
-                              _: &mut T| {
-                let _local_lock = acquire_recipe_lock(lock, None, runtime, uid)
-                    .map_err(DeliveryAttemptError::Recoverable)?;
-                command_runner.action(action.command.as_str(), recipe_options, input, runtime)
-            };
-            let mut capture = |command: &str,
-                               input: &[u8],
-                               output_ending: OutputEnding,
-                               recipe_options: Option<RecipeOptions>,
-                               limit: usize,
-                               runtime: &mut RuntimeVariables,
-                               _: &mut T| {
-                command_runner.capture(
-                    command,
-                    input,
-                    output_ending,
-                    recipe_options,
-                    limit,
-                    runtime,
-                )
-            };
-            let mut global_lock_service = |path: &str, runtime: &mut RuntimeVariables| {
-                // Replacing LOCKFILE first releases the preceding global lock. If
-                // replacement fails, clear its visible value so later statements
-                // cannot mistake an unheld path for an active semaphore.
-                *global_lock = None;
-                if path.is_empty() {
-                    return Ok(());
-                }
-                match acquire_configured_lock(path, runtime, uid) {
-                    Ok(lock) => {
-                        *global_lock = Some(lock);
-                        Ok(())
-                    }
-                    Err(error) => {
-                        runtime.set("LOCKFILE".to_owned(), String::new());
-                        Err(error)
-                    }
-                }
-            };
-            let mut local_lock_service = |path: &str, runtime: &mut RuntimeVariables| {
-                acquire_configured_lock(path, runtime, uid)
-                    .map(|lock| Box::new(lock) as Box<dyn RecipeLockGuard>)
-                    .map_err(DeliveryAttemptError::Recoverable)
-            };
-            let mut completion =
-                |message: FinalMessage<'_>,
-                 runtime: &mut RuntimeVariables,
-                 _: &mut T,
-                 state: CompletionState<'_, OperationalError>| {
-                    command_runner.trap(message.as_bytes(), runtime, completion_exit_status(state));
-                };
-            let services = ExecutionServices::new(&mut delivery, trace)
-                .with_external_condition(&mut condition)
-                .with_external_action(&mut action)
-                .with_capture(&mut capture)
-                .with_global_lock(&mut global_lock_service)
-                .with_local_lock(&mut local_lock_service)
-                .with_completion(&mut completion)
-                .require_complete()
-                .map_err(|error| OperationalError::Internal(error.to_string()))?;
             let outcome = execution
                 .execute_ordered(
                     MappedMessageInput::new(staged.as_bytes(), staged.header_len(), matching),
                     runtime,
-                    services,
+                    host,
                 )
                 .map_err(|error| match error {
                     OrderedExecutionError::Evaluation(error) => {
