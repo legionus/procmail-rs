@@ -330,3 +330,29 @@ fn rejects_runtime_include_that_changes_pre_input_settings() {
 
     assert!(error.to_string().contains("must be set before message"));
 }
+
+#[test]
+fn filter_and_check_loading_share_runtime_setting_rejection() {
+    let directory = TestDirectory::new();
+    let root = directory.path("root.rc");
+    let child = directory.path("child.rc");
+    fs::write(&root, "ROOT=yes\n").unwrap();
+    fs::write(&child, "LIMIT_MSG_BODY=1k\n").unwrap();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+    let parsed = config::parse(&format!("INCLUDERC={}\n", child.display())).unwrap();
+    let Statement::Include(expression) = &parsed.statements[0] else {
+        panic!("expected include");
+    };
+    let runtime = RuntimeVariables::default();
+
+    let (mut filter_loader, _) = RcFileLoader::for_root(&root).unwrap();
+    let filter_error = filter_loader
+        .load_config(expression, &runtime, 1)
+        .unwrap_err();
+    let (mut check_loader, _) = RcFileLoader::for_root(&root).unwrap();
+    let check_error = check_loader
+        .load_check_config(expression, &runtime, 1)
+        .unwrap_err();
+
+    assert_eq!(filter_error.safe_message(), check_error.safe_message());
+}

@@ -53,6 +53,25 @@ pub struct RcFileError {
     resource_limit: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeRcPreparation {
+    Expand,
+    Check,
+}
+
+impl RuntimeRcPreparation {
+    fn prepare(self, config: Config, runtime: &RuntimeVariables) -> Result<Config, String> {
+        match self {
+            Self::Expand => config
+                .expand_with_runtime_values(runtime.values())
+                .map_err(|error| format!("cannot expand rc file: {error}")),
+            Self::Check => config
+                .prepare_for_check(runtime.values())
+                .map_err(|error| format!("cannot validate rc file: {error}")),
+        }
+    }
+}
+
 impl RcFileLoader {
     pub fn for_root(path: &Path) -> Result<(Self, LoadedRcFile), RcFileError> {
         let mut file = File::open(path).map_err(|error| RcFileError::io(path, error))?;
@@ -152,33 +171,7 @@ impl RcFileLoader {
         runtime: &RuntimeVariables,
         depth: usize,
     ) -> Result<Option<LoadedRcConfig>, RcFileError> {
-        let path = expression
-            .resolve_with(|name| runtime.get(name).map(str::to_owned))
-            .map_err(|error| RcFileError::new(Path::new("<runtime rc path>"), error.to_string()))?;
-        if path.is_empty() {
-            return Ok(None);
-        }
-        let loaded = self.load(Path::new(&path), depth)?;
-        self.activate_runtime_limits(runtime, loaded.path())?;
-        let mut next_parse_state = self.parse_state;
-        let config = config::parse_with_state(loaded.source(), &mut next_parse_state)
-            .map_err(|error| parse_file_error(loaded.path(), error))?;
-        self.parse_state = next_parse_state;
-        let config = config
-            .expand_with_runtime_values(runtime.values())
-            .map_err(|error| {
-                RcFileError::new(loaded.path(), format!("cannot expand rc file: {error}"))
-            })?;
-        validate_runtime_settings(&config.statements).map_err(|(line, name)| {
-            RcFileError::new(
-                loaded.path(),
-                format!("line {line}: {name} must be set before message processing begins"),
-            )
-        })?;
-        Ok(Some(LoadedRcConfig {
-            path: loaded.path,
-            config,
-        }))
+        self.load_prepared_config(expression, runtime, depth, RuntimeRcPreparation::Expand)
     }
 
     fn load_check_config(
@@ -186,6 +179,16 @@ impl RcFileLoader {
         expression: &RcFileExpression,
         runtime: &RuntimeVariables,
         depth: usize,
+    ) -> Result<Option<LoadedRcConfig>, RcFileError> {
+        self.load_prepared_config(expression, runtime, depth, RuntimeRcPreparation::Check)
+    }
+
+    fn load_prepared_config(
+        &mut self,
+        expression: &RcFileExpression,
+        runtime: &RuntimeVariables,
+        depth: usize,
+        preparation: RuntimeRcPreparation,
     ) -> Result<Option<LoadedRcConfig>, RcFileError> {
         let path = expression
             .resolve_with(|name| runtime.get(name).map(str::to_owned))
@@ -199,17 +202,15 @@ impl RcFileLoader {
         let config = config::parse_with_state(loaded.source(), &mut next_parse_state)
             .map_err(|error| parse_file_error(loaded.path(), error))?;
         self.parse_state = next_parse_state;
-        let config = config
-            .prepare_for_check(runtime.values())
-            .map_err(|error| {
-                RcFileError::new(loaded.path(), format!("cannot validate rc file: {error}"))
-            })?;
         validate_runtime_settings(&config.statements).map_err(|(line, name)| {
             RcFileError::new(
                 loaded.path(),
                 format!("line {line}: {name} must be set before message processing begins"),
             )
         })?;
+        let config = preparation
+            .prepare(config, runtime)
+            .map_err(|error| RcFileError::new(loaded.path(), error))?;
         Ok(Some(LoadedRcConfig {
             path: loaded.path,
             config,
