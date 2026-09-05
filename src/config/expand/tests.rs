@@ -4,6 +4,47 @@
 use super::*;
 
 #[test]
+fn shared_expression_syntax_has_identical_parts_in_common_modes() {
+    let source = r"pre-${EMPTY:-$NAME-\${LITERAL}-`printf x`}-post";
+    let ordinary = parse_command_expression(source, 4, true)
+        .unwrap()
+        .expect("source contains a command");
+    let condition = parse_shell_condition_expression(source, 4).unwrap();
+
+    assert_eq!(ordinary, condition);
+}
+
+#[test]
+fn expression_modes_keep_their_distinct_escape_and_dollar_rules() {
+    assert_eq!(
+        parse_assignment_expression(r"\q", 6, false).unwrap().parts,
+        [ShellPart::Literal("q".to_owned())]
+    );
+    let quoted = [ShellPart::Literal(r"\q".to_owned())];
+    assert_eq!(
+        parse_assignment_expression(r"\q", 6, true).unwrap().parts,
+        quoted
+    );
+    assert_eq!(
+        parse_shell_condition_expression(r"\q", 6).unwrap().parts,
+        quoted
+    );
+
+    assert!(parse_assignment_expression("$!", 7, false).is_err());
+    assert_eq!(
+        parse_shell_condition_expression("$!", 7).unwrap().parts,
+        [ShellPart::Literal("$!".to_owned())]
+    );
+    assert!(parse_shell_condition_expression("$1", 8).is_err());
+    assert_eq!(
+        parse_shell_condition_expression(r"$\NAME", 9)
+            .unwrap()
+            .parts,
+        [ShellPart::RegexQuotedVariable("NAME".to_owned())]
+    );
+}
+
+#[test]
 fn runtime_byte_expansion_preserves_binary_values_and_defaults() {
     let binary = b"a\xffz";
     let empty = b"";

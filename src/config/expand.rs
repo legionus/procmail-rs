@@ -1704,177 +1704,7 @@ pub(crate) fn parse_shell_condition_expression(
     input: &str,
     line: usize,
 ) -> Result<ShellExpression, ExpansionError> {
-    let mut index = 0;
-    let expression = parse_shell_condition_until(input, &mut index, line, 0, false)?;
-    debug_assert_eq!(index, input.len());
-    Ok(expression)
-}
-
-fn parse_shell_condition_until(
-    input: &str,
-    index: &mut usize,
-    line: usize,
-    depth: usize,
-    stop_at_brace: bool,
-) -> Result<ShellExpression, ExpansionError> {
-    check_expansion_depth(depth, line)?;
-    let bytes = input.as_bytes();
-    let mut parts = Vec::new();
-    let mut literal = String::new();
-
-    // The leading condition marker asks procmail to process the remainder as
-    // though it were inside double quotes. Keep command text opaque for the
-    // trusted shell, but identify its bounds here so later evaluation cannot
-    // reinterpret command output as expression syntax.
-    while *index < bytes.len() {
-        if stop_at_brace && bytes[*index] == b'}' {
-            break;
-        }
-        if bytes[*index] == b'`' {
-            if !literal.is_empty() {
-                parts.push(ShellPart::Literal(std::mem::take(&mut literal)));
-            }
-            let command_start = *index + 1;
-            *index = command_start;
-            let mut escaped = false;
-            while *index < bytes.len() {
-                match bytes[*index] {
-                    _ if escaped => escaped = false,
-                    b'\\' => escaped = true,
-                    b'`' => break,
-                    _ => {}
-                }
-                *index += 1;
-            }
-            if *index == bytes.len() {
-                return Err(ExpansionError::new(
-                    line,
-                    "unterminated backquoted command in shell-expanded condition",
-                ));
-            }
-            parts.push(ShellPart::Command(input[command_start..*index].to_owned()));
-            *index += 1;
-            continue;
-        }
-        if bytes[*index] == b'\\' {
-            if let Some(next @ (b'$' | b'`' | b'"' | b'\\')) = bytes.get(*index + 1).copied() {
-                literal.push(char::from(next));
-                *index += 2;
-                continue;
-            }
-            literal.push('\\');
-            *index += 1;
-            continue;
-        }
-        if bytes[*index] != b'$' {
-            let character = input[*index..].chars().next().ok_or_else(|| {
-                ExpansionError::new(line, "shell-expanded condition contains invalid UTF-8")
-            })?;
-            literal.push(character);
-            *index += character.len_utf8();
-            continue;
-        }
-
-        if !literal.is_empty() {
-            parts.push(ShellPart::Literal(std::mem::take(&mut literal)));
-        }
-        *index += 1;
-        let regex_escape = if bytes.get(*index) == Some(&b'\\') {
-            *index += 1;
-            true
-        } else {
-            false
-        };
-        let Some(first) = bytes.get(*index).copied() else {
-            if regex_escape {
-                return Err(ExpansionError::new(
-                    line,
-                    "regex-escaped condition variable is missing its name",
-                ));
-            }
-            literal.push('$');
-            continue;
-        };
-        let (name, default) = if first == b'{' {
-            if regex_escape {
-                return Err(ExpansionError::new(
-                    line,
-                    "regex-escaped condition variables use $\\NAME syntax",
-                ));
-            }
-            *index += 1;
-            let name_start = *index;
-            while *index < bytes.len() && is_name_continue(bytes[*index]) {
-                *index += 1;
-            }
-            let name = &input[name_start..*index];
-            validate_reference_name(name, line)?;
-            match bytes.get(*index..*index + 2) {
-                Some(b":-") => {
-                    *index += 2;
-                    let default = parse_shell_condition_until(input, index, line, depth + 1, true)?;
-                    if bytes.get(*index) != Some(&b'}') {
-                        return Err(ExpansionError::new(
-                            line,
-                            "variable reference is missing '}'",
-                        ));
-                    }
-                    *index += 1;
-                    (name.to_owned(), Some(default))
-                }
-                _ if bytes.get(*index) == Some(&b'}') => {
-                    *index += 1;
-                    (name.to_owned(), None)
-                }
-                _ => {
-                    return Err(ExpansionError::new(
-                        line,
-                        "unsupported parameter expansion; use ${NAME} or ${NAME:-expression}",
-                    ));
-                }
-            }
-        } else {
-            if !is_name_start(first) {
-                if matches!(first, b'?' | b'#' | b'$' | b'-' | b'=' | b'@')
-                    || first.is_ascii_digit()
-                {
-                    return Err(ExpansionError::new(
-                        line,
-                        "unsupported special parameter in shell-expanded condition",
-                    ));
-                }
-                literal.push('$');
-                continue;
-            }
-            let name_start = *index;
-            *index += 1;
-            while *index < bytes.len() && is_name_continue(bytes[*index]) {
-                *index += 1;
-            }
-            (input[name_start..*index].to_owned(), None)
-        };
-        if variable_policy(&name) == VariablePolicy::Unsupported {
-            return Err(ExpansionError::new(
-                line,
-                format!("procmail variable {name} is not supported"),
-            ));
-        }
-        if regex_escape {
-            parts.push(ShellPart::RegexQuotedVariable(name));
-        } else {
-            parts.push(ShellPart::Variable { name, default });
-        }
-    }
-    if !literal.is_empty() {
-        parts.push(ShellPart::Literal(literal));
-    }
-    if stop_at_brace && *index == bytes.len() {
-        return Err(ExpansionError::new(
-            line,
-            "variable reference is missing '}'",
-        ));
-    }
-    Ok(ShellExpression { parts })
+    ExpressionParser::new(input, line, ExpressionSyntax::ShellCondition).parse()
 }
 
 fn parse_expression(input: &str, line: usize) -> Result<ShellExpression, ExpansionError> {
@@ -1886,11 +1716,15 @@ fn parse_assignment_expression(
     line: usize,
     double_quoted: bool,
 ) -> Result<ShellExpression, ExpansionError> {
-    let mut index = 0;
-    let expression =
-        parse_expression_until(input, &mut index, line, 0, false, false, double_quoted)?;
-    debug_assert_eq!(index, input.len());
-    Ok(expression)
+    ExpressionParser::new(
+        input,
+        line,
+        ExpressionSyntax::Ordinary {
+            allow_commands: false,
+            double_quoted,
+        },
+    )
+    .parse()
 }
 
 pub(crate) fn parse_command_expression(
@@ -1898,192 +1732,313 @@ pub(crate) fn parse_command_expression(
     line: usize,
     double_quoted: bool,
 ) -> Result<Option<ShellExpression>, ExpansionError> {
-    if !contains_unescaped_backquote(input, double_quoted) {
+    let syntax = ExpressionSyntax::Ordinary {
+        allow_commands: true,
+        double_quoted,
+    };
+    if !syntax.contains_command(input) {
         return Ok(None);
     }
-    let mut index = 0;
-    let expression =
-        parse_expression_until(input, &mut index, line, 0, false, true, double_quoted)?;
-    debug_assert_eq!(index, input.len());
+    let expression = ExpressionParser::new(input, line, syntax).parse()?;
     Ok(expression.has_commands().then_some(expression))
 }
 
-fn parse_expression_until(
-    input: &str,
-    index: &mut usize,
-    line: usize,
-    nesting: usize,
-    stop_at_brace: bool,
-    allow_commands: bool,
-    double_quoted: bool,
-) -> Result<ShellExpression, ExpansionError> {
-    // Build owned parts once so later delivery phases never reinterpret
-    // bytes obtained from a variable as expression syntax. The explicit
-    // depth check also stops hostile nested defaults before recursion grows.
-    check_expansion_depth(nesting, line)?;
-    let bytes = input.as_bytes();
-    let mut parts = Vec::new();
-    let mut literal = String::new();
-    while *index < bytes.len() {
-        if stop_at_brace && bytes[*index] == b'}' {
-            break;
+#[derive(Debug, Clone, Copy)]
+enum ExpressionSyntax {
+    Ordinary {
+        allow_commands: bool,
+        double_quoted: bool,
+    },
+    ShellCondition,
+}
+
+impl ExpressionSyntax {
+    fn allows_commands(self) -> bool {
+        match self {
+            Self::Ordinary { allow_commands, .. } => allow_commands,
+            Self::ShellCondition => true,
         }
-        if bytes[*index] == b'\\' {
-            let Some(next) = bytes.get(*index + 1).copied() else {
-                literal.push('\\');
-                *index += 1;
-                continue;
-            };
-            if double_quoted && !matches!(next, b'$' | b'`' | b'"' | b'\\' | b'\n') {
-                literal.push('\\');
-                *index += 1;
+    }
+
+    fn escapes(self, byte: u8) -> bool {
+        match self {
+            Self::Ordinary {
+                double_quoted: false,
+                ..
+            } => true,
+            Self::Ordinary {
+                double_quoted: true,
+                ..
+            } => matches!(byte, b'$' | b'`' | b'"' | b'\\' | b'\n'),
+            Self::ShellCondition => matches!(byte, b'$' | b'`' | b'"' | b'\\'),
+        }
+    }
+
+    fn invalid_utf8_message(self) -> &'static str {
+        match self {
+            Self::Ordinary { .. } => "expression contains invalid UTF-8",
+            Self::ShellCondition => "shell-expanded condition contains invalid UTF-8",
+        }
+    }
+
+    fn unterminated_command_message(self) -> &'static str {
+        match self {
+            Self::Ordinary { .. } => "unterminated backquoted command in expression",
+            Self::ShellCondition => "unterminated backquoted command in shell-expanded condition",
+        }
+    }
+
+    fn contains_command(self, input: &str) -> bool {
+        let bytes = input.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            if bytes[index] == b'\\' && bytes.get(index + 1).is_some_and(|next| self.escapes(*next))
+            {
+                index += 2;
                 continue;
             }
-            let character = input[*index + 1..]
-                .chars()
-                .next()
-                .ok_or_else(|| ExpansionError::new(line, "expression contains invalid UTF-8"))?;
-            literal.push(character);
-            *index += 1 + character.len_utf8();
-            continue;
+            if self.allows_commands() && bytes[index] == b'`' {
+                return true;
+            }
+            index += 1;
         }
-        if allow_commands && bytes[*index] == b'`' {
+        false
+    }
+}
+
+struct ExpressionParser<'a> {
+    input: &'a str,
+    bytes: &'a [u8],
+    index: usize,
+    line: usize,
+    syntax: ExpressionSyntax,
+}
+
+impl<'a> ExpressionParser<'a> {
+    fn new(input: &'a str, line: usize, syntax: ExpressionSyntax) -> Self {
+        Self {
+            input,
+            bytes: input.as_bytes(),
+            index: 0,
+            line,
+            syntax,
+        }
+    }
+
+    fn parse(mut self) -> Result<ShellExpression, ExpansionError> {
+        let expression = self.parse_until(0, false)?;
+        debug_assert_eq!(self.index, self.bytes.len());
+        Ok(expression)
+    }
+
+    fn parse_until(
+        &mut self,
+        nesting: usize,
+        stop_at_brace: bool,
+    ) -> Result<ShellExpression, ExpansionError> {
+        // Build owned parts once so later delivery phases never reinterpret
+        // bytes obtained from a variable as expression syntax. The explicit
+        // depth check also stops hostile nested defaults before recursion grows.
+        check_expansion_depth(nesting, self.line)?;
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+        while self.index < self.bytes.len() {
+            if stop_at_brace && self.bytes[self.index] == b'}' {
+                break;
+            }
+            if self.bytes[self.index] == b'\\' {
+                let Some(next) = self.bytes.get(self.index + 1).copied() else {
+                    literal.push('\\');
+                    self.index += 1;
+                    continue;
+                };
+                if !self.syntax.escapes(next) {
+                    literal.push('\\');
+                    self.index += 1;
+                    continue;
+                }
+                let character = self.input[self.index + 1..].chars().next().ok_or_else(|| {
+                    ExpansionError::new(self.line, self.syntax.invalid_utf8_message())
+                })?;
+                literal.push(character);
+                self.index += 1 + character.len_utf8();
+                continue;
+            }
+            if self.syntax.allows_commands() && self.bytes[self.index] == b'`' {
+                if !literal.is_empty() {
+                    push_literal_part(&mut parts, &std::mem::take(&mut literal));
+                }
+                parts.push(self.parse_command()?);
+                continue;
+            }
+            if self.bytes[self.index] != b'$' {
+                let character = self.input[self.index..].chars().next().ok_or_else(|| {
+                    ExpansionError::new(self.line, self.syntax.invalid_utf8_message())
+                })?;
+                literal.push(character);
+                self.index += character.len_utf8();
+                continue;
+            }
             if !literal.is_empty() {
                 push_literal_part(&mut parts, &std::mem::take(&mut literal));
             }
-            let command_start = *index + 1;
-            *index = command_start;
-            let mut escaped = false;
-            while *index < bytes.len() {
-                match bytes[*index] {
-                    _ if escaped => escaped = false,
-                    b'\\' => escaped = true,
-                    b'`' => break,
-                    _ => {}
-                }
-                *index += 1;
+            if let Some(part) = self.parse_variable(nesting, &mut literal)? {
+                parts.push(part);
             }
-            if *index == bytes.len() {
-                return Err(ExpansionError::new(
-                    line,
-                    "unterminated backquoted command in expression",
-                ));
-            }
-            parts.push(ShellPart::Command(input[command_start..*index].to_owned()));
-            *index += 1;
-            continue;
-        }
-        if bytes[*index] != b'$' {
-            let character = input[*index..]
-                .chars()
-                .next()
-                .ok_or_else(|| ExpansionError::new(line, "expression contains invalid UTF-8"))?;
-            literal.push(character);
-            *index += character.len_utf8();
-            continue;
         }
         if !literal.is_empty() {
-            push_literal_part(&mut parts, &std::mem::take(&mut literal));
+            push_literal_part(&mut parts, &literal);
         }
-        *index += 1;
-        let Some(first) = bytes.get(*index).copied() else {
+        if stop_at_brace && self.index == self.bytes.len() {
             return Err(ExpansionError::new(
-                line,
+                self.line,
+                "variable reference is missing '}'",
+            ));
+        }
+        Ok(ShellExpression { parts })
+    }
+
+    fn parse_command(&mut self) -> Result<ShellPart, ExpansionError> {
+        let command_start = self.index + 1;
+        self.index = command_start;
+        let mut escaped = false;
+        while self.index < self.bytes.len() {
+            match self.bytes[self.index] {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'`' => break,
+                _ => {}
+            }
+            self.index += 1;
+        }
+        if self.index == self.bytes.len() {
+            return Err(ExpansionError::new(
+                self.line,
+                self.syntax.unterminated_command_message(),
+            ));
+        }
+        let command = self.input[command_start..self.index].to_owned();
+        self.index += 1;
+        Ok(ShellPart::Command(command))
+    }
+
+    fn parse_variable(
+        &mut self,
+        nesting: usize,
+        literal: &mut String,
+    ) -> Result<Option<ShellPart>, ExpansionError> {
+        self.index += 1;
+        let regex_escape = if matches!(self.syntax, ExpressionSyntax::ShellCondition)
+            && self.bytes.get(self.index) == Some(&b'\\')
+        {
+            self.index += 1;
+            true
+        } else {
+            false
+        };
+        let Some(first) = self.bytes.get(self.index).copied() else {
+            if regex_escape {
+                return Err(ExpansionError::new(
+                    self.line,
+                    "regex-escaped condition variable is missing its name",
+                ));
+            }
+            if matches!(self.syntax, ExpressionSyntax::ShellCondition) {
+                literal.push('$');
+                return Ok(None);
+            }
+            return Err(ExpansionError::new(
+                self.line,
                 "'$' must be followed by NAME or {NAME}",
             ));
         };
         let (name, default) = if first == b'{' {
-            *index += 1;
-            let name_start = *index;
-            while *index < bytes.len() && is_name_continue(bytes[*index]) {
-                *index += 1;
+            if regex_escape {
+                return Err(ExpansionError::new(
+                    self.line,
+                    "regex-escaped condition variables use $\\NAME syntax",
+                ));
             }
-            let name = &input[name_start..*index];
-            validate_reference_name(name, line)?;
-            match bytes.get(*index..*index + 2) {
-                Some(b":-") => {
-                    *index += 2;
-                    let default = parse_expression_until(
-                        input,
-                        index,
-                        line,
-                        nesting + 1,
-                        true,
-                        allow_commands,
-                        double_quoted,
-                    )?;
-                    if bytes.get(*index) != Some(&b'}') {
-                        return Err(ExpansionError::new(
-                            line,
-                            "variable reference is missing '}'",
-                        ));
-                    }
-                    *index += 1;
-                    (name.to_owned(), Some(default))
-                }
-                _ if bytes.get(*index) == Some(&b'}') => {
-                    *index += 1;
-                    (name.to_owned(), None)
-                }
-                _ => {
-                    return Err(ExpansionError::new(
-                        line,
-                        "unsupported parameter expansion; use ${NAME} or ${NAME:-expression}",
-                    ));
-                }
-            }
+            self.parse_braced_variable(nesting)?
         } else {
             if !is_name_start(first) {
+                if matches!(self.syntax, ExpressionSyntax::ShellCondition) {
+                    if matches!(first, b'?' | b'#' | b'$' | b'-' | b'=' | b'@')
+                        || first.is_ascii_digit()
+                    {
+                        return Err(ExpansionError::new(
+                            self.line,
+                            "unsupported special parameter in shell-expanded condition",
+                        ));
+                    }
+                    literal.push('$');
+                    return Ok(None);
+                }
                 return Err(ExpansionError::new(
-                    line,
+                    self.line,
                     "unsupported '$' expansion; use $NAME or ${NAME}",
                 ));
             }
-            let name_start = *index;
-            *index += 1;
-            while *index < bytes.len() && is_name_continue(bytes[*index]) {
-                *index += 1;
-            }
-            (input[name_start..*index].to_owned(), None)
+            (self.parse_name(), None)
         };
         if variable_policy(&name) == VariablePolicy::Unsupported {
             return Err(ExpansionError::new(
-                line,
+                self.line,
                 format!("procmail variable {name} is not supported"),
             ));
         }
-        parts.push(ShellPart::Variable { name, default });
-    }
-    if !literal.is_empty() {
-        push_literal_part(&mut parts, &literal);
-    }
-    if stop_at_brace && *index == bytes.len() {
-        return Err(ExpansionError::new(
-            line,
-            "variable reference is missing '}'",
-        ));
-    }
-    Ok(ShellExpression { parts })
-}
-
-fn contains_unescaped_backquote(input: &str, double_quoted: bool) -> bool {
-    let bytes = input.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            let Some(next) = bytes.get(index + 1).copied() else {
-                return false;
-            };
-            if !double_quoted || matches!(next, b'$' | b'`' | b'"' | b'\\' | b'\n') {
-                index += 2;
-                continue;
-            }
-        } else if bytes[index] == b'`' {
-            return true;
+        if regex_escape {
+            Ok(Some(ShellPart::RegexQuotedVariable(name)))
+        } else {
+            Ok(Some(ShellPart::Variable { name, default }))
         }
-        index += 1;
     }
-    false
+
+    fn parse_braced_variable(
+        &mut self,
+        nesting: usize,
+    ) -> Result<(String, Option<ShellExpression>), ExpansionError> {
+        self.index += 1;
+        let name = self.parse_name();
+        validate_reference_name(&name, self.line)?;
+        match self.bytes.get(self.index..self.index + 2) {
+            Some(b":-") => {
+                self.index += 2;
+                let default = self.parse_until(nesting + 1, true)?;
+                if self.bytes.get(self.index) != Some(&b'}') {
+                    return Err(ExpansionError::new(
+                        self.line,
+                        "variable reference is missing '}'",
+                    ));
+                }
+                self.index += 1;
+                Ok((name, Some(default)))
+            }
+            _ if self.bytes.get(self.index) == Some(&b'}') => {
+                self.index += 1;
+                Ok((name, None))
+            }
+            _ => Err(ExpansionError::new(
+                self.line,
+                "unsupported parameter expansion; use ${NAME} or ${NAME:-expression}",
+            )),
+        }
+    }
+
+    fn parse_name(&mut self) -> String {
+        let name_start = self.index;
+        if self
+            .bytes
+            .get(self.index)
+            .is_some_and(|byte| is_name_start(*byte))
+        {
+            self.index += 1;
+            while self.index < self.bytes.len() && is_name_continue(self.bytes[self.index]) {
+                self.index += 1;
+            }
+        }
+        self.input[name_start..self.index].to_owned()
+    }
 }
 
 fn validate_reference_name(name: &str, line: usize) -> Result<(), ExpansionError> {
