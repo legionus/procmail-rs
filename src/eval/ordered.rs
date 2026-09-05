@@ -6,7 +6,10 @@ use super::services::{
     GlobalLockExecutor, LocalLockExecutor,
 };
 use super::*;
-use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
+use crate::bounded_bytes::BoundedBytesError;
+use crate::config::shell_eval::{
+    self, EvaluationContext, EvaluationDepth, UnsupportedPart, VariableValue,
+};
 
 struct OrderedTreeExecution<'a, E, T> {
     message: CompleteMessage<'a>,
@@ -156,7 +159,7 @@ impl CompiledNode {
                         .map_err(OrderedExecutionError::Evaluation)?;
                     let bytes = evaluate_shell_expression(
                         ShellExpressionInput {
-                            parts: &expression.parts,
+                            expression,
                             line,
                             value_name: "shell-expanded condition",
                             message: raw,
@@ -383,7 +386,7 @@ impl CompiledNode {
                     .min(crate::config::MAX_PATH_EXPRESSION_LEN);
                     let bytes = evaluate_shell_expression(
                         ShellExpressionInput {
-                            parts: &parts.parts,
+                            expression: parts,
                             line: destination.line(),
                             value_name: "destination",
                             message,
@@ -569,7 +572,7 @@ where
     let limit = active_command_value_limit(context.runtime, assignment.target, assignment.line)?;
     let value = evaluate_shell_expression(
         ShellExpressionInput {
-            parts: &assignment.expression.parts,
+            expression: &assignment.expression,
             line: assignment.line,
             value_name: &assignment.name,
             message,
@@ -591,122 +594,140 @@ where
 }
 
 struct ShellExpressionInput<'a> {
-    parts: &'a [crate::config::ShellPart],
+    expression: &'a crate::config::ShellExpression,
     line: usize,
     value_name: &'a str,
     message: &'a [u8],
     limit: usize,
 }
 
-fn evaluate_shell_expression<E, T>(
+fn evaluate_shell_expression<'service, E, T>(
     input: ShellExpressionInput<'_>,
     runtime: &mut RuntimeVariables,
     trace: &mut T,
-    capture: &mut Option<&mut CommandCaptureExecutor<'_, E, T>>,
+    capture: &mut Option<&'service mut CommandCaptureExecutor<'service, E, T>>,
 ) -> Result<Vec<u8>, OrderedExecutionError<E>>
 where
     T: TraceSink,
 {
-    let mut value = BoundedBytes::with_capacity(input.limit, 0);
+    let mut context = OrderedExpressionEvaluation {
+        line: input.line,
+        value_name: input.value_name,
+        message: input.message,
+        runtime,
+        trace,
+        capture,
+    };
+    shell_eval::evaluate(input.expression, input.limit, &mut context).map(|value| value.bytes)
+}
 
-    // Build the complete result privately. Commands can fail, time out, or
-    // exceed the remaining budget after earlier literal fragments; callers
-    // must never observe a partial variable or destination path.
-    for part in input.parts {
-        let remaining = value.remaining().map_err(|_| {
-            OrderedExecutionError::Evaluation(EvalError::VariableValueTooLarge {
-                name: input.value_name.to_owned(),
-                size: value.len(),
-            })
-        })?;
-        let bytes = match part {
-            crate::config::ShellPart::Literal(source) => source.as_bytes().to_vec(),
-            crate::config::ShellPart::Command(command) => {
-                let executor = capture.as_deref_mut().ok_or_else(|| {
-                    OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
-                        line: input.line,
-                    })
-                })?;
-                let captured = executor(
-                    command,
-                    input.message,
-                    OutputEnding::Preserve,
-                    None,
-                    remaining,
-                    runtime,
-                    trace,
-                )
-                .map_err(|error| match error {
-                    DeliveryAttemptError::Recoverable(error)
-                    | DeliveryAttemptError::Fatal(error) => OrderedExecutionError::Delivery(error),
-                })?;
-                validate_captured_value(
-                    captured.into_output(),
-                    remaining,
-                    input.value_name,
-                    CapturedNewlineRule::StripAll,
-                )
-                .map_err(OrderedExecutionError::Evaluation)?
-            }
-            crate::config::ShellPart::Variable { name, default } => {
-                if let Some(bytes) = runtime.get_bytes(name).filter(|value| !value.is_empty()) {
-                    bytes.to_vec()
-                } else if let Some(default) = default {
-                    evaluate_shell_expression(
-                        ShellExpressionInput {
-                            parts: &default.parts,
-                            line: input.line,
-                            value_name: input.value_name,
-                            message: input.message,
-                            limit: remaining,
-                        },
-                        runtime,
-                        trace,
-                        capture,
-                    )?
-                } else if let Some(bytes) = runtime.get_bytes(name) {
-                    bytes.to_vec()
-                } else {
-                    return Err(OrderedExecutionError::Evaluation(EvalError::Expansion(
-                        crate::config::ExpansionError {
-                            line: input.line,
-                            message: format!("variable {name} is not defined"),
-                        },
-                    )));
-                }
-            }
-            crate::config::ShellPart::RegexQuotedVariable(name) => {
-                let source = runtime.get_bytes(name).ok_or_else(|| {
-                    OrderedExecutionError::Evaluation(EvalError::Expansion(
-                        crate::config::ExpansionError {
-                            line: input.line,
-                            message: format!("variable {name} is not defined"),
-                        },
-                    ))
-                })?;
-                let mut escaped = Vec::new();
-                crate::config::expand::push_regex_escaped(
-                    &mut escaped,
-                    source,
-                    remaining,
-                    input.line,
-                )
-                .map_err(EvalError::Expansion)
-                .map_err(OrderedExecutionError::Evaluation)?;
-                escaped
-            }
-        };
-        value.try_extend(&bytes).map_err(|error| {
-            OrderedExecutionError::Evaluation(EvalError::VariableValueTooLarge {
-                name: input.value_name.to_owned(),
-                size: match error {
-                    BoundedBytesError::LengthOverflow => usize::MAX,
-                    BoundedBytesError::LimitExceeded { attempted } => attempted,
-                },
-            })
-        })?;
+struct OrderedExpressionEvaluation<'context, 'input, 'service, E, T> {
+    line: usize,
+    value_name: &'input str,
+    message: &'input [u8],
+    runtime: &'context mut RuntimeVariables,
+    trace: &'context mut T,
+    capture: &'context mut Option<&'service mut CommandCaptureExecutor<'service, E, T>>,
+}
+
+impl<E, T> EvaluationContext for OrderedExpressionEvaluation<'_, '_, '_, E, T>
+where
+    T: TraceSink,
+{
+    type Error = OrderedExecutionError<E>;
+
+    fn depth_mode(&self) -> EvaluationDepth {
+        EvaluationDepth::None
     }
-    Ok(value.into_vec())
+
+    fn variable(&mut self, name: &str) -> Result<Option<VariableValue>, Self::Error> {
+        Ok(self.runtime.get_bytes(name).map(|bytes| VariableValue {
+            bytes: bytes.to_vec(),
+            depth: 0,
+        }))
+    }
+
+    fn command(&mut self, command: &str, remaining: usize) -> Result<Vec<u8>, Self::Error> {
+        let executor = self.capture.as_deref_mut().ok_or_else(|| {
+            OrderedExecutionError::Evaluation(EvalError::ExternalActionUnsupported {
+                line: self.line,
+            })
+        })?;
+        let captured = executor(
+            command,
+            self.message,
+            OutputEnding::Preserve,
+            None,
+            remaining,
+            self.runtime,
+            self.trace,
+        )
+        .map_err(|error| match error {
+            DeliveryAttemptError::Recoverable(error) | DeliveryAttemptError::Fatal(error) => {
+                OrderedExecutionError::Delivery(error)
+            }
+        })?;
+        validate_captured_value(
+            captured.into_output(),
+            remaining,
+            self.value_name,
+            CapturedNewlineRule::StripAll,
+        )
+        .map_err(OrderedExecutionError::Evaluation)
+    }
+
+    fn regex_quoted(&mut self, name: &str, remaining: usize) -> Result<Vec<u8>, Self::Error> {
+        let source = self
+            .runtime
+            .get_bytes(name)
+            .ok_or_else(|| self.missing_variable(name))?;
+        let mut escaped = Vec::new();
+        crate::config::expand::push_regex_escaped(&mut escaped, source, remaining, self.line)
+            .map_err(EvalError::Expansion)
+            .map_err(OrderedExecutionError::Evaluation)?;
+        Ok(escaped)
+    }
+
+    fn missing_variable(&self, name: &str) -> Self::Error {
+        OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
+            line: self.line,
+            message: format!("variable {name} is not defined"),
+        }))
+    }
+
+    fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
+        OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
+            line: self.line,
+            message: "expression part is not supported during ordered evaluation".to_owned(),
+        }))
+    }
+
+    fn depth_exceeded(&self) -> Self::Error {
+        OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
+            line: self.line,
+            message: format!(
+                "variable expansion exceeds the hard depth limit of {}",
+                crate::config::MAX_EXPANSION_DEPTH
+            ),
+        }))
+    }
+
+    fn depth_overflow(&self) -> Self::Error {
+        OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
+            line: self.line,
+            message: "variable expansion depth overflows".to_owned(),
+        }))
+    }
+
+    fn length_error(&self, error: BoundedBytesError, current: usize, _: usize) -> Self::Error {
+        OrderedExecutionError::Evaluation(EvalError::VariableValueTooLarge {
+            name: self.value_name.to_owned(),
+            size: match error {
+                BoundedBytesError::LengthOverflow => usize::MAX,
+                BoundedBytesError::LimitExceeded { attempted } => attempted.max(current),
+            },
+        })
+    }
 }
 
 pub(super) fn active_command_value_limit<E>(

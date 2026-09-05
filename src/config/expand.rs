@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
+use super::shell_eval::{self, EvaluationContext, EvaluationDepth, UnsupportedPart, VariableValue};
 use super::{
     Assignment, AssignmentTarget, Config, Destination, HeaderAction, HeaderOperation, HeaderValue,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression,
@@ -19,6 +20,30 @@ use super::{
 struct ExpandedValue {
     text: String,
     depth: usize,
+}
+
+fn expansion_depth_error(line: usize) -> ExpansionError {
+    ExpansionError::new(
+        line,
+        format!("variable expansion exceeds the hard depth limit of {MAX_EXPANSION_DEPTH}"),
+    )
+}
+
+fn expansion_length_error(
+    line: usize,
+    error: BoundedBytesError,
+    _current: usize,
+    limit: usize,
+) -> ExpansionError {
+    match error {
+        BoundedBytesError::LengthOverflow => {
+            ExpansionError::new(line, "expanded value length overflows")
+        }
+        BoundedBytesError::LimitExceeded { .. } => ExpansionError::new(
+            line,
+            format!("expanded value exceeds the hard limit of {limit} bytes"),
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,7 +638,7 @@ fn expand_config(
                 let hard_limit = assignment_value_limit(assignment.target);
                 let limit = hard_limit.min(linebuf);
                 let expanded =
-                    evaluate_config_expression(&parsed, assignment.line, limit, &variables, 0)
+                    evaluate_config_expression(&parsed, assignment.line, limit, &variables)
                         .map_err(|error| relabel_linebuf_error(error, linebuf, hard_limit))?;
                 assignment.value = expanded.text;
                 if assignment.target == AssignmentTarget::Trap {
@@ -711,7 +736,7 @@ fn evaluate_with_linebuf(
 ) -> Result<ExpandedValue, ExpansionError> {
     let linebuf = active_linebuf(lookup);
     let limit = linebuf.min(hard_limit);
-    evaluate_expression(expression, line, limit, lookup, 0)
+    evaluate_expression(expression, line, limit, lookup)
         .map_err(|error| relabel_linebuf_error(error, linebuf, hard_limit))
 }
 
@@ -722,49 +747,60 @@ pub(crate) fn expand_runtime_bytes<'a>(
     mut lookup: impl FnMut(&str) -> Option<&'a [u8]>,
 ) -> Result<Vec<u8>, ExpansionError> {
     let expression = parse_expression(input, line)?;
-    evaluate_runtime_bytes(&expression, line, limit, &mut lookup, 0)
+    let mut owned_lookup = |name: &str| lookup(name).map(<[u8]>::to_vec);
+    let mut context = RuntimeBytesEvaluation {
+        line,
+        lookup: &mut owned_lookup,
+    };
+    shell_eval::evaluate(&expression, limit, &mut context).map(|value| value.bytes)
 }
 
-fn evaluate_runtime_bytes<'a>(
-    expression: &ShellExpression,
+struct RuntimeBytesEvaluation<'a, L> {
     line: usize,
-    limit: usize,
-    lookup: &mut impl FnMut(&str) -> Option<&'a [u8]>,
-    nesting: usize,
-) -> Result<Vec<u8>, ExpansionError> {
-    check_expansion_depth(nesting, line)?;
-    let mut output = Vec::new();
-    for part in &expression.parts {
-        match part {
-            ShellPart::Literal(text) => {
-                push_bounded(&mut output, text.as_bytes(), limit, line)?;
-            }
-            ShellPart::Variable { name, default } => {
-                let value = lookup(name);
-                if let Some(value) = value.filter(|value| !value.is_empty()) {
-                    push_bounded(&mut output, value, limit, line)?;
-                } else if let Some(default) = default {
-                    let selected =
-                        evaluate_runtime_bytes(default, line, limit, lookup, nesting + 1)?;
-                    push_bounded(&mut output, &selected, limit, line)?;
-                } else if let Some(value) = value {
-                    push_bounded(&mut output, value, limit, line)?;
-                } else {
-                    return Err(ExpansionError::new(
-                        line,
-                        format!("variable {name} is not defined"),
-                    ));
-                }
-            }
-            ShellPart::RegexQuotedVariable(_) | ShellPart::Command(_) => {
-                return Err(ExpansionError::new(
-                    line,
-                    "expression is not valid in this context",
-                ));
-            }
-        }
+    lookup: &'a mut L,
+}
+
+impl<L> EvaluationContext for RuntimeBytesEvaluation<'_, L>
+where
+    L: FnMut(&str) -> Option<Vec<u8>>,
+{
+    type Error = ExpansionError;
+
+    fn depth_mode(&self) -> EvaluationDepth {
+        EvaluationDepth::None
     }
-    Ok(output)
+
+    fn variable(&mut self, name: &str) -> Result<Option<VariableValue>, Self::Error> {
+        Ok((self.lookup)(name).map(|bytes| VariableValue { bytes, depth: 0 }))
+    }
+
+    fn command(&mut self, _: &str, _: usize) -> Result<Vec<u8>, Self::Error> {
+        Err(self.unsupported_part(UnsupportedPart::Command))
+    }
+
+    fn regex_quoted(&mut self, _: &str, _: usize) -> Result<Vec<u8>, Self::Error> {
+        Err(self.unsupported_part(UnsupportedPart::RegexQuotedVariable))
+    }
+
+    fn missing_variable(&self, name: &str) -> Self::Error {
+        ExpansionError::new(self.line, format!("variable {name} is not defined"))
+    }
+
+    fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
+        ExpansionError::new(self.line, "expression is not valid in this context")
+    }
+
+    fn depth_exceeded(&self) -> Self::Error {
+        expansion_depth_error(self.line)
+    }
+
+    fn depth_overflow(&self) -> Self::Error {
+        ExpansionError::new(self.line, "variable expansion depth overflows")
+    }
+
+    fn length_error(&self, error: BoundedBytesError, current: usize, limit: usize) -> Self::Error {
+        expansion_length_error(self.line, error, current, limit)
+    }
 }
 
 fn relabel_linebuf_error(
@@ -938,7 +974,6 @@ fn prepare_runtime_statements(
                         assignment.line,
                         assignment_value_limit(assignment.target),
                         known,
-                        0,
                     )?;
                     super::parse_process_timeout_seconds(&value.text)
                         .map_err(|message| ExpansionError::new(assignment.line, message))?;
@@ -952,7 +987,6 @@ fn prepare_runtime_statements(
                         assignment.line,
                         assignment_value_limit(assignment.target),
                         known,
-                        0,
                     )?;
                     super::parse_umask(&value.text)
                         .map_err(|message| ExpansionError::new(assignment.line, message))?;
@@ -966,7 +1000,6 @@ fn prepare_runtime_statements(
                         assignment.line,
                         assignment_value_limit(assignment.target),
                         known,
-                        0,
                     )?;
                     super::validate_log_abstract(&value.text)
                         .map_err(|message| ExpansionError::new(assignment.line, message))?;
@@ -1264,7 +1297,9 @@ pub(crate) fn expand_shell_condition(
     let linebuf = crate::runtime::RuntimeSettings::at_line(runtime, line)
         .linebuf()
         .map_err(|error| ExpansionError::new(line, error.message().to_owned()))?;
-    let bytes = evaluate_shell_condition(expression, line, linebuf, runtime, 0)
+    let mut context = ShellConditionEvaluation { line, runtime };
+    let bytes = shell_eval::evaluate(expression, linebuf, &mut context)
+        .map(|value| value.bytes)
         .map_err(|error| relabel_linebuf_error(error, linebuf, usize::MAX))?;
     String::from_utf8(bytes).map_err(|_| {
         ExpansionError::new(
@@ -1274,52 +1309,64 @@ pub(crate) fn expand_shell_condition(
     })
 }
 
-fn evaluate_shell_condition(
-    expression: &ShellExpression,
+struct ShellConditionEvaluation<'a> {
     line: usize,
-    limit: usize,
-    runtime: &crate::runtime::RuntimeVariables,
-    depth: usize,
-) -> Result<Vec<u8>, ExpansionError> {
-    check_expansion_depth(depth, line)?;
-    let mut output = Vec::new();
-    for part in &expression.parts {
-        match part {
-            ShellPart::Literal(text) => {
-                push_bounded(&mut output, text.as_bytes(), limit, line)?;
-            }
-            ShellPart::Variable { name, default } => {
-                let value = runtime.get_bytes(name);
-                if let Some(value) = value.filter(|value| !value.is_empty()) {
-                    push_bounded(&mut output, value, limit, line)?;
-                } else if let Some(default) = default {
-                    let selected =
-                        evaluate_shell_condition(default, line, limit, runtime, depth + 1)?;
-                    push_bounded(&mut output, &selected, limit, line)?;
-                } else if let Some(value) = value {
-                    push_bounded(&mut output, value, limit, line)?;
-                } else {
-                    return Err(ExpansionError::new(
-                        line,
-                        format!("variable {name} is not defined"),
-                    ));
-                }
-            }
-            ShellPart::RegexQuotedVariable(name) => {
-                let value = runtime.get_bytes(name).ok_or_else(|| {
-                    ExpansionError::new(line, format!("variable {name} is not defined"))
-                })?;
-                push_regex_escaped(&mut output, value, limit, line)?;
-            }
-            ShellPart::Command(_) => {
-                return Err(ExpansionError::new(
-                    line,
-                    "command substitution requires ordered evaluation",
-                ));
-            }
-        }
+    runtime: &'a crate::runtime::RuntimeVariables,
+}
+
+impl EvaluationContext for ShellConditionEvaluation<'_> {
+    type Error = ExpansionError;
+
+    fn depth_mode(&self) -> EvaluationDepth {
+        EvaluationDepth::None
     }
-    Ok(output)
+
+    fn variable(&mut self, name: &str) -> Result<Option<VariableValue>, Self::Error> {
+        Ok(self.runtime.get_bytes(name).map(|bytes| VariableValue {
+            bytes: bytes.to_vec(),
+            depth: 0,
+        }))
+    }
+
+    fn command(&mut self, _: &str, _: usize) -> Result<Vec<u8>, Self::Error> {
+        Err(self.unsupported_part(UnsupportedPart::Command))
+    }
+
+    fn regex_quoted(&mut self, name: &str, limit: usize) -> Result<Vec<u8>, Self::Error> {
+        let value = self
+            .runtime
+            .get_bytes(name)
+            .ok_or_else(|| self.missing_variable(name))?;
+        let mut output = Vec::new();
+        push_regex_escaped(&mut output, value, limit, self.line)?;
+        Ok(output)
+    }
+
+    fn missing_variable(&self, name: &str) -> Self::Error {
+        ExpansionError::new(self.line, format!("variable {name} is not defined"))
+    }
+
+    fn unsupported_part(&self, part: UnsupportedPart) -> Self::Error {
+        let message = match part {
+            UnsupportedPart::Command => "command substitution requires ordered evaluation",
+            UnsupportedPart::RegexQuotedVariable => {
+                "regex-quoted variable is not valid in this context"
+            }
+        };
+        ExpansionError::new(self.line, message)
+    }
+
+    fn depth_exceeded(&self) -> Self::Error {
+        expansion_depth_error(self.line)
+    }
+
+    fn depth_overflow(&self) -> Self::Error {
+        ExpansionError::new(self.line, "variable expansion depth overflows")
+    }
+
+    fn length_error(&self, error: BoundedBytesError, current: usize, limit: usize) -> Self::Error {
+        expansion_length_error(self.line, error, current, limit)
+    }
 }
 
 pub(crate) fn push_regex_escaped(
@@ -1447,7 +1494,7 @@ fn expand_text(
     variables: &BTreeMap<String, ExpandedValue>,
 ) -> Result<ExpandedValue, ExpansionError> {
     let expression = parse_expression(input, line)?;
-    evaluate_config_expression(&expression, line, limit, variables, 0)
+    evaluate_config_expression(&expression, line, limit, variables)
 }
 
 fn evaluate_config_expression(
@@ -1455,49 +1502,69 @@ fn evaluate_config_expression(
     line: usize,
     limit: usize,
     variables: &BTreeMap<String, ExpandedValue>,
-    nesting: usize,
 ) -> Result<ExpandedValue, ExpansionError> {
-    check_expansion_depth(nesting, line)?;
-    let mut output = Vec::new();
-    let mut depth = 0usize;
-    for part in &expression.parts {
-        match part {
-            ShellPart::Literal(text) => push_bounded(&mut output, text.as_bytes(), limit, line)?,
-            ShellPart::Variable { name, default } => {
-                let selected = variables.get(name).filter(|value| !value.text.is_empty());
-                let value = if let Some(value) = selected {
-                    value.clone()
-                } else if let Some(default) = default {
-                    evaluate_config_expression(default, line, limit, variables, nesting + 1)?
-                } else if let Some(value) = variables.get(name) {
-                    value.clone()
-                } else {
-                    return Err(match variable_policy(name) {
-                        VariablePolicy::RuntimeOnly => ExpansionError::new(
-                            line,
-                            format!("runtime variable {name} is not available in this context"),
-                        ),
-                        _ => ExpansionError::new(line, format!("variable {name} is not defined")),
-                    });
-                };
-                let candidate_depth = value.depth.checked_add(1).ok_or_else(|| {
-                    ExpansionError::new(line, "variable expansion depth overflows")
-                })?;
-                check_expansion_depth(candidate_depth, line)?;
-                depth = depth.max(candidate_depth);
-                push_bounded(&mut output, value.text.as_bytes(), limit, line)?;
-            }
-            ShellPart::RegexQuotedVariable(_) | ShellPart::Command(_) => {
-                return Err(ExpansionError::new(
-                    line,
-                    "expression is not valid in this context",
-                ));
-            }
+    let mut context = ConfigEvaluation { line, variables };
+    let evaluated = shell_eval::evaluate(expression, limit, &mut context)?;
+    let text = String::from_utf8(evaluated.bytes)
+        .map_err(|_| ExpansionError::new(line, "expanded value is not valid UTF-8"))?;
+    Ok(ExpandedValue {
+        text,
+        depth: evaluated.depth,
+    })
+}
+
+struct ConfigEvaluation<'a> {
+    line: usize,
+    variables: &'a BTreeMap<String, ExpandedValue>,
+}
+
+impl EvaluationContext for ConfigEvaluation<'_> {
+    type Error = ExpansionError;
+
+    fn depth_mode(&self) -> EvaluationDepth {
+        EvaluationDepth::ExpansionChain
+    }
+
+    fn variable(&mut self, name: &str) -> Result<Option<VariableValue>, Self::Error> {
+        Ok(self.variables.get(name).map(|value| VariableValue {
+            bytes: value.text.as_bytes().to_vec(),
+            depth: value.depth,
+        }))
+    }
+
+    fn command(&mut self, _: &str, _: usize) -> Result<Vec<u8>, Self::Error> {
+        Err(self.unsupported_part(UnsupportedPart::Command))
+    }
+
+    fn regex_quoted(&mut self, _: &str, _: usize) -> Result<Vec<u8>, Self::Error> {
+        Err(self.unsupported_part(UnsupportedPart::RegexQuotedVariable))
+    }
+
+    fn missing_variable(&self, name: &str) -> Self::Error {
+        match variable_policy(name) {
+            VariablePolicy::RuntimeOnly => ExpansionError::new(
+                self.line,
+                format!("runtime variable {name} is not available in this context"),
+            ),
+            _ => ExpansionError::new(self.line, format!("variable {name} is not defined")),
         }
     }
-    let text = String::from_utf8(output)
-        .map_err(|_| ExpansionError::new(line, "expanded value is not valid UTF-8"))?;
-    Ok(ExpandedValue { text, depth })
+
+    fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
+        ExpansionError::new(self.line, "expression is not valid in this context")
+    }
+
+    fn depth_exceeded(&self) -> Self::Error {
+        expansion_depth_error(self.line)
+    }
+
+    fn depth_overflow(&self) -> Self::Error {
+        ExpansionError::new(self.line, "variable expansion depth overflows")
+    }
+
+    fn length_error(&self, error: BoundedBytesError, current: usize, limit: usize) -> Self::Error {
+        expansion_length_error(self.line, error, current, limit)
+    }
 }
 
 fn validate_path_references(
@@ -1626,46 +1693,66 @@ fn evaluate_expression(
     line: usize,
     limit: usize,
     lookup: &mut impl FnMut(&str) -> Option<String>,
-    nesting: usize,
 ) -> Result<ExpandedValue, ExpansionError> {
-    // Append every selected part through the bounded writer. Evaluating into
-    // an unrestricted temporary string first would let a hostile variable
-    // exceed the path limit before the caller could reject it.
-    check_expansion_depth(nesting, line)?;
-    let mut output = Vec::new();
-    let mut depth = nesting;
-    for part in &expression.parts {
-        match part {
-            ShellPart::Literal(text) => push_bounded(&mut output, text.as_bytes(), limit, line)?,
-            ShellPart::Variable { name, default } => match (lookup(name), default) {
-                (Some(value), _) if !value.is_empty() => {
-                    push_bounded(&mut output, value.as_bytes(), limit, line)?;
-                    depth = depth.max(nesting + 1);
-                }
-                (_, Some(default)) => {
-                    let value = evaluate_expression(default, line, limit, lookup, nesting + 1)?;
-                    push_bounded(&mut output, value.text.as_bytes(), limit, line)?;
-                    depth = depth.max(value.depth);
-                }
-                (Some(_), None) => {}
-                (None, None) => {
-                    return Err(ExpansionError::new(
-                        line,
-                        format!("runtime variable {name} is not set"),
-                    ));
-                }
-            },
-            ShellPart::RegexQuotedVariable(_) | ShellPart::Command(_) => {
-                return Err(ExpansionError::new(
-                    line,
-                    "expression cannot be evaluated here",
-                ));
-            }
-        }
-    }
-    let text = String::from_utf8(output)
+    let mut context = RuntimeStringEvaluation { line, lookup };
+    let evaluated = shell_eval::evaluate(expression, limit, &mut context)?;
+    let text = String::from_utf8(evaluated.bytes)
         .map_err(|_| ExpansionError::new(line, "expanded value is not valid UTF-8"))?;
-    Ok(ExpandedValue { text, depth })
+    Ok(ExpandedValue {
+        text,
+        depth: evaluated.depth,
+    })
+}
+
+struct RuntimeStringEvaluation<'a, L> {
+    line: usize,
+    lookup: &'a mut L,
+}
+
+impl<L> EvaluationContext for RuntimeStringEvaluation<'_, L>
+where
+    L: FnMut(&str) -> Option<String>,
+{
+    type Error = ExpansionError;
+
+    fn depth_mode(&self) -> EvaluationDepth {
+        EvaluationDepth::SyntaxNesting
+    }
+
+    fn variable(&mut self, name: &str) -> Result<Option<VariableValue>, Self::Error> {
+        Ok((self.lookup)(name).map(|value| VariableValue {
+            bytes: value.into_bytes(),
+            depth: 0,
+        }))
+    }
+
+    fn command(&mut self, _: &str, _: usize) -> Result<Vec<u8>, Self::Error> {
+        Err(self.unsupported_part(UnsupportedPart::Command))
+    }
+
+    fn regex_quoted(&mut self, _: &str, _: usize) -> Result<Vec<u8>, Self::Error> {
+        Err(self.unsupported_part(UnsupportedPart::RegexQuotedVariable))
+    }
+
+    fn missing_variable(&self, name: &str) -> Self::Error {
+        ExpansionError::new(self.line, format!("runtime variable {name} is not set"))
+    }
+
+    fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
+        ExpansionError::new(self.line, "expression cannot be evaluated here")
+    }
+
+    fn depth_exceeded(&self) -> Self::Error {
+        expansion_depth_error(self.line)
+    }
+
+    fn depth_overflow(&self) -> Self::Error {
+        ExpansionError::new(self.line, "variable expansion depth overflows")
+    }
+
+    fn length_error(&self, error: BoundedBytesError, current: usize, limit: usize) -> Self::Error {
+        expansion_length_error(self.line, error, current, limit)
+    }
 }
 
 fn expression_has_runtime(expression: &ShellExpression) -> bool {

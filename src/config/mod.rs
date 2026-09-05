@@ -3,6 +3,7 @@
 
 pub(crate) mod expand;
 mod parser;
+pub(crate) mod shell_eval;
 mod variables;
 
 use std::fmt;
