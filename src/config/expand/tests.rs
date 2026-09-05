@@ -4,6 +4,27 @@
 use super::*;
 
 #[test]
+fn known_assignment_values_are_validated_equally_at_root_and_in_blocks() {
+    for assignment in [
+        "LOCKEXT=bad/name",
+        "TIMEOUT=0",
+        "UMASK=8888",
+        "LOGABSTRACT=all",
+    ] {
+        let root = parse(&format!("{assignment}\n"))
+            .unwrap()
+            .expand()
+            .unwrap_err();
+        let nested = parse(&format!(":0\n{{\n{assignment}\n}}\n"))
+            .unwrap()
+            .expand()
+            .unwrap_err();
+
+        assert_eq!(root.message, nested.message, "{assignment}");
+    }
+}
+
+#[test]
 fn shared_expression_syntax_has_identical_parts_in_common_modes() {
     let source = r"pre-${EMPTY:-$NAME-\${LITERAL}-`printf x`}-post";
     let ordinary = parse_command_expression(source, 4, true)

@@ -52,14 +52,6 @@ enum PreparationPhase {
     Deferred,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PreparationContext<'a> {
-    known: &'a BTreeMap<String, ExpandedValue>,
-    dynamic: &'a BTreeSet<String>,
-    maildir: Option<&'a str>,
-    phase: PreparationPhase,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PathPurpose {
     Maildir,
@@ -589,13 +581,17 @@ pub(super) fn prepare_for_check<'a>(
             )
         })
         .collect();
-    let mut dynamic = BTreeSet::new();
-
     // A check has no message values, but it still needs to reject undefined
     // ordinary variables and malformed path expressions throughout a loaded
     // file. Prepare every statement for later symbolic evaluation instead of
     // demanding MATCH or LASTFOLDER before stdin exists.
-    prepare_runtime_statements(&mut config.statements, &known, &mut dynamic, maildir)?;
+    let mut preparer = ConfigPreparer::new(
+        known,
+        maildir.map(str::to_owned),
+        config.initial_linebuf,
+        PreparationPhase::Deferred,
+    );
+    preparer.prepare_statements(&mut config.statements)?;
     Ok(config)
 }
 
@@ -603,14 +599,13 @@ fn expand_config(
     mut config: Config,
     mut variables: BTreeMap<String, ExpandedValue>,
     initial_variables: Vec<(String, String, VariableSource)>,
-    mut maildir: Option<String>,
+    maildir: Option<String>,
 ) -> Result<Config, ExpansionError> {
-    let mut linebuf = config.initial_linebuf;
     config.initial_variables = initial_variables;
     variables
         .entry("LINEBUF".to_owned())
         .or_insert(ExpandedValue {
-            text: linebuf.to_string(),
+            text: config.initial_linebuf.to_string(),
             depth: 0,
         });
     variables
@@ -619,105 +614,13 @@ fn expand_config(
             text: super::DEFAULT_LOCK_EXT.to_owned(),
             depth: 0,
         });
-    let mut dynamic = BTreeSet::new();
-
-    for statement in &mut config.statements {
-        match statement {
-            Statement::Assignment(assignment) => {
-                let parsed = parse_assignment_expression(
-                    &assignment.value,
-                    assignment.line,
-                    assignment.double_quoted,
-                )?;
-                if expression_references_any(&parsed, &dynamic) {
-                    validate_runtime_references(&parsed, assignment.line, &variables, &dynamic)?;
-                    assignment.expansion = Some(parsed);
-                    dynamic.insert(assignment.name.clone());
-                    continue;
-                }
-                let hard_limit = assignment_value_limit(assignment.target);
-                let limit = hard_limit.min(linebuf);
-                let expanded =
-                    evaluate_config_expression(&parsed, assignment.line, limit, &variables)
-                        .map_err(|error| relabel_linebuf_error(error, linebuf, hard_limit))?;
-                assignment.value = expanded.text;
-                if assignment.target == AssignmentTarget::Trap {
-                    super::validate_trap_command(&assignment.value)
-                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
-                }
-                if assignment.target == AssignmentTarget::LockExt {
-                    super::validate_lock_ext(&assignment.value)
-                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
-                }
-                if assignment.target == AssignmentTarget::LogAbstract {
-                    super::validate_log_abstract(&assignment.value)
-                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
-                }
-                if assignment.target == AssignmentTarget::LineBuf {
-                    linebuf = parse_linebuf(&assignment.value, assignment.line)?;
-                }
-                if assignment.target == AssignmentTarget::Maildir {
-                    assignment.value = PathResolver::new(
-                        PathPurpose::Maildir,
-                        "MAILDIR",
-                        assignment.line,
-                        maildir.as_deref(),
-                    )
-                    .resolve(&assignment.value)?;
-                    maildir = Some(assignment.value.clone());
-                } else if matches!(
-                    assignment.target,
-                    AssignmentTarget::LogFile | AssignmentTarget::LockFile
-                ) {
-                    let (purpose, description) = if assignment.target == AssignmentTarget::LogFile {
-                        (PathPurpose::Logfile, "LOGFILE")
-                    } else {
-                        (PathPurpose::Lockfile, "LOCKFILE")
-                    };
-                    assignment.value = PathResolver::new(
-                        purpose,
-                        description,
-                        assignment.line,
-                        maildir.as_deref(),
-                    )
-                    .resolve(&assignment.value)?;
-                }
-                variables.insert(
-                    assignment.name.clone(),
-                    ExpandedValue {
-                        text: assignment.value.clone(),
-                        depth: expanded.depth,
-                    },
-                );
-            }
-            Statement::CommandAssignment(assignment) => {
-                prepare_command_assignment(assignment, &variables, &dynamic)?;
-                dynamic.insert(assignment.name.clone());
-            }
-            Statement::Recipe(recipe) => {
-                let phase = if dynamic.is_empty() {
-                    PreparationPhase::Eager
-                } else {
-                    PreparationPhase::Deferred
-                };
-                prepare_recipe(
-                    recipe,
-                    PreparationContext {
-                        known: &variables,
-                        dynamic: &dynamic,
-                        maildir: maildir.as_deref(),
-                        phase,
-                    },
-                )?;
-                record_recipe_dynamic_names(recipe, &mut dynamic);
-            }
-            Statement::Include(expression) | Statement::Switch(expression) => {
-                let parsed = parse_expression(&expression.value, expression.line)?;
-                validate_runtime_references(&parsed, expression.line, &variables, &dynamic)?;
-                expression.expansion = Some(parsed);
-            }
-        }
-    }
+    let mut preparer = ConfigPreparer::new(
+        variables,
+        maildir,
+        config.initial_linebuf,
+        PreparationPhase::Eager,
+    );
+    preparer.prepare_statements(&mut config.statements)?;
 
     Ok(config)
 }
@@ -834,208 +737,306 @@ fn parse_linebuf(value: &str, line: usize) -> Result<usize, ExpansionError> {
     Ok(parsed)
 }
 
-fn prepare_recipe(
-    recipe: &mut Recipe,
-    context: PreparationContext<'_>,
-) -> Result<(), ExpansionError> {
-    // Run both early and deferred recipes through the same traversal so locks,
-    // conditions, headers, and nested blocks cannot gain phase-specific gaps.
-    // Only destinations branch on the phase: fully known paths are validated
-    // now, while message-produced names retain their expression for execution.
-    prepare_shell_conditions(recipe, context.known, context.dynamic)?;
-    if let Some(expression) = &mut recipe.lock {
-        prepare_lock_expression(
-            expression,
-            recipe.line,
-            context.known,
-            context.dynamic,
-            context.maildir,
-        )?;
-        if expression.source.is_empty() && matches!(recipe.action, RecipeAction::Pipe(_)) {
-            return Err(ExpansionError::new(
-                recipe.line,
-                "an implicit local lockfile requires a filesystem destination",
-            ));
-        }
-    }
-
-    match &mut recipe.action {
-        RecipeAction::Deliver(destination) => {
-            let expression = destination.expression_mut();
-            expression.base = context.maildir.map(str::to_owned);
-            expression.line = recipe.action_line;
-            if let Some(command_expression) = expression
-                .expansion
-                .as_ref()
-                .filter(|expression| expression.has_commands())
-            {
-                validate_shell_expression(
-                    command_expression,
-                    recipe.action_line,
-                    context.known,
-                    context.dynamic,
-                )?;
-                expression.runtime_dependent = true;
-                expression.runtime_base = context.dynamic.contains("MAILDIR");
-                return Ok(());
-            }
-            let parsed = parse_expression(&expression.source, recipe.action_line)?;
-            if context.phase == PreparationPhase::Eager {
-                validate_path_references(&parsed, recipe.action_line, context.known)?;
-            } else {
-                validate_runtime_references(
-                    &parsed,
-                    recipe.action_line,
-                    context.known,
-                    context.dynamic,
-                )?;
-            }
-            let has_runtime_reference = expression_references_any(&parsed, context.dynamic)
-                || expression_needs_runtime(&parsed, context.known);
-            expression.runtime_dependent = has_runtime_reference;
-            expression.runtime_base = context.dynamic.contains("MAILDIR");
-            expression.expansion = Some(parsed);
-            if context.phase == PreparationPhase::Eager && !has_runtime_reference {
-                let resolved = destination
-                    .resolve_with(|name| context.known.get(name).map(|value| value.text.clone()))?;
-                destination.adopt_static_discard_classification(&resolved);
-            }
-        }
-        RecipeAction::Pipe(_) => {}
-        RecipeAction::Capture(_) => {}
-        RecipeAction::Headers(action) => {
-            prepare_header_action(action, context.known, context.dynamic)?;
-        }
-        RecipeAction::Block(statements) => {
-            let mut child_dynamic = if context.phase == PreparationPhase::Eager {
-                BTreeSet::new()
-            } else {
-                context.dynamic.clone()
-            };
-            prepare_runtime_statements(
-                statements,
-                context.known,
-                &mut child_dynamic,
-                context.maildir,
-            )?;
-        }
-    }
-    Ok(())
+struct ConfigPreparer {
+    known: BTreeMap<String, ExpandedValue>,
+    dynamic: BTreeSet<String>,
+    maildir: Option<String>,
+    linebuf: usize,
+    phase: PreparationPhase,
 }
 
-fn prepare_runtime_statements(
-    statements: &mut [Statement],
-    known: &BTreeMap<String, ExpandedValue>,
-    dynamic: &mut BTreeSet<String>,
-    maildir: Option<&str>,
-) -> Result<(), ExpansionError> {
-    for statement in statements {
-        match statement {
-            Statement::Assignment(assignment) => {
-                if !matches!(
-                    assignment.target,
-                    AssignmentTarget::User
-                        | AssignmentTarget::Maildir
-                        | AssignmentTarget::Shell
-                        | AssignmentTarget::ShellFlags
-                        | AssignmentTarget::Path
-                        | AssignmentTarget::ExitCode
-                        | AssignmentTarget::Host
-                        | AssignmentTarget::LockMethod
-                        | AssignmentTarget::LockFile
-                        | AssignmentTarget::LockExt
-                        | AssignmentTarget::LockTimeout
-                        | AssignmentTarget::LineBuf
-                        | AssignmentTarget::ProcessTimeout
-                        | AssignmentTarget::Umask
-                        | AssignmentTarget::Trap
-                        | AssignmentTarget::LogAbstract
-                ) {
-                    return Err(ExpansionError::new(
-                        assignment.line,
-                        format!(
-                            "variable {} cannot be assigned conditionally yet",
-                            assignment.name
-                        ),
-                    ));
-                }
-                let expression = parse_assignment_expression(
-                    &assignment.value,
-                    assignment.line,
-                    assignment.double_quoted,
-                )?;
-                validate_runtime_references(&expression, assignment.line, known, dynamic)?;
-                if assignment.target == AssignmentTarget::ProcessTimeout
-                    && !expression_needs_runtime(&expression, known)
-                    && !expression_references_any(&expression, dynamic)
-                {
-                    let value = evaluate_config_expression(
-                        &expression,
-                        assignment.line,
-                        assignment_value_limit(assignment.target),
-                        known,
-                    )?;
-                    super::parse_process_timeout_seconds(&value.text)
-                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
-                }
-                if assignment.target == AssignmentTarget::Umask
-                    && !expression_needs_runtime(&expression, known)
-                    && !expression_references_any(&expression, dynamic)
-                {
-                    let value = evaluate_config_expression(
-                        &expression,
-                        assignment.line,
-                        assignment_value_limit(assignment.target),
-                        known,
-                    )?;
-                    super::parse_umask(&value.text)
-                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
-                }
-                if assignment.target == AssignmentTarget::LogAbstract
-                    && !expression_needs_runtime(&expression, known)
-                    && !expression_references_any(&expression, dynamic)
-                {
-                    let value = evaluate_config_expression(
-                        &expression,
-                        assignment.line,
-                        assignment_value_limit(assignment.target),
-                        known,
-                    )?;
-                    super::validate_log_abstract(&value.text)
-                        .map_err(|message| ExpansionError::new(assignment.line, message))?;
-                }
-                assignment.expansion = Some(expression);
+impl ConfigPreparer {
+    fn new(
+        known: BTreeMap<String, ExpandedValue>,
+        maildir: Option<String>,
+        linebuf: usize,
+        phase: PreparationPhase,
+    ) -> Self {
+        Self {
+            known,
+            dynamic: BTreeSet::new(),
+            maildir,
+            linebuf,
+            phase,
+        }
+    }
 
-                // A conditional assignment exists only if execution selects
-                // this block. Keep its expression for that moment and mark
-                // the name as runtime-produced for following statements in
-                // the same selected sequence.
-                dynamic.insert(assignment.name.clone());
-            }
+    fn prepare_statements(&mut self, statements: &mut [Statement]) -> Result<(), ExpansionError> {
+        for statement in statements {
+            self.prepare_statement(statement)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_statement(&mut self, statement: &mut Statement) -> Result<(), ExpansionError> {
+        match statement {
+            Statement::Assignment(assignment) => self.prepare_assignment(assignment),
             Statement::CommandAssignment(assignment) => {
-                prepare_command_assignment(assignment, known, dynamic)?;
-                dynamic.insert(assignment.name.clone());
+                prepare_command_assignment(assignment, &self.known, &self.dynamic)?;
+                self.dynamic.insert(assignment.name.clone());
+                Ok(())
             }
             Statement::Recipe(recipe) => {
-                prepare_recipe(
-                    recipe,
-                    PreparationContext {
-                        known,
-                        dynamic,
-                        maildir,
-                        phase: PreparationPhase::Deferred,
-                    },
-                )?;
-                record_recipe_dynamic_names(recipe, dynamic);
+                let phase = if self.phase == PreparationPhase::Eager && self.dynamic.is_empty() {
+                    PreparationPhase::Eager
+                } else {
+                    PreparationPhase::Deferred
+                };
+                self.prepare_recipe(recipe, phase)?;
+                record_recipe_dynamic_names(recipe, &mut self.dynamic);
+                Ok(())
             }
             Statement::Include(expression) | Statement::Switch(expression) => {
                 let parsed = parse_expression(&expression.value, expression.line)?;
-                validate_runtime_references(&parsed, expression.line, known, dynamic)?;
+                validate_runtime_references(&parsed, expression.line, &self.known, &self.dynamic)?;
                 expression.expansion = Some(parsed);
+                Ok(())
             }
         }
     }
-    Ok(())
+
+    fn prepare_assignment(&mut self, assignment: &mut Assignment) -> Result<(), ExpansionError> {
+        if self.phase == PreparationPhase::Deferred {
+            return self.prepare_deferred_assignment(assignment);
+        }
+
+        let parsed = parse_assignment_expression(
+            &assignment.value,
+            assignment.line,
+            assignment.double_quoted,
+        )?;
+        if expression_references_any(&parsed, &self.dynamic) {
+            validate_runtime_references(&parsed, assignment.line, &self.known, &self.dynamic)?;
+            assignment.expansion = Some(parsed);
+            self.dynamic.insert(assignment.name.clone());
+            return Ok(());
+        }
+
+        let hard_limit = assignment_value_limit(assignment.target);
+        let limit = hard_limit.min(self.linebuf);
+        let expanded = evaluate_config_expression(&parsed, assignment.line, limit, &self.known)
+            .map_err(|error| relabel_linebuf_error(error, self.linebuf, hard_limit))?;
+        assignment.value = expanded.text;
+        self.validate_static_assignment(assignment)?;
+        self.resolve_static_assignment_path(assignment)?;
+        self.known.insert(
+            assignment.name.clone(),
+            ExpandedValue {
+                text: assignment.value.clone(),
+                depth: expanded.depth,
+            },
+        );
+        Ok(())
+    }
+
+    fn prepare_deferred_assignment(
+        &mut self,
+        assignment: &mut Assignment,
+    ) -> Result<(), ExpansionError> {
+        if !conditional_assignment_supported(assignment.target) {
+            return Err(ExpansionError::new(
+                assignment.line,
+                format!(
+                    "variable {} cannot be assigned conditionally yet",
+                    assignment.name
+                ),
+            ));
+        }
+        let expression = parse_assignment_expression(
+            &assignment.value,
+            assignment.line,
+            assignment.double_quoted,
+        )?;
+        validate_runtime_references(&expression, assignment.line, &self.known, &self.dynamic)?;
+        self.validate_known_deferred_assignment(assignment, &expression)?;
+        assignment.expansion = Some(expression);
+
+        // Conditional assignments exist only on a selected execution path.
+        // Record their names without changing the known values so following
+        // expressions are validated against the value available at runtime.
+        self.dynamic.insert(assignment.name.clone());
+        Ok(())
+    }
+
+    fn validate_static_assignment(
+        &mut self,
+        assignment: &Assignment,
+    ) -> Result<(), ExpansionError> {
+        validate_known_assignment_value(assignment.target, &assignment.value, assignment.line)?;
+        if assignment.target == AssignmentTarget::LineBuf {
+            self.linebuf = parse_linebuf(&assignment.value, assignment.line)?;
+        }
+        Ok(())
+    }
+
+    fn resolve_static_assignment_path(
+        &mut self,
+        assignment: &mut Assignment,
+    ) -> Result<(), ExpansionError> {
+        let (purpose, description) = match assignment.target {
+            AssignmentTarget::Maildir => (PathPurpose::Maildir, "MAILDIR"),
+            AssignmentTarget::LogFile => (PathPurpose::Logfile, "LOGFILE"),
+            AssignmentTarget::LockFile => (PathPurpose::Lockfile, "LOCKFILE"),
+            _ => return Ok(()),
+        };
+        assignment.value = PathResolver::new(
+            purpose,
+            description,
+            assignment.line,
+            self.maildir.as_deref(),
+        )
+        .resolve(&assignment.value)?;
+        if assignment.target == AssignmentTarget::Maildir {
+            self.maildir = Some(assignment.value.clone());
+        }
+        Ok(())
+    }
+
+    fn validate_known_deferred_assignment(
+        &self,
+        assignment: &Assignment,
+        expression: &ShellExpression,
+    ) -> Result<(), ExpansionError> {
+        if expression_needs_runtime(expression, &self.known)
+            || expression_references_any(expression, &self.dynamic)
+        {
+            return Ok(());
+        }
+        let value = evaluate_config_expression(
+            expression,
+            assignment.line,
+            assignment_value_limit(assignment.target),
+            &self.known,
+        )?;
+        validate_known_assignment_value(assignment.target, &value.text, assignment.line)
+    }
+
+    fn prepare_recipe(
+        &self,
+        recipe: &mut Recipe,
+        phase: PreparationPhase,
+    ) -> Result<(), ExpansionError> {
+        // All recipes pass through the same preparation path. Only filesystem
+        // destinations distinguish values fixed before input from values that
+        // must remain structured until their execution path is selected.
+        prepare_shell_conditions(recipe, &self.known, &self.dynamic)?;
+        if let Some(expression) = &mut recipe.lock {
+            prepare_lock_expression(
+                expression,
+                recipe.line,
+                &self.known,
+                &self.dynamic,
+                self.maildir.as_deref(),
+            )?;
+            if expression.source.is_empty() && matches!(recipe.action, RecipeAction::Pipe(_)) {
+                return Err(ExpansionError::new(
+                    recipe.line,
+                    "an implicit local lockfile requires a filesystem destination",
+                ));
+            }
+        }
+
+        match &mut recipe.action {
+            RecipeAction::Deliver(destination) => {
+                self.prepare_destination(destination, recipe.action_line, phase)
+            }
+            RecipeAction::Headers(action) => {
+                prepare_header_action(action, &self.known, &self.dynamic)
+            }
+            RecipeAction::Block(statements) => {
+                let dynamic = if phase == PreparationPhase::Eager {
+                    BTreeSet::new()
+                } else {
+                    self.dynamic.clone()
+                };
+                let mut child = Self {
+                    known: self.known.clone(),
+                    dynamic,
+                    maildir: self.maildir.clone(),
+                    linebuf: self.linebuf,
+                    phase: PreparationPhase::Deferred,
+                };
+                child.prepare_statements(statements)
+            }
+            RecipeAction::Pipe(_) | RecipeAction::Capture(_) => Ok(()),
+        }
+    }
+
+    fn prepare_destination(
+        &self,
+        destination: &mut Destination,
+        line: usize,
+        phase: PreparationPhase,
+    ) -> Result<(), ExpansionError> {
+        let expression = destination.expression_mut();
+        expression.base = self.maildir.clone();
+        expression.line = line;
+        if let Some(command_expression) = expression
+            .expansion
+            .as_ref()
+            .filter(|expression| expression.has_commands())
+        {
+            validate_shell_expression(command_expression, line, &self.known, &self.dynamic)?;
+            expression.runtime_dependent = true;
+            expression.runtime_base = self.dynamic.contains("MAILDIR");
+            return Ok(());
+        }
+        let parsed = parse_expression(&expression.source, line)?;
+        if phase == PreparationPhase::Eager {
+            validate_path_references(&parsed, line, &self.known)?;
+        } else {
+            validate_runtime_references(&parsed, line, &self.known, &self.dynamic)?;
+        }
+        let has_runtime_reference = expression_references_any(&parsed, &self.dynamic)
+            || expression_needs_runtime(&parsed, &self.known);
+        expression.runtime_dependent = has_runtime_reference;
+        expression.runtime_base = self.dynamic.contains("MAILDIR");
+        expression.expansion = Some(parsed);
+        if phase == PreparationPhase::Eager && !has_runtime_reference {
+            let resolved = destination
+                .resolve_with(|name| self.known.get(name).map(|value| value.text.clone()))?;
+            destination.adopt_static_discard_classification(&resolved);
+        }
+        Ok(())
+    }
+}
+
+fn validate_known_assignment_value(
+    target: AssignmentTarget,
+    value: &str,
+    line: usize,
+) -> Result<(), ExpansionError> {
+    let result = match target {
+        AssignmentTarget::Trap => super::validate_trap_command(value),
+        AssignmentTarget::LockExt => super::validate_lock_ext(value),
+        AssignmentTarget::LogAbstract => super::validate_log_abstract(value),
+        AssignmentTarget::ProcessTimeout => super::parse_process_timeout_seconds(value).map(|_| ()),
+        AssignmentTarget::Umask => super::parse_umask(value).map(|_| ()),
+        _ => return Ok(()),
+    };
+    result.map_err(|message| ExpansionError::new(line, message))
+}
+
+fn conditional_assignment_supported(target: AssignmentTarget) -> bool {
+    matches!(
+        target,
+        AssignmentTarget::User
+            | AssignmentTarget::Maildir
+            | AssignmentTarget::Shell
+            | AssignmentTarget::ShellFlags
+            | AssignmentTarget::Path
+            | AssignmentTarget::ExitCode
+            | AssignmentTarget::Host
+            | AssignmentTarget::LockMethod
+            | AssignmentTarget::LockFile
+            | AssignmentTarget::LockExt
+            | AssignmentTarget::LockTimeout
+            | AssignmentTarget::LineBuf
+            | AssignmentTarget::ProcessTimeout
+            | AssignmentTarget::Umask
+            | AssignmentTarget::Trap
+            | AssignmentTarget::LogAbstract
+    )
 }
 
 fn prepare_command_assignment(
