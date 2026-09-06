@@ -98,35 +98,6 @@ impl From<SequenceControl> for HeaderControl {
 }
 
 impl ExecutionPlan {
-    pub fn evaluate_headers(&self, head: &MessageHead) -> HeaderEvaluation {
-        self.evaluate_headers_with_trace(head, &mut RuntimeVariables::default(), &mut NoTrace)
-    }
-
-    pub fn evaluate_headers_with_trace(
-        &self,
-        head: &MessageHead,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-    ) -> HeaderEvaluation {
-        let mut head = head.clone();
-        self.evaluate_headers_editing_with_trace(&mut head, runtime, trace)
-    }
-
-    pub fn evaluate_headers_editing_with_trace(
-        &self,
-        head: &mut MessageHead,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-    ) -> HeaderEvaluation {
-        match self.evaluate_headers_editing_inner::<std::convert::Infallible, _>(
-            head, runtime, trace, None,
-        ) {
-            Ok(evaluation) => evaluation,
-            Err(OrderedExecutionError::Evaluation(error)) => HeaderEvaluation::Error(error),
-            Err(OrderedExecutionError::Delivery(error)) => match error {},
-        }
-    }
-
     pub fn evaluate_headers_editing_with_capture_trace<E, K, T>(
         &self,
         head: &mut MessageHead,
@@ -149,7 +120,7 @@ impl ExecutionPlan {
         self.evaluate_headers_editing_inner(head, runtime, trace, Some(capture))
     }
 
-    fn evaluate_headers_editing_inner<'a, E, T>(
+    pub(super) fn evaluate_headers_editing_inner<'a, E, T>(
         &self,
         head: &mut MessageHead,
         runtime: &mut RuntimeVariables,
@@ -220,32 +191,6 @@ impl ExecutionPlan {
         }
     }
 
-    pub fn resume_buffered(
-        &self,
-        continuation: Continuation,
-        message: &Message,
-    ) -> Result<DeliveryPlan, EvalError> {
-        self.resume_input(
-            continuation,
-            ResumeInput::Buffered(message),
-            &mut RuntimeVariables::default(),
-            &mut NoTrace,
-        )
-    }
-
-    pub fn resume_streamed(
-        &self,
-        continuation: Continuation,
-        message: &StreamedMessage,
-    ) -> Result<DeliveryPlan, EvalError> {
-        self.resume_input(
-            continuation,
-            ResumeInput::Streamed(message),
-            &mut RuntimeVariables::default(),
-            &mut NoTrace,
-        )
-    }
-
     pub fn resume_with_trace(
         &self,
         continuation: Continuation,
@@ -256,37 +201,22 @@ impl ExecutionPlan {
         self.resume_input(continuation, ResumeInput::Mapped(message), runtime, trace)
     }
 
-    pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
-        let mut execution = FanoutPlanState::default();
-        let mut runtime = RuntimeVariables::default();
-        let mut trace = NoTrace;
-        let matching = PreparedMatchingMessage::new(message, self.needs_message_contents());
-        self.root.plan_complete(&mut CompletePlanContext {
-            message: matching.complete(message),
-            runtime: &mut runtime,
-            trace: &mut trace,
-            execution: &mut execution,
-            rc: self.rc_context(),
-        })?;
-        Ok(DeliveryPlan {
-            deliveries: execution.deliveries,
-            original_delivered: execution.original_delivered,
-        })
-    }
-
-    fn resume_input(
+    pub(super) fn resume_input(
         &self,
         continuation: Continuation,
         input: ResumeInput<'_>,
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<DeliveryPlan, EvalError> {
+        #[cfg(test)]
         let matching;
         let message = match input {
+            #[cfg(test)]
             ResumeInput::Buffered(message) => {
                 matching = PreparedMatchingMessage::new(message, self.needs_message_contents());
                 matching.complete(message)
             }
+            #[cfg(test)]
             ResumeInput::Streamed(message) => {
                 if continuation.requirements.needs_body_contents {
                     return Err(EvalError::BodyWasNotBuffered);
@@ -341,8 +271,10 @@ impl ExecutionPlan {
     }
 }
 
-enum ResumeInput<'a> {
+pub(super) enum ResumeInput<'a> {
+    #[cfg(test)]
     Buffered(&'a Message),
+    #[cfg(test)]
     Streamed(&'a StreamedMessage),
     Mapped(MappedMessageInput<'a>),
 }

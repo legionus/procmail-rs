@@ -6,16 +6,20 @@ use crate::config::{
     OutputEnding, PipeAction, RecipeOptions,
 };
 use crate::limits::MessageLimits;
-use crate::message::{Message, MessageHead, StreamedMessage};
+#[cfg(test)]
+use crate::message::StreamedMessage;
+use crate::message::{Message, MessageHead};
 use crate::rc_file::RcFileLoader;
 use crate::runtime::{RuntimeSettingError, RuntimeSettings, RuntimeVariables};
-use crate::trace::{
-    NoTrace, RecipeDecision, TraceEvent, TraceSink, VariableSource as TraceVariableSource,
-};
+#[cfg(test)]
+use crate::trace::NoTrace;
+use crate::trace::{RecipeDecision, TraceEvent, TraceSink, VariableSource as TraceVariableSource};
 
 mod condition;
 mod explanation;
 mod header;
+#[cfg(test)]
+mod header_test_support;
 mod message;
 mod ordered;
 mod result;

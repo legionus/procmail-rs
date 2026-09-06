@@ -2,7 +2,9 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use crate::config::{ActionInput, ConditionInput};
-use crate::message::{Message, StreamedMessage};
+use crate::message::Message;
+#[cfg(test)]
+use crate::message::StreamedMessage;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MatchingMessage<'a> {
@@ -36,6 +38,7 @@ impl PreparedMatchingMessage {
         MatchingMessage::from_normalized_parts(message.matching_header(), self.full.as_deref())
     }
 
+    #[cfg(test)]
     pub(super) fn complete<'a>(&'a self, message: &'a Message) -> CompleteMessage<'a> {
         CompleteMessage::Buffered {
             message,
@@ -140,6 +143,7 @@ pub(super) enum CompleteMessage<'a> {
         message: &'a Message,
         matching_full: Option<&'a [u8]>,
     },
+    #[cfg(test)]
     Streamed(&'a StreamedMessage),
     Mapped {
         raw: &'a [u8],
@@ -188,6 +192,7 @@ impl<'a> CompleteMessage<'a> {
     pub(super) fn raw(self) -> Option<&'a [u8]> {
         match self {
             Self::Buffered { message, .. } => Some(message.as_bytes()),
+            #[cfg(test)]
             Self::Streamed(_) => None,
             Self::Mapped { raw, .. } => Some(raw),
         }
@@ -196,6 +201,7 @@ impl<'a> CompleteMessage<'a> {
     pub(super) fn raw_header(self) -> &'a [u8] {
         match self {
             Self::Buffered { message, .. } => message.header(),
+            #[cfg(test)]
             Self::Streamed(message) => message.header(),
             Self::Mapped {
                 raw, header_len, ..
@@ -230,6 +236,7 @@ impl<'a> CompleteMessage<'a> {
     pub(super) fn header_bytes(self) -> &'a [u8] {
         match self {
             Self::Buffered { message, .. } => message.matching_header(),
+            #[cfg(test)]
             Self::Streamed(message) => message.matching_header(),
             Self::Mapped {
                 raw,
@@ -243,6 +250,7 @@ impl<'a> CompleteMessage<'a> {
     pub(super) fn body(self) -> Option<&'a [u8]> {
         match self {
             Self::Buffered { message, .. } => Some(message.body()),
+            #[cfg(test)]
             Self::Streamed(_) => None,
             Self::Mapped {
                 raw, header_len, ..
@@ -256,6 +264,7 @@ impl<'a> CompleteMessage<'a> {
                 message,
                 matching_full,
             } => Some(matching_full.unwrap_or_else(|| message.as_bytes())),
+            #[cfg(test)]
             Self::Streamed(_) => None,
             Self::Mapped {
                 raw, matching_raw, ..
@@ -266,6 +275,7 @@ impl<'a> CompleteMessage<'a> {
     pub(super) fn len(self) -> usize {
         match self {
             Self::Buffered { message, .. } => message.len(),
+            #[cfg(test)]
             Self::Streamed(message) => message.len(),
             Self::Mapped { raw, .. } => raw.len(),
         }

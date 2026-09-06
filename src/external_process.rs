@@ -430,17 +430,6 @@ pub fn run_filter(
     })
 }
 
-pub fn run_program(
-    policy: &ShellPolicy,
-    environment: &ProcessEnvironment,
-    command: &str,
-    input: &[u8],
-    options: ProgramOptions,
-    stderr: Stdio,
-) -> Result<ProgramRun, ExternalProcessError> {
-    run_program_with_timeout(policy, environment, command, input, options, stderr)
-}
-
 pub fn run_program_with_timeout(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,

@@ -232,7 +232,7 @@ fn rejects_execution_before_spawning_when_policy_is_disabled() {
 #[test]
 fn regular_program_discards_stdout_and_reports_completion() {
     let (environment, policy) = enabled_shell(&RuntimeVariables::default());
-    let run = run_program(
+    let run = run_program_with_timeout(
         &policy,
         &environment,
         "cat >/dev/null; printf 'discarded output'",
@@ -249,7 +249,7 @@ fn regular_program_discards_stdout_and_reports_completion() {
 #[test]
 fn regular_program_reports_failed_exit_without_parsing_output() {
     let (environment, policy) = enabled_shell(&RuntimeVariables::default());
-    let run = run_program(
+    let run = run_program_with_timeout(
         &policy,
         &environment,
         "printf 'not a message'; exit 19",
@@ -266,7 +266,7 @@ fn regular_program_reports_failed_exit_without_parsing_output() {
 #[test]
 fn regular_program_distinguishes_signal_termination_from_exit_failure() {
     let (environment, policy) = enabled_shell(&RuntimeVariables::default());
-    let run = run_program(
+    let run = run_program_with_timeout(
         &policy,
         &environment,
         "kill -TERM $$",

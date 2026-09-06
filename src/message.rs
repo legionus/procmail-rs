@@ -320,6 +320,7 @@ impl StreamedMessage {
         &self.header
     }
 
+    #[cfg(test)]
     pub(crate) fn matching_header(&self) -> &[u8] {
         self.matching_header.as_deref().unwrap_or(&self.header)
     }

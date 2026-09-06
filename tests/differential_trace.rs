@@ -4,7 +4,7 @@
 use std::io::Cursor;
 
 use procmail_rs::config;
-use procmail_rs::eval::{ExecutionPlan, HeaderEvaluation};
+use procmail_rs::eval::{CapturedCommand, DeliveryAttemptError, ExecutionPlan, HeaderEvaluation};
 use procmail_rs::limits::MessageLimits;
 use procmail_rs::message::Message;
 use procmail_rs::runtime::RuntimeVariables;
@@ -20,12 +20,31 @@ fn header_fallback_matches_reference_procmail_decisions() {
     let config = config::parse(source).unwrap().expand().unwrap();
     let plan = ExecutionPlan::compile(&config);
     let limits = MessageLimits::from_config(&config).unwrap();
-    let head = Message::read_headers(&mut Cursor::new(message), limits).unwrap();
+    let mut head = Message::read_headers(&mut Cursor::new(message), limits).unwrap();
     let mut runtime = RuntimeVariables::default();
     let mut trace = MemoryTrace::default();
 
     assert!(matches!(
-        plan.evaluate_headers_with_trace(&head, &mut runtime, &mut trace),
+        plan
+            .evaluate_headers_editing_with_capture_trace(
+                &mut head,
+                &mut runtime,
+                &mut trace,
+                &mut |_,
+                      _,
+                      _,
+                      _,
+                      _,
+                      _,
+                      _|
+                 -> Result<
+                    CapturedCommand,
+                    DeliveryAttemptError<std::convert::Infallible>,
+                > {
+                    unreachable!("fixture unexpectedly requested command capture")
+                },
+            )
+            .unwrap(),
         HeaderEvaluation::Decided(_)
     ));
 
