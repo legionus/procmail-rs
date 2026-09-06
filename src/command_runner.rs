@@ -7,7 +7,9 @@ use std::process::Stdio;
 use procmail_rs::config::{ActionInput, ActionMode, OutputEnding, RecipeOptions, WriteErrorMode};
 use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
 use procmail_rs::eval::{CapturedCommand, DeliveryAttemptError, ExternalActionInput};
-use procmail_rs::external_command::{ChildExit, CommandOutcomePolicy, FilterOutput};
+use procmail_rs::external_command::{
+    ChildExit, CommandDecision, CommandOutcome, CommandOutcomePolicy, FilterOutput,
+};
 use procmail_rs::external_process::{
     CaptureOptions, CaptureRun, FilterOptions, FilterRun, ProgramOptions, ProgramRun,
     run_capture_with_timeout, run_filter, run_program_with_timeout, run_trap_with_timeout,
@@ -62,6 +64,34 @@ enum CommandRun {
     Program(ProgramRun),
     Capture(CaptureRun),
     Filter(FilterRun),
+}
+
+struct ProcessedCommand<T> {
+    run: T,
+    decision: CommandDecision,
+    outcome: CommandOutcome,
+}
+
+struct AcceptedCommand<T>(T);
+
+impl<T> ProcessedCommand<T> {
+    fn require(
+        self,
+        accepted: impl FnOnce(CommandDecision) -> bool,
+        failure: impl FnOnce(CommandOutcome) -> String,
+    ) -> Result<AcceptedCommand<T>, DeliveryAttemptError<OperationalError>> {
+        if accepted(self.decision) {
+            Ok(AcceptedCommand(self.run))
+        } else {
+            Err(recoverable_error(failure(self.outcome)))
+        }
+    }
+}
+
+impl<T> AcceptedCommand<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
 }
 
 struct PreparedCommand {
@@ -134,25 +164,22 @@ impl CommandRunner {
         let CommandRun::Capture(run) = self.run(request, runtime)? else {
             return Err(internal_runner_error("capture returned non-capture output"));
         };
-        let outcome = run.outcome();
         let policy = recipe_options.map_or(CommandOutcomePolicy::ExpansionCapture, |options| {
             CommandOutcomePolicy::RecipeCapture {
                 child_status: options.child_status,
                 write_errors: options.write_errors,
             }
         });
-        let decision = outcome.decide(policy);
-        if decision.report_child_failure() {
-            report_child_failure(runtime, outcome.child_exit()).map_err(log_error)?;
-        }
-        if !decision.accepted() {
-            let message = if outcome.child_exit() == ChildExit::TimedOut {
-                "command assignment exceeded TIMEOUT"
-            } else {
-                "command capture did not complete successfully"
-            };
-            return Err(recoverable_error(message));
-        }
+        let outcome = run.outcome();
+        let run = process_command(run, outcome, policy, runtime)?
+            .require(CommandDecision::accepted, |outcome| {
+                if outcome.child_exit() == ChildExit::TimedOut {
+                    "command assignment exceeded TIMEOUT".to_owned()
+                } else {
+                    "command capture did not complete successfully".to_owned()
+                }
+            })?
+            .into_inner();
         let output = run.into_output().map_err(|error| {
             recoverable_error(format!("command returned invalid captured output: {error}"))
         })?;
@@ -187,18 +214,18 @@ impl CommandRunner {
         match self.run(request, runtime)? {
             CommandRun::Program(run) => {
                 let outcome = run.outcome();
-                let decision = outcome.decide(CommandOutcomePolicy::Pipe {
-                    child_status: options.child_status,
-                    write_errors: options.write_errors,
-                });
-                if decision.report_child_failure() {
-                    report_child_failure(runtime, outcome.child_exit()).map_err(log_error)?;
-                }
-                if !decision.accepted() {
-                    return Err(recoverable_error(
-                        "external program did not complete successfully",
-                    ));
-                }
+                process_command(
+                    run,
+                    outcome,
+                    CommandOutcomePolicy::Pipe {
+                        child_status: options.child_status,
+                        write_errors: options.write_errors,
+                    },
+                    runtime,
+                )?
+                .require(CommandDecision::accepted, |_| {
+                    "external program did not complete successfully".to_owned()
+                })?;
                 runtime.set("LASTFOLDER", command);
                 Ok(None)
             }
@@ -378,16 +405,19 @@ fn finish_filter(
     runtime: &RuntimeVariables,
 ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
     let outcome = run.outcome();
-    let decision = outcome.decide(CommandOutcomePolicy::Filter {
-        child_status: options.child_status,
-        write_errors: options.write_errors,
-        output: run.output_state(),
-    });
-    if decision.report_child_failure() {
-        report_child_failure(runtime, outcome.child_exit()).map_err(log_error)?;
-    }
-    if run.output_state() == FilterOutput::Failed {
-        return match run.into_output() {
+    let output_state = run.output_state();
+    let processed = process_command(
+        run,
+        outcome,
+        CommandOutcomePolicy::Filter {
+            child_status: options.child_status,
+            write_errors: options.write_errors,
+            output: output_state,
+        },
+        runtime,
+    )?;
+    if output_state == FilterOutput::Failed {
+        return match processed.run.into_output() {
             Err(error) => Err(recoverable_error(format!(
                 "external filter returned an invalid message: {error}"
             ))),
@@ -396,11 +426,11 @@ fn finish_filter(
             )),
         };
     }
-    if !decision.replace_message() {
-        return Err(recoverable_error(
-            "external filter did not complete successfully",
-        ));
-    }
+    let run = processed
+        .require(CommandDecision::replace_message, |_| {
+            "external filter did not complete successfully".to_owned()
+        })?
+        .into_inner();
     let output = run.into_output().map_err(|error| {
         internal_runner_error(&format!(
             "validated filter output retained an unexpected error: {error}"
@@ -419,6 +449,28 @@ fn finish_filter(
         ))
     })?;
     Ok(Some(replacement))
+}
+
+fn process_command<T>(
+    run: T,
+    outcome: CommandOutcome,
+    policy: CommandOutcomePolicy,
+    runtime: &RuntimeVariables,
+) -> Result<ProcessedCommand<T>, DeliveryAttemptError<OperationalError>> {
+    let decision = outcome.decide(policy);
+
+    // Emit the policy-selected diagnostic before returning the child result.
+    // Keeping this step next to policy evaluation prevents capture, pipe, and
+    // filter callers from drifting apart while leaving their output decoding
+    // and user-facing failure text under form-specific control.
+    if decision.report_child_failure() {
+        report_child_failure(runtime, outcome.child_exit()).map_err(log_error)?;
+    }
+    Ok(ProcessedCommand {
+        run,
+        decision,
+        outcome,
+    })
 }
 
 fn write_stdout(
