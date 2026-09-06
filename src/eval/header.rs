@@ -22,7 +22,6 @@ pub(super) struct FanoutPlanState {
 
 #[derive(Debug)]
 pub(super) struct HeaderPlanState<E> {
-    pub(super) execution: FanoutPlanState,
     pub(super) frames: Vec<ContinuationFrame>,
     pub(super) requirements: InputRequirements,
     pub(super) restart: bool,
@@ -32,7 +31,6 @@ pub(super) struct HeaderPlanState<E> {
 impl<E> Default for HeaderPlanState<E> {
     fn default() -> Self {
         Self {
-            execution: FanoutPlanState::default(),
             frames: Vec::new(),
             requirements: InputRequirements::default(),
             restart: false,
@@ -41,10 +39,26 @@ impl<E> Default for HeaderPlanState<E> {
     }
 }
 
-struct HeaderPlanRoute<'a, 'executor, E, T> {
-    following: InputRequirements,
+// Header planning can stop before the body is read, while complete planning
+// and resume always have a stable complete-message view. Keep their state in
+// separate context types so recursive rc-file traversal carries all mutable
+// planning data together without erasing those different stopping points.
+struct HeaderPlanContext<'a, 'executor, E, T> {
+    head: &'a mut MessageHead,
+    runtime: &'a mut RuntimeVariables,
+    trace: &'a mut T,
+    planning: &'a mut HeaderPlanState<E>,
+    execution: &'a mut FanoutPlanState,
     rc: RcExecutionContext<'a>,
     capture: &'a mut Option<&'executor mut HeaderCaptureExecutor<'executor, E, T>>,
+}
+
+struct CompletePlanContext<'a, 'message, T> {
+    message: CompleteMessage<'message>,
+    runtime: &'a mut RuntimeVariables,
+    trace: &'a mut T,
+    execution: &'a mut FanoutPlanState,
+    rc: RcExecutionContext<'a>,
 }
 
 // A resumed sequence must move its position and prior-recipe state together.
@@ -165,23 +179,25 @@ impl ExecutionPlan {
             }));
         }
         let mut planning = HeaderPlanState::default();
+        let mut execution = FanoutPlanState::default();
         match self.root.plan_headers(
-            head,
-            runtime,
-            trace,
-            &mut planning,
-            HeaderPlanRoute {
-                following: InputRequirements::default(),
+            &mut HeaderPlanContext {
+                head,
+                runtime,
+                trace,
+                planning: &mut planning,
+                execution: &mut execution,
                 rc: self.rc_context(),
                 capture: &mut capture,
             },
+            InputRequirements::default(),
         ) {
             Ok(HeaderControl::Deferred) => Ok(HeaderEvaluation::NeedsMessage(Continuation {
                 frames: planning.frames,
                 execution: if planning.restart {
                     FanoutPlanState::default()
                 } else {
-                    planning.execution
+                    execution
                 },
                 runtime: if planning.restart {
                     initial_runtime
@@ -196,8 +212,8 @@ impl ExecutionPlan {
                     return Err(OrderedExecutionError::Delivery(error));
                 }
                 Ok(HeaderEvaluation::Decided(DeliveryPlan {
-                    deliveries: planning.execution.deliveries,
-                    original_delivered: planning.execution.original_delivered,
+                    deliveries: execution.deliveries,
+                    original_delivered: execution.original_delivered,
                 }))
             }
             Err(error) => Err(error),
@@ -242,14 +258,16 @@ impl ExecutionPlan {
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
         let mut execution = FanoutPlanState::default();
+        let mut runtime = RuntimeVariables::default();
+        let mut trace = NoTrace;
         let matching = PreparedMatchingMessage::new(message, self.needs_message_contents());
-        self.root.plan_complete(
-            matching.complete(message),
-            &mut RuntimeVariables::default(),
-            &mut NoTrace,
-            &mut execution,
-            self.rc_context(),
-        )?;
+        self.root.plan_complete(&mut CompletePlanContext {
+            message: matching.complete(message),
+            runtime: &mut runtime,
+            trace: &mut trace,
+            execution: &mut execution,
+            rc: self.rc_context(),
+        })?;
         Ok(DeliveryPlan {
             deliveries: execution.deliveries,
             original_delivered: execution.original_delivered,
@@ -287,8 +305,13 @@ impl ExecutionPlan {
 
         if continuation.restart {
             self.runtime_rc.reset_transitions();
-            self.root
-                .plan_complete(message, runtime, trace, &mut execution, self.rc_context())?;
+            self.root.plan_complete(&mut CompletePlanContext {
+                message,
+                runtime,
+                trace,
+                execution: &mut execution,
+                rc: self.rc_context(),
+            })?;
             return Ok(DeliveryPlan {
                 deliveries: execution.deliveries,
                 original_delivered: execution.original_delivered,
@@ -303,11 +326,13 @@ impl ExecutionPlan {
                 frames: &continuation.frames,
                 depth: 0,
             },
-            message,
-            runtime,
-            trace,
-            &mut execution,
-            self.rc_context(),
+            &mut CompletePlanContext {
+                message,
+                runtime,
+                trace,
+                execution: &mut execution,
+                rc: self.rc_context(),
+            },
         )?;
         Ok(DeliveryPlan {
             deliveries: execution.deliveries,
@@ -323,77 +348,45 @@ enum ResumeInput<'a> {
 }
 
 impl CompiledSequence {
-    fn plan_complete(
+    fn plan_complete<T: TraceSink>(
         &self,
-        message: CompleteMessage<'_>,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-        execution: &mut FanoutPlanState,
-        context: RcExecutionContext<'_>,
+        context: &mut CompletePlanContext<'_, '_, T>,
     ) -> Result<SequenceControl, EvalError> {
-        self.plan_complete_with_context(message, runtime, trace, execution, context)
+        self.plan_complete_with_context(context)
     }
 
-    fn plan_complete_with_context(
+    fn plan_complete_with_context<T: TraceSink>(
         &self,
-        message: CompleteMessage<'_>,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-        execution: &mut FanoutPlanState,
-        context: RcExecutionContext<'_>,
+        context: &mut CompletePlanContext<'_, '_, T>,
     ) -> Result<SequenceControl, EvalError> {
-        self.plan_complete_from(
-            SequenceCursor::default(),
-            message,
-            runtime,
-            trace,
-            execution,
-            context,
-        )
+        self.plan_complete_from(SequenceCursor::default(), context)
     }
 
-    fn plan_complete_from(
+    fn plan_complete_from<T: TraceSink>(
         &self,
         cursor: SequenceCursor,
-        message: CompleteMessage<'_>,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-        execution: &mut FanoutPlanState,
-        context: RcExecutionContext<'_>,
+        context: &mut CompletePlanContext<'_, '_, T>,
     ) -> Result<SequenceControl, EvalError> {
         let mut state = cursor.state;
         for (index, recipe) in self.recipes.iter().enumerate().skip(cursor.index) {
-            let statement_control = plan_statements_complete(
-                &recipe.preceding_statements,
-                message,
-                runtime,
-                trace,
-                execution,
-                context,
-            )?;
+            let statement_control =
+                plan_statements_complete(&recipe.preceding_statements, context)?;
             if statement_control != SequenceControl::Continue {
                 return Ok(statement_control);
             }
-            let conditions_matched =
-                recipe.planning_gate(state) && recipe.matches_complete(message, runtime, trace)?;
+            let conditions_matched = recipe.planning_gate(state)
+                && recipe.matches_complete(context.message, context.runtime, context.trace)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let has_error_handler = self.has_error_handler(index);
 
             let control = if conditions_matched {
-                trace.record(TraceEvent::RecipeEvaluated {
+                context.trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
-                recipe.plan_action(
-                    message,
-                    runtime,
-                    trace,
-                    execution,
-                    has_error_handler,
-                    context,
-                )?
+                recipe.plan_action(has_error_handler, context)?
             } else {
-                trace.record(TraceEvent::RecipeEvaluated {
+                context.trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Skipped,
                 });
@@ -414,14 +407,7 @@ impl CompiledSequence {
             }
         }
 
-        let statement_control = plan_statements_complete(
-            &self.trailing_statements,
-            message,
-            runtime,
-            trace,
-            execution,
-            context,
-        )?;
+        let statement_control = plan_statements_complete(&self.trailing_statements, context)?;
         if statement_control != SequenceControl::Continue {
             return Ok(statement_control);
         }
@@ -430,11 +416,8 @@ impl CompiledSequence {
 
     fn plan_headers<E, T>(
         &self,
-        head: &mut MessageHead,
-        runtime: &mut RuntimeVariables,
-        trace: &mut T,
-        planning: &mut HeaderPlanState<E>,
-        route: HeaderPlanRoute<'_, '_, E, T>,
+        context: &mut HeaderPlanContext<'_, '_, E, T>,
+        following: InputRequirements,
     ) -> Result<HeaderControl, OrderedExecutionError<E>>
     where
         T: TraceSink,
@@ -442,64 +425,57 @@ impl CompiledSequence {
         let mut state = SequenceState::default();
 
         for (index, recipe) in self.recipes.iter().enumerate() {
-            let statement_following = self.requirements_from(index).union(route.following);
+            let statement_following = self.requirements_from(index).union(following);
             let statement_control = plan_statements_headers(
                 &recipe.preceding_statements,
-                head,
-                runtime,
-                trace,
-                planning,
-                HeaderPlanRoute {
-                    following: statement_following,
-                    rc: route.rc,
-                    capture: route.capture,
-                },
+                context,
+                statement_following,
             )?;
             if statement_control != HeaderControl::Continue {
                 return Ok(statement_control);
             }
             let gate = recipe.planning_gate(state);
             let (matched, condition_results) = if gate {
-                recipe.matches_headers(head, runtime, trace)?
+                recipe.matches_headers(context.head, context.runtime, context.trace)?
             } else {
                 (PartialMatch::False, Vec::new())
             };
             if matched == PartialMatch::Deferred {
-                trace.record(TraceEvent::RecipeEvaluated {
+                context.trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Deferred,
                 });
-                planning.frames.push(ContinuationFrame {
+                context.planning.frames.push(ContinuationFrame {
                     recipe_index: index,
                     state,
                     condition_results,
                     assignments_applied: true,
                 });
-                planning.requirements = self.requirements_from(index).union(route.following);
+                context.planning.requirements = self.requirements_from(index).union(following);
                 return Ok(HeaderControl::Deferred);
             }
 
             let conditions_matched = matched == PartialMatch::True;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let has_error_handler = self.has_error_handler(index);
-            if conditions_matched && recipe.delivery_defers_header(route.capture.is_some()) {
-                trace.record(TraceEvent::RecipeEvaluated {
+            if conditions_matched && recipe.delivery_defers_header(context.capture.is_some()) {
+                context.trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Deferred,
                 });
-                planning.frames.push(ContinuationFrame {
+                context.planning.frames.push(ContinuationFrame {
                     recipe_index: index,
                     state,
                     condition_results,
                     assignments_applied: true,
                 });
-                planning.requirements = self.requirements_from(index).union(route.following);
+                context.planning.requirements = self.requirements_from(index).union(following);
                 return Ok(HeaderControl::Deferred);
             }
             let mut action_execution = ActionExecution::NotAttempted;
             let control = if conditions_matched {
                 action_execution = ActionExecution::Succeeded;
-                trace.record(TraceEvent::RecipeEvaluated {
+                context.trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
@@ -511,22 +487,22 @@ impl CompiledSequence {
                     }
                     CompiledAction::Capture { action, options } => {
                         let limit = super::ordered::active_command_value_limit::<E>(
-                            runtime,
+                            context.runtime,
                             action.target,
                             action.line,
                         )?;
-                        let executor = route
+                        let executor = context
                             .capture
                             .as_deref_mut()
                             .ok_or(EvalError::ExternalActionUnsupported { line: recipe.line })?;
                         match executor(
                             &action.command,
-                            head.as_bytes(),
+                            context.head.as_bytes(),
                             options.output_ending,
                             Some(*options),
                             limit,
-                            runtime,
-                            trace,
+                            context.runtime,
+                            context.trace,
                         ) {
                             Ok(captured) => {
                                 let value = validate_captured_value(
@@ -535,18 +511,18 @@ impl CompiledSequence {
                                     &action.name,
                                     CapturedNewlineRule::StripOne,
                                 )?;
-                                runtime.set_bytes_with_trace(
+                                context.runtime.set_bytes_with_trace(
                                     action.name.clone(),
                                     value,
                                     Some(action.line),
                                     TraceVariableSource::RcFile,
-                                    trace,
+                                    context.trace,
                                 );
-                                planning.pending_error = None;
+                                context.planning.pending_error = None;
                                 HeaderControl::Continue
                             }
                             Err(DeliveryAttemptError::Recoverable(error)) => {
-                                planning.pending_error = Some(error);
+                                context.planning.pending_error = Some(error);
                                 action_execution = ActionExecution::Failed;
                                 HeaderControl::Continue
                             }
@@ -557,25 +533,25 @@ impl CompiledSequence {
                     }
                     CompiledAction::Headers(action) => {
                         let action = action
-                            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                            .resolve_with(|name| context.runtime.get(name).map(str::to_owned))
                             .map_err(EvalError::Expansion)?;
                         let edited = crate::header_edit::apply_header_action(
-                            head.as_bytes(),
+                            context.head.as_bytes(),
                             0,
                             &action,
-                            head.limits(),
+                            context.head.limits(),
                         )
                         .map_err(|error| EvalError::HeaderEdit {
                             line: recipe.line,
                             message: error.to_string(),
                         })?;
-                        head.replace_edited_header(edited);
+                        context.head.replace_edited_header(edited);
                         HeaderControl::Continue
                     }
                     CompiledAction::Deliver { .. } => {
                         let control = recipe.plan_delivery(
-                            runtime,
-                            &mut planning.execution,
+                            context.runtime,
+                            context.execution,
                             has_error_handler,
                         )?;
                         HeaderControl::from(control)
@@ -584,33 +560,22 @@ impl CompiledSequence {
                         // Store the parent before descending so the path is
                         // ordered from the root and never exceeds the parser's
                         // recipe nesting limit.
-                        planning.frames.push(ContinuationFrame {
+                        context.planning.frames.push(ContinuationFrame {
                             recipe_index: index,
                             state,
                             condition_results: Vec::new(),
                             assignments_applied: true,
                         });
-                        let child_following =
-                            self.requirements_from(index + 1).union(route.following);
-                        let child = children.plan_headers(
-                            head,
-                            runtime,
-                            trace,
-                            planning,
-                            HeaderPlanRoute {
-                                following: child_following,
-                                rc: route.rc,
-                                capture: route.capture,
-                            },
-                        )?;
+                        let child_following = self.requirements_from(index + 1).union(following);
+                        let child = children.plan_headers(context, child_following)?;
                         if child != HeaderControl::Deferred {
-                            planning.frames.pop();
+                            context.planning.frames.pop();
                         }
                         child
                     }
                 }
             } else {
-                trace.record(TraceEvent::RecipeEvaluated {
+                context.trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Skipped,
                 });
@@ -620,7 +585,7 @@ impl CompiledSequence {
                 return Ok(control);
             }
             if action_execution == ActionExecution::Succeeded {
-                planning.pending_error = None;
+                context.planning.pending_error = None;
             }
             state.record(
                 recipe.control,
@@ -633,32 +598,18 @@ impl CompiledSequence {
             }
         }
 
-        let statement_control = plan_statements_headers(
-            &self.trailing_statements,
-            head,
-            runtime,
-            trace,
-            planning,
-            HeaderPlanRoute {
-                following: route.following,
-                rc: route.rc,
-                capture: route.capture,
-            },
-        )?;
+        let statement_control =
+            plan_statements_headers(&self.trailing_statements, context, following)?;
         if statement_control != HeaderControl::Continue {
             return Ok(statement_control);
         }
         Ok(HeaderControl::Continue)
     }
 
-    fn resume_from_frames(
+    fn resume_from_frames<T: TraceSink>(
         &self,
         cursor: ResumeCursor<'_>,
-        message: CompleteMessage<'_>,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-        execution: &mut FanoutPlanState,
-        context: RcExecutionContext<'_>,
+        context: &mut CompletePlanContext<'_, '_, T>,
     ) -> Result<SequenceControl, EvalError> {
         let frame = cursor
             .frames
@@ -670,7 +621,8 @@ impl CompiledSequence {
             .ok_or(EvalError::BodyWasNotBuffered)?;
         let mut state = frame.state;
         if !frame.assignments_applied {
-            let control = execute_statements(&recipe.preceding_statements, runtime, trace)?;
+            let control =
+                execute_statements(&recipe.preceding_statements, context.runtime, context.trace)?;
             if control != SequenceControl::Continue {
                 return Ok(control);
             }
@@ -685,31 +637,25 @@ impl CompiledSequence {
                     frames: cursor.frames,
                     depth: cursor.depth + 1,
                 },
-                message,
-                runtime,
-                trace,
-                execution,
                 context,
             )?;
             (true, control)
         } else {
             let conditions_matched = recipe.planning_gate(state)
-                && recipe.matches_resumed(message, &frame.condition_results, runtime, trace)?;
+                && recipe.matches_resumed(
+                    context.message,
+                    &frame.condition_results,
+                    context.runtime,
+                    context.trace,
+                )?;
             let control = if conditions_matched {
-                trace.record(TraceEvent::RecipeEvaluated {
+                context.trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
-                recipe.plan_action(
-                    message,
-                    runtime,
-                    trace,
-                    execution,
-                    self.has_error_handler(frame.recipe_index),
-                    context,
-                )?
+                recipe.plan_action(self.has_error_handler(frame.recipe_index), context)?
             } else {
-                trace.record(TraceEvent::RecipeEvaluated {
+                context.trace.record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
                     decision: RecipeDecision::Skipped,
                 });
@@ -736,10 +682,6 @@ impl CompiledSequence {
                 index: frame.recipe_index + 1,
                 state,
             },
-            message,
-            runtime,
-            trace,
-            execution,
             context,
         )
     }
@@ -833,27 +775,23 @@ impl CompiledNode {
         }
     }
 
-    fn plan_action(
+    fn plan_action<T: TraceSink>(
         &self,
-        message: CompleteMessage<'_>,
-        runtime: &mut RuntimeVariables,
-        trace: &mut impl TraceSink,
-        execution: &mut FanoutPlanState,
         has_error_handler: bool,
-        context: RcExecutionContext<'_>,
+        context: &mut CompletePlanContext<'_, '_, T>,
     ) -> Result<SequenceControl, EvalError> {
         match &self.action {
             CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => {
                 Err(EvalError::ExternalActionUnsupported { line: self.line })
             }
             CompiledAction::Deliver { .. } => {
-                self.plan_delivery(runtime, execution, has_error_handler)
+                self.plan_delivery(context.runtime, context.execution, has_error_handler)
             }
             CompiledAction::Block(children) => {
                 if self.lock.is_some() {
                     return Err(EvalError::LocalLockExecutorUnavailable { line: self.line });
                 }
-                children.plan_complete(message, runtime, trace, execution, context)
+                children.plan_complete(context)
             }
             CompiledAction::Headers(_) => {
                 Err(EvalError::HeaderActionUnsupported { line: self.line })
@@ -903,13 +841,9 @@ impl CompiledNode {
     }
 }
 
-fn plan_statements_complete(
+fn plan_statements_complete<T: TraceSink>(
     statements: &[CompiledStatement],
-    message: CompleteMessage<'_>,
-    runtime: &mut RuntimeVariables,
-    trace: &mut impl TraceSink,
-    execution: &mut FanoutPlanState,
-    context: RcExecutionContext<'_>,
+    context: &mut CompletePlanContext<'_, '_, T>,
 ) -> Result<SequenceControl, EvalError> {
     for statement in statements {
         match statement {
@@ -919,26 +853,27 @@ fn plan_statements_complete(
                 });
             }
             CompiledStatement::Assignment(assignment) => {
-                execute_assignment(assignment, runtime, trace)?;
+                execute_assignment(assignment, context.runtime, context.trace)?;
             }
             CompiledStatement::Host(assignment) => {
-                if !execute_host_assignment(assignment, runtime, trace)? {
-                    execution.original_delivered = true;
+                if !execute_host_assignment(assignment, context.runtime, context.trace)? {
+                    context.execution.original_delivered = true;
                     return Ok(SequenceControl::EndRcFile);
                 }
             }
             CompiledStatement::Include(include) => {
-                let entered = include.enter(runtime, context)?;
-                if let Some((sequence, child_context)) = entered.sequence()?
-                    && sequence.plan_complete_with_context(
-                        message,
-                        runtime,
-                        trace,
-                        execution,
-                        child_context,
-                    )? == SequenceControl::Stop
-                {
-                    return Ok(SequenceControl::Stop);
+                let entered = include.enter(context.runtime, context.rc)?;
+                if let Some((sequence, child_rc)) = entered.sequence()? {
+                    let mut child = CompletePlanContext {
+                        message: context.message,
+                        runtime: context.runtime,
+                        trace: context.trace,
+                        execution: context.execution,
+                        rc: child_rc,
+                    };
+                    if sequence.plan_complete_with_context(&mut child)? == SequenceControl::Stop {
+                        return Ok(SequenceControl::Stop);
+                    }
                 }
             }
             CompiledStatement::Switch(switch) => {
@@ -946,18 +881,19 @@ fn plan_statements_complete(
                 // EndRcFile to unwind every enclosing recipe block. An
                 // INCLUDERC boundary consumes that result and resumes its
                 // caller, while the root treats it as end of processing.
-                let entered = switch.enter(runtime, context)?;
+                let entered = switch.enter(context.runtime, context.rc)?;
                 if entered.is_empty() {
                     return Ok(SequenceControl::EndRcFile);
                 }
-                if let Some((sequence, child_context)) = entered.sequence()? {
-                    let control = sequence.plan_complete_with_context(
-                        message,
-                        runtime,
-                        trace,
-                        execution,
-                        child_context,
-                    )?;
+                if let Some((sequence, child_rc)) = entered.sequence()? {
+                    let mut child = CompletePlanContext {
+                        message: context.message,
+                        runtime: context.runtime,
+                        trace: context.trace,
+                        execution: context.execution,
+                        rc: child_rc,
+                    };
+                    let control = sequence.plan_complete_with_context(&mut child)?;
                     return Ok(if control == SequenceControl::Stop {
                         SequenceControl::Stop
                     } else {
@@ -972,11 +908,8 @@ fn plan_statements_complete(
 
 fn plan_statements_headers<E, T>(
     statements: &[CompiledStatement],
-    head: &mut MessageHead,
-    runtime: &mut RuntimeVariables,
-    trace: &mut T,
-    planning: &mut HeaderPlanState<E>,
-    route: HeaderPlanRoute<'_, '_, E, T>,
+    context: &mut HeaderPlanContext<'_, '_, E, T>,
+    following: InputRequirements,
 ) -> Result<HeaderControl, OrderedExecutionError<E>>
 where
     T: TraceSink,
@@ -990,51 +923,46 @@ where
                 .into());
             }
             CompiledStatement::Assignment(assignment) => {
-                execute_assignment(assignment, runtime, trace)?;
+                execute_assignment(assignment, context.runtime, context.trace)?;
             }
             CompiledStatement::Host(assignment) => {
-                if !execute_host_assignment(assignment, runtime, trace)? {
-                    planning.execution.original_delivered = true;
+                if !execute_host_assignment(assignment, context.runtime, context.trace)? {
+                    context.execution.original_delivered = true;
                     return Ok(HeaderControl::EndRcFile);
                 }
             }
             CompiledStatement::Include(include) => {
-                let entered = include.enter(runtime, route.rc)?;
-                if let Some((sequence, child_context)) = entered.sequence()? {
+                let entered = include.enter(context.runtime, context.rc)?;
+                if let Some((sequence, child_rc)) = entered.sequence()? {
                     if sequence.requires_preemptive_ordered_delivery() {
-                        planning.frames.clear();
-                        planning.restart = true;
-                        planning.requirements = sequence
+                        context.planning.frames.clear();
+                        context.planning.restart = true;
+                        context.planning.requirements = sequence
                             .requirements()
-                            .union(route.following)
+                            .union(following)
                             .union(InputRequirements {
                                 needs_end_of_message: true,
                                 ..InputRequirements::default()
                             });
                         return Ok(HeaderControl::Deferred);
                     }
-                    let child = sequence.plan_headers(
-                        head,
-                        runtime,
-                        trace,
-                        planning,
-                        HeaderPlanRoute {
-                            following: route.following,
-                            rc: child_context,
-                            capture: route.capture,
-                        },
-                    )?;
+                    let parent_rc = context.rc;
+                    context.rc = child_rc;
+                    let child = sequence.plan_headers(context, following);
+                    context.rc = parent_rc;
+                    let child = child?;
                     if child == HeaderControl::Deferred {
                         // Continuation frames point into the static root tree.
                         // A dynamically loaded child cannot be represented by
                         // that path, so replay the still-private plan once the
                         // selected message sections have been staged.
-                        planning.frames.clear();
-                        planning.restart = true;
-                        planning.requirements = planning
+                        context.planning.frames.clear();
+                        context.planning.restart = true;
+                        context.planning.requirements = context
+                            .planning
                             .requirements
                             .union(sequence.requirements())
-                            .union(route.following);
+                            .union(following);
                         return Ok(HeaderControl::Deferred);
                     }
                     if child == HeaderControl::Stop {
@@ -1046,39 +974,34 @@ where
                 // Requirements after this statement are unreachable after a
                 // successful switch. If the dynamic target needs the body,
                 // restart from the private root plan after staging it.
-                let entered = switch.enter(runtime, route.rc)?;
+                let entered = switch.enter(context.runtime, context.rc)?;
                 if entered.is_empty() {
                     return Ok(HeaderControl::EndRcFile);
                 }
-                if let Some((sequence, child_context)) = entered.sequence()? {
+                if let Some((sequence, child_rc)) = entered.sequence()? {
                     if sequence.requires_preemptive_ordered_delivery() {
-                        planning.frames.clear();
-                        planning.restart = true;
-                        planning.requirements = sequence.requirements().union(InputRequirements {
-                            needs_end_of_message: true,
-                            ..InputRequirements::default()
-                        });
+                        context.planning.frames.clear();
+                        context.planning.restart = true;
+                        context.planning.requirements =
+                            sequence.requirements().union(InputRequirements {
+                                needs_end_of_message: true,
+                                ..InputRequirements::default()
+                            });
                         return Ok(HeaderControl::Deferred);
                     }
-                    let child = sequence.plan_headers(
-                        head,
-                        runtime,
-                        trace,
-                        planning,
-                        HeaderPlanRoute {
-                            following: InputRequirements::default(),
-                            rc: child_context,
-                            capture: route.capture,
-                        },
-                    )?;
+                    let parent_rc = context.rc;
+                    context.rc = child_rc;
+                    let child = sequence.plan_headers(context, InputRequirements::default());
+                    context.rc = parent_rc;
+                    let child = child?;
                     if child == HeaderControl::Deferred {
                         // Replaying from the root reconstructs the dynamic
                         // target without retaining pointers into its tree.
                         // Nothing after SWITCHRC remains reachable.
-                        planning.frames.clear();
-                        planning.restart = true;
-                        planning.requirements =
-                            planning.requirements.union(sequence.requirements());
+                        context.planning.frames.clear();
+                        context.planning.restart = true;
+                        context.planning.requirements =
+                            context.planning.requirements.union(sequence.requirements());
                         return Ok(HeaderControl::Deferred);
                     }
                     return Ok(if child == HeaderControl::Stop {
