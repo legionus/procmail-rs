@@ -805,8 +805,9 @@ impl ConfigPreparer {
             assignment.line,
             assignment.double_quoted,
         )?;
-        if expression_references_any(&parsed, &self.dynamic) {
-            validate_runtime_references(&parsed, assignment.line, &self.known, &self.dynamic)?;
+        let analysis = ExpressionAnalysis::new(&parsed, &self.known, &self.dynamic);
+        if analysis.references_dynamic {
+            analysis.validate_runtime_references(assignment.line)?;
             assignment.expansion = Some(parsed);
             self.dynamic.insert(assignment.name.clone());
             return Ok(());
@@ -847,8 +848,9 @@ impl ConfigPreparer {
             assignment.line,
             assignment.double_quoted,
         )?;
-        validate_runtime_references(&expression, assignment.line, &self.known, &self.dynamic)?;
-        self.validate_known_deferred_assignment(assignment, &expression)?;
+        let analysis = ExpressionAnalysis::new(&expression, &self.known, &self.dynamic);
+        analysis.validate_runtime_references(assignment.line)?;
+        self.validate_known_deferred_assignment(assignment, &expression, &analysis)?;
         assignment.expansion = Some(expression);
 
         // Conditional assignments exist only on a selected execution path.
@@ -896,10 +898,9 @@ impl ConfigPreparer {
         &self,
         assignment: &Assignment,
         expression: &ShellExpression,
+        analysis: &ExpressionAnalysis<'_>,
     ) -> Result<(), ExpansionError> {
-        if expression_needs_runtime(expression, &self.known)
-            || expression_references_any(expression, &self.dynamic)
-        {
+        if analysis.needs_runtime || analysis.references_dynamic {
             return Ok(());
         }
         let value = evaluate_config_expression(
@@ -982,13 +983,13 @@ impl ConfigPreparer {
             return Ok(());
         }
         let parsed = parse_expression(&expression.source, line)?;
+        let analysis = ExpressionAnalysis::new(&parsed, &self.known, &self.dynamic);
         if phase == PreparationPhase::Eager {
-            validate_path_references(&parsed, line, &self.known)?;
+            analysis.validate_path_references(line)?;
         } else {
-            validate_runtime_references(&parsed, line, &self.known, &self.dynamic)?;
+            analysis.validate_runtime_references(line)?;
         }
-        let has_runtime_reference = expression_references_any(&parsed, &self.dynamic)
-            || expression_needs_runtime(&parsed, &self.known);
+        let has_runtime_reference = analysis.references_dynamic || analysis.needs_runtime;
         expression.runtime_dependent = has_runtime_reference;
         expression.runtime_base = self.dynamic.contains("MAILDIR");
         expression.expansion = Some(parsed);
@@ -1092,9 +1093,9 @@ fn prepare_header_action(
             | HeaderOperation::Prepend { line, value, .. } => (*line, value),
         };
         let expression = parse_expression(&value.source, line)?;
-        validate_runtime_references(&expression, line, known, dynamic)?;
-        let needs_runtime = expression_needs_runtime(&expression, known)
-            || expression_references_any(&expression, dynamic);
+        let analysis = ExpressionAnalysis::new(&expression, known, dynamic);
+        analysis.validate_runtime_references(line)?;
+        let needs_runtime = analysis.needs_runtime || analysis.references_dynamic;
 
         // Resolve expressions whose inputs are already fixed so malformed or
         // oversized generated values fail during configuration preparation.
@@ -1130,11 +1131,11 @@ fn prepare_lock_expression(
     maildir: Option<&str>,
 ) -> Result<(), ExpansionError> {
     let parsed = parse_expression(&expression.source, line)?;
-    validate_runtime_references(&parsed, line, known, dynamic)?;
+    let analysis = ExpressionAnalysis::new(&parsed, known, dynamic);
+    analysis.validate_runtime_references(line)?;
     expression.base = maildir.map(str::to_owned);
     expression.line = line;
-    expression.runtime_dependent =
-        expression_needs_runtime(&parsed, known) || expression_references_any(&parsed, dynamic);
+    expression.runtime_dependent = analysis.needs_runtime || analysis.references_dynamic;
     expression.runtime_base = expression.runtime_dependent;
     expression.expansion = Some(parsed);
     if !expression.runtime_dependent && !expression.source.is_empty() {
@@ -1149,56 +1150,7 @@ fn validate_runtime_references(
     known: &BTreeMap<String, ExpandedValue>,
     dynamic: &BTreeSet<String>,
 ) -> Result<(), ExpansionError> {
-    for part in &expression.parts {
-        let ShellPart::Variable { name, default } = part else {
-            continue;
-        };
-        if known.contains_key(name)
-            || dynamic.contains(name)
-            || variable_policy(name) == VariablePolicy::RuntimeOnly
-        {
-            continue;
-        }
-        if let Some(default) = default {
-            validate_runtime_references(default, line, known, dynamic)?;
-        } else {
-            return Err(ExpansionError::new(
-                line,
-                format!("variable {name} is not defined"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_shell_condition_references(
-    expression: &ShellExpression,
-    line: usize,
-    known: &BTreeMap<String, ExpandedValue>,
-    dynamic: &BTreeSet<String>,
-) -> Result<(), ExpansionError> {
-    for part in &expression.parts {
-        let (name, default) = match part {
-            ShellPart::Variable { name, default } => (name, default.as_ref()),
-            ShellPart::RegexQuotedVariable(name) => (name, None),
-            ShellPart::Literal(_) | ShellPart::Command(_) => continue,
-        };
-        if known.contains_key(name)
-            || dynamic.contains(name)
-            || variable_policy(name) == VariablePolicy::RuntimeOnly
-        {
-            continue;
-        }
-        if let Some(default) = default {
-            validate_shell_condition_references(default, line, known, dynamic)?;
-        } else {
-            return Err(ExpansionError::new(
-                line,
-                format!("variable {name} is not defined"),
-            ));
-        }
-    }
-    Ok(())
+    ExpressionAnalysis::new(expression, known, dynamic).validate_runtime_references(line)
 }
 
 fn prepare_shell_conditions(
@@ -1220,8 +1172,9 @@ fn prepare_shell_conditions(
                 break;
             };
             let expression = parse_shell_condition_expression(&shell.source, condition.line)?;
-            validate_shell_condition_references(&expression, condition.line, known, dynamic)?;
-            if !shell_condition_is_static(&expression, known, dynamic) {
+            let analysis = ExpressionAnalysis::new(&expression, known, dynamic);
+            analysis.validate_shell_condition_references(condition.line)?;
+            if !analysis.shell_condition_static {
                 if let super::ConditionKind::ShellExpanded(shell) = &mut condition.kind {
                     shell.expansion = Some(expression);
                 }
@@ -1251,36 +1204,6 @@ fn prepare_shell_conditions(
         }
     }
     Ok(())
-}
-
-fn shell_condition_is_static(
-    expression: &ShellExpression,
-    known: &BTreeMap<String, ExpandedValue>,
-    dynamic: &BTreeSet<String>,
-) -> bool {
-    expression.parts.iter().all(|part| match part {
-        ShellPart::Literal(_) => true,
-        ShellPart::Variable { name, default } => {
-            if dynamic.contains(name) || variable_policy(name) == VariablePolicy::RuntimeOnly {
-                return false;
-            }
-            match known.get(name) {
-                Some(value) if !value.text.is_empty() => true,
-                Some(_) => default
-                    .as_ref()
-                    .is_none_or(|default| shell_condition_is_static(default, known, dynamic)),
-                None => default
-                    .as_ref()
-                    .is_some_and(|default| shell_condition_is_static(default, known, dynamic)),
-            }
-        }
-        ShellPart::RegexQuotedVariable(name) => {
-            !dynamic.contains(name)
-                && variable_policy(name) != VariablePolicy::RuntimeOnly
-                && known.contains_key(name)
-        }
-        ShellPart::Command(_) => false,
-    })
 }
 
 pub(crate) fn expand_shell_condition(
@@ -1568,69 +1491,162 @@ impl EvaluationContext for ConfigEvaluation<'_> {
     }
 }
 
-fn validate_path_references(
-    expression: &ShellExpression,
-    line: usize,
-    variables: &BTreeMap<String, ExpandedValue>,
-) -> Result<(), ExpansionError> {
-    for part in &expression.parts {
-        if let ShellPart::Variable { name, default } = part {
-            let present = variables
-                .get(name)
-                .is_some_and(|value| !value.text.is_empty());
-            if present || variable_policy(name) == VariablePolicy::RuntimeOnly {
-                continue;
+#[derive(Debug, Default)]
+struct ExpressionAnalysis<'a> {
+    missing_runtime: Option<&'a str>,
+    missing_shell_condition: Option<&'a str>,
+    missing_path: Option<&'a str>,
+    needs_runtime: bool,
+    references_dynamic: bool,
+    has_runtime_variable: bool,
+    has_command: bool,
+    has_regex_quoted_variable: bool,
+    shell_condition_static: bool,
+}
+
+impl<'a> ExpressionAnalysis<'a> {
+    fn new(
+        expression: &'a ShellExpression,
+        known: &BTreeMap<String, ExpandedValue>,
+        dynamic: &BTreeSet<String>,
+    ) -> Self {
+        let mut analysis = Self {
+            shell_condition_static: true,
+            ..Self::default()
+        };
+
+        // Analyze every expression node here so additions to ShellPart cannot
+        // silently escape one of the preparation checks. Default branches need
+        // their own summaries because some consumers inspect all references,
+        // while value-dependent checks inspect only the branch that can run.
+        for part in &expression.parts {
+            match part {
+                ShellPart::Literal(_) => {}
+                ShellPart::Variable { name, default } => {
+                    let child = default
+                        .as_ref()
+                        .map(|value| Self::new(value, known, dynamic));
+                    let policy = variable_policy(name);
+                    let known_value = known.get(name);
+                    let known_nonempty = known_value.is_some_and(|value| !value.text.is_empty());
+                    let available_at_runtime = known_value.is_some()
+                        || dynamic.contains(name)
+                        || policy == VariablePolicy::RuntimeOnly;
+
+                    if !available_at_runtime {
+                        merge_first_missing(
+                            &mut analysis.missing_runtime,
+                            child.as_ref().and_then(|value| value.missing_runtime),
+                            default.is_none().then_some(name),
+                        );
+                        merge_first_missing(
+                            &mut analysis.missing_shell_condition,
+                            child
+                                .as_ref()
+                                .and_then(|value| value.missing_shell_condition),
+                            default.is_none().then_some(name),
+                        );
+                    }
+
+                    if !known_nonempty && policy != VariablePolicy::RuntimeOnly {
+                        merge_first_missing(
+                            &mut analysis.missing_path,
+                            child.as_ref().and_then(|value| value.missing_path),
+                            (default.is_none() && known_value.is_none()).then_some(name),
+                        );
+                    }
+
+                    analysis.references_dynamic |= dynamic.contains(name)
+                        || child.as_ref().is_some_and(|value| value.references_dynamic);
+                    analysis.has_runtime_variable |= policy == VariablePolicy::RuntimeOnly
+                        || child
+                            .as_ref()
+                            .is_some_and(|value| value.has_runtime_variable);
+                    analysis.has_command |= child.as_ref().is_some_and(|value| value.has_command);
+                    analysis.has_regex_quoted_variable |= child
+                        .as_ref()
+                        .is_some_and(|value| value.has_regex_quoted_variable);
+                    analysis.needs_runtime |= if policy == VariablePolicy::RuntimeOnly {
+                        true
+                    } else if known_nonempty {
+                        false
+                    } else {
+                        child.as_ref().is_some_and(|value| value.needs_runtime)
+                    };
+                    analysis.shell_condition_static &=
+                        if dynamic.contains(name) || policy == VariablePolicy::RuntimeOnly {
+                            false
+                        } else if known_nonempty {
+                            true
+                        } else if known_value.is_some() {
+                            child
+                                .as_ref()
+                                .is_none_or(|value| value.shell_condition_static)
+                        } else {
+                            child
+                                .as_ref()
+                                .is_some_and(|value| value.shell_condition_static)
+                        };
+                }
+                ShellPart::RegexQuotedVariable(name) => {
+                    let available_at_runtime = known.contains_key(name)
+                        || dynamic.contains(name)
+                        || variable_policy(name) == VariablePolicy::RuntimeOnly;
+                    if !available_at_runtime && analysis.missing_shell_condition.is_none() {
+                        analysis.missing_shell_condition = Some(name);
+                    }
+                    analysis.references_dynamic |= dynamic.contains(name);
+                    analysis.has_regex_quoted_variable = true;
+                    analysis.needs_runtime = true;
+                    analysis.shell_condition_static &= known.contains_key(name)
+                        && !dynamic.contains(name)
+                        && variable_policy(name) != VariablePolicy::RuntimeOnly;
+                }
+                ShellPart::Command(_) => {
+                    analysis.has_command = true;
+                    analysis.needs_runtime = true;
+                    analysis.shell_condition_static = false;
+                }
             }
-            if let Some(default) = default {
-                validate_path_references(default, line, variables)?;
-            } else if !variables.contains_key(name) {
-                return Err(ExpansionError::new(
-                    line,
-                    format!("variable {name} is not defined"),
-                ));
-            }
+        }
+        analysis
+    }
+
+    fn validate_runtime_references(&self, line: usize) -> Result<(), ExpansionError> {
+        self.validate_missing(self.missing_runtime, line)
+    }
+
+    fn validate_shell_condition_references(&self, line: usize) -> Result<(), ExpansionError> {
+        self.validate_missing(self.missing_shell_condition, line)
+    }
+
+    fn validate_path_references(&self, line: usize) -> Result<(), ExpansionError> {
+        self.validate_missing(self.missing_path, line)
+    }
+
+    fn validate_missing(&self, missing: Option<&str>, line: usize) -> Result<(), ExpansionError> {
+        match missing {
+            Some(name) => Err(ExpansionError::new(
+                line,
+                format!("variable {name} is not defined"),
+            )),
+            None => Ok(()),
         }
     }
-    Ok(())
+
+    fn has_runtime_part(&self) -> bool {
+        self.has_runtime_variable || self.has_command || self.has_regex_quoted_variable
+    }
 }
 
-fn expression_needs_runtime(
-    expression: &ShellExpression,
-    variables: &BTreeMap<String, ExpandedValue>,
-) -> bool {
-    expression.parts.iter().any(|part| match part {
-        ShellPart::Literal(_) => false,
-        ShellPart::Variable { name, default } => {
-            if variable_policy(name) == VariablePolicy::RuntimeOnly {
-                true
-            } else if variables
-                .get(name)
-                .is_some_and(|value| !value.text.is_empty())
-            {
-                false
-            } else {
-                default
-                    .as_ref()
-                    .is_some_and(|value| expression_needs_runtime(value, variables))
-            }
-        }
-        ShellPart::RegexQuotedVariable(_) => true,
-        ShellPart::Command(_) => true,
-    })
-}
-
-fn expression_references_any(expression: &ShellExpression, names: &BTreeSet<String>) -> bool {
-    expression.parts.iter().any(|part| match part {
-        ShellPart::Literal(_) => false,
-        ShellPart::Variable { name, default } => {
-            names.contains(name)
-                || default
-                    .as_ref()
-                    .is_some_and(|value| expression_references_any(value, names))
-        }
-        ShellPart::RegexQuotedVariable(name) => names.contains(name),
-        ShellPart::Command(_) => false,
-    })
+fn merge_first_missing<'a>(
+    target: &mut Option<&'a str>,
+    nested: Option<&'a str>,
+    current: Option<&'a String>,
+) {
+    if target.is_none() {
+        *target = nested.or(current.map(String::as_str));
+    }
 }
 
 fn bind_static_expression(
@@ -1757,14 +1773,7 @@ where
 }
 
 fn expression_has_runtime(expression: &ShellExpression) -> bool {
-    expression.parts.iter().any(|part| match part {
-        ShellPart::Literal(_) => false,
-        ShellPart::Variable { name, default } => {
-            variable_policy(name) == VariablePolicy::RuntimeOnly
-                || default.as_ref().is_some_and(expression_has_runtime)
-        }
-        ShellPart::RegexQuotedVariable(_) | ShellPart::Command(_) => true,
-    })
+    ExpressionAnalysis::new(expression, &BTreeMap::new(), &BTreeSet::new()).has_runtime_part()
 }
 
 fn push_literal_part(parts: &mut Vec<ShellPart>, text: &str) {

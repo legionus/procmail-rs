@@ -4,6 +4,68 @@
 use super::*;
 
 #[test]
+fn expression_analysis_preserves_context_specific_default_reachability() {
+    let expression = parse_shell_condition_expression(
+        "$KNOWN-${EMPTY:-$DYNAMIC}-${MISSING:-$FALLBACK}-$\\QUOTED-`command`",
+        1,
+    )
+    .unwrap();
+    let known = BTreeMap::from([
+        (
+            "KNOWN".to_owned(),
+            ExpandedValue {
+                text: "value".to_owned(),
+                depth: 0,
+            },
+        ),
+        (
+            "EMPTY".to_owned(),
+            ExpandedValue {
+                text: String::new(),
+                depth: 0,
+            },
+        ),
+        (
+            "QUOTED".to_owned(),
+            ExpandedValue {
+                text: String::new(),
+                depth: 0,
+            },
+        ),
+    ]);
+    let dynamic = BTreeSet::from(["DYNAMIC".to_owned(), "FALLBACK".to_owned()]);
+
+    let analysis = ExpressionAnalysis::new(&expression, &known, &dynamic);
+
+    assert_eq!(analysis.missing_runtime, None);
+    assert_eq!(analysis.missing_shell_condition, None);
+    assert_eq!(analysis.missing_path, Some("DYNAMIC"));
+    assert!(analysis.needs_runtime);
+    assert!(analysis.references_dynamic);
+    assert!(analysis.has_command);
+    assert!(analysis.has_regex_quoted_variable);
+    assert!(!analysis.shell_condition_static);
+}
+
+#[test]
+fn expression_analysis_reports_only_reachable_missing_defaults() {
+    let expression = parse_expression("${PRESENT:-$HIDDEN}-$MISSING", 1).unwrap();
+    let known = BTreeMap::from([(
+        "PRESENT".to_owned(),
+        ExpandedValue {
+            text: "value".to_owned(),
+            depth: 0,
+        },
+    )]);
+    let analysis = ExpressionAnalysis::new(&expression, &known, &BTreeSet::new());
+
+    assert_eq!(analysis.missing_runtime, Some("MISSING"));
+    assert_eq!(analysis.missing_path, Some("MISSING"));
+    assert!(!analysis.needs_runtime);
+    assert!(!analysis.shell_condition_static);
+}
+
+#[test]
 fn known_assignment_values_are_validated_equally_at_root_and_in_blocks() {
     for assignment in [
         "LOCKEXT=bad/name",
