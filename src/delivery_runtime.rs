@@ -181,10 +181,6 @@ impl PublicationTracker {
         Ok(())
     }
 
-    fn record_plan(&mut self, plan: &DeliveryPlan) -> Result<(), OperationalError> {
-        self.record(plan.deliveries().len(), plan.original_delivered())
-    }
-
     fn record_outcome(
         &mut self,
         outcome: procmail_rs::eval::DeliveryOutcome,
@@ -240,8 +236,9 @@ impl DeliveryRuntime {
         let (validated, _) = pending.stream(head, reader).map_err(|error| {
             OperationalError::Input(format!("cannot stream message from stdin: {error}"))
         })?;
-        commit_delivery(validated, plan.deliveries(), runtime, trace)?;
-        self.publications.record_plan(plan)?;
+        let published = commit_delivery(validated, plan.deliveries(), runtime, trace)?;
+        self.publications
+            .record(published, plan.original_delivered())?;
         self.publications.finish()
     }
 
@@ -352,8 +349,9 @@ impl DeliveryRuntime {
         let validated = validated
             .append_bytes(late, staged.as_bytes())
             .map_err(|error| OperationalError::delivery(error.class(), error.to_string()))?;
-        commit_delivery(validated, plan.deliveries(), runtime, trace)?;
-        self.publications.record_plan(&plan)?;
+        let published = commit_delivery(validated, plan.deliveries(), runtime, trace)?;
+        self.publications
+            .record(published, plan.original_delivered())?;
         self.publications.finish()
     }
 }
@@ -496,6 +494,94 @@ struct OrderedStepError {
     can_handle: bool,
 }
 
+enum PublicationDestinations<'a> {
+    One(&'a Destination),
+    Plan(&'a [PlannedDelivery]),
+}
+
+impl PublicationDestinations<'_> {
+    fn get(&self, index: usize) -> Option<&Destination> {
+        match self {
+            Self::One(destination) => (index == 0).then_some(*destination),
+            Self::Plan(deliveries) => deliveries.get(index).map(PlannedDelivery::destination),
+        }
+    }
+}
+
+struct PublicationFailure {
+    class: DeliveryFailureClass,
+    error: OperationalError,
+}
+
+struct PublicationAttempt<'a> {
+    published: Option<PublicationResult<'a>>,
+    failure: Option<PublicationFailure>,
+}
+
+impl<'a> PublicationAttempt<'a> {
+    fn published(result: PublicationResult<'a>) -> Self {
+        Self {
+            published: Some(result),
+            failure: None,
+        }
+    }
+
+    fn failed(
+        published: Option<PublicationResult<'a>>,
+        class: DeliveryFailureClass,
+        error: OperationalError,
+    ) -> Self {
+        Self {
+            published,
+            failure: Some(PublicationFailure { class, error }),
+        }
+    }
+}
+
+fn apply_publication(
+    attempt: PublicationAttempt<'_>,
+    destinations: PublicationDestinations<'_>,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) -> Result<usize, OrderedStepError> {
+    let published = attempt.published.map_or(0, PublicationResult::len);
+
+    // Only the backend can tell whether a destination became visible. Apply
+    // every externally observable consequence from that report so trace,
+    // LASTFOLDER, and the returned count cannot disagree after a partial
+    // fanout or a durability failure following publication.
+    for index in 0..published {
+        let destination = destinations.get(index).ok_or_else(|| {
+            OrderedStepError::after_publication(OperationalError::Internal(
+                "published destination has no matching delivery plan entry".to_owned(),
+            ))
+        })?;
+        record_delivery(destination, DeliveryStage::Published, trace);
+    }
+    if let Some(result) = attempt.published {
+        runtime
+            .record_publication(result, trace)
+            .map_err(OperationalError::Internal)
+            .map_err(OrderedStepError::after_publication)?;
+    }
+
+    if let Some(failure) = attempt.failure {
+        if let Some(destination) = destinations.get(published) {
+            record_delivery(
+                destination,
+                DeliveryStage::Failed(trace_failure_class(failure.class)),
+                trace,
+            );
+        }
+        return Err(if published == 0 {
+            OrderedStepError::before_publication(failure.error)
+        } else {
+            OrderedStepError::after_publication(failure.error)
+        });
+    }
+    Ok(published)
+}
+
 impl OrderedStepError {
     fn before_publication(error: OperationalError) -> Self {
         Self {
@@ -544,35 +630,30 @@ fn deliver_one_sink(
     let published = match sink.commit() {
         Ok(published) => published,
         Err(error) => {
-            if let Some(published) = error.published() {
-                record_delivery(destination, DeliveryStage::Published, trace);
-                runtime
-                    .record_publication(PublicationResult::Delivery(published), trace)
-                    .map_err(OperationalError::Internal)
-                    .map_err(OrderedStepError::after_publication)?;
-            }
-            record_delivery(
-                destination,
-                DeliveryStage::Failed(FailureClass::Transient),
-                trace,
-            );
             let failure = OperationalError::delivery(
                 error.class(),
                 format!("cannot publish Maildir delivery: {error}"),
             );
-            return Err(if error.published().is_some() {
-                OrderedStepError::after_publication(failure)
-            } else {
-                OrderedStepError::before_publication(failure)
-            });
+            return apply_publication(
+                PublicationAttempt::failed(
+                    error.published().map(PublicationResult::Delivery),
+                    error.class(),
+                    failure,
+                ),
+                PublicationDestinations::One(destination),
+                runtime,
+                trace,
+            )
+            .map(|_| ());
         }
     };
-    record_delivery(destination, DeliveryStage::Published, trace);
-    runtime
-        .record_publication(PublicationResult::Delivery(&published), trace)
-        .map_err(OperationalError::Internal)
-        .map_err(OrderedStepError::after_publication)?;
-    Ok(())
+    apply_publication(
+        PublicationAttempt::published(PublicationResult::Delivery(&published)),
+        PublicationDestinations::One(destination),
+        runtime,
+        trace,
+    )
+    .map(|_| ())
 }
 
 fn deliver_file_destination(
@@ -601,17 +682,15 @@ fn deliver_file_destination(
     // input validation, while avoiding device writes also keeps mbox locking,
     // rollback, and durability assumptions limited to regular files.
     if destination.kind() == DestinationKind::Discard {
-        record_delivery(&destination, DeliveryStage::Published, trace);
-        runtime
-            .record_publication(
-                PublicationResult::Delivery(&procmail_rs::delivery::PublishedDelivery::new(
-                    PathBuf::from(destination.path()),
-                )),
-                trace,
-            )
-            .map_err(OperationalError::Internal)
-            .map_err(OrderedStepError::after_publication)?;
-        return Ok(());
+        let published =
+            procmail_rs::delivery::PublishedDelivery::new(PathBuf::from(destination.path()));
+        return apply_publication(
+            PublicationAttempt::published(PublicationResult::Delivery(&published)),
+            PublicationDestinations::One(&destination),
+            runtime,
+            trace,
+        )
+        .map(|_| ());
     }
     if destination.kind() != DestinationKind::Mbox {
         return Err(OrderedStepError::before_publication(
@@ -646,42 +725,33 @@ fn deliver_file_destination(
         })
         .map_err(OrderedStepError::before_publication)?;
     match locked.append(message, output_ending, durability) {
-        Ok(published) => {
-            record_delivery(&destination, DeliveryStage::Published, trace);
-            runtime
-                .record_publication(PublicationResult::Delivery(&published), trace)
-                .map_err(OperationalError::Internal)
-                .map_err(OrderedStepError::after_publication)
-        }
+        Ok(published) => apply_publication(
+            PublicationAttempt::published(PublicationResult::Delivery(&published)),
+            PublicationDestinations::One(&destination),
+            runtime,
+            trace,
+        )
+        .map(|_| ()),
         Err(error) => {
             let class = error.class();
-            if error.published() {
-                record_delivery(&destination, DeliveryStage::Published, trace);
-                runtime
-                    .record_publication(
-                        PublicationResult::Delivery(
-                            &procmail_rs::delivery::PublishedDelivery::new(path.to_owned()),
-                        ),
-                        trace,
-                    )
-                    .map_err(OperationalError::Internal)
-                    .map_err(OrderedStepError::after_publication)?;
-            } else {
-                record_delivery(
-                    &destination,
-                    DeliveryStage::Failed(trace_failure_class(class)),
-                    trace,
-                );
-            }
             let failure = OperationalError::delivery(
                 class,
                 format!("cannot deliver to mbox {}: {error}", path.display()),
             );
-            Err(if error.published() {
-                OrderedStepError::after_publication(failure)
-            } else {
-                OrderedStepError::before_publication(failure)
-            })
+            let published = error
+                .published()
+                .then(|| procmail_rs::delivery::PublishedDelivery::new(path.to_owned()));
+            apply_publication(
+                PublicationAttempt::failed(
+                    published.as_ref().map(PublicationResult::Delivery),
+                    class,
+                    failure,
+                ),
+                PublicationDestinations::One(&destination),
+                runtime,
+                trace,
+            )
+            .map(|_| ())
         }
     }
 }
@@ -699,39 +769,33 @@ fn commit_delivery(
     deliveries: &[PlannedDelivery],
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
-) -> Result<(), OperationalError> {
-    // Each sink reports the path it actually made visible. Update LASTFOLDER
-    // from that report, including the last successful sink in a partial
-    // fan-out, instead of guessing from the requested destination directory.
-    match validated.commit() {
-        Ok(report) => {
-            for delivery in deliveries.iter().take(report.published().len()) {
-                record_delivery(delivery.destination(), DeliveryStage::Published, trace);
-            }
-            runtime
-                .record_publication(PublicationResult::Fanout(&report), trace)
-                .map_err(OperationalError::Internal)
-        }
+) -> Result<usize, OperationalError> {
+    let result = match validated.commit() {
+        Ok(report) => apply_publication(
+            PublicationAttempt::published(PublicationResult::Fanout(&report)),
+            PublicationDestinations::Plan(deliveries),
+            runtime,
+            trace,
+        ),
         Err(error) => {
-            for delivery in deliveries.iter().take(error.published().len()) {
-                record_delivery(delivery.destination(), DeliveryStage::Published, trace);
-            }
-            if let Some(delivery) = deliveries.get(error.published().len()) {
-                record_delivery(
-                    delivery.destination(),
-                    DeliveryStage::Failed(FailureClass::Transient),
-                    trace,
-                );
-            }
-            runtime
-                .record_publication(PublicationResult::PartialFanout(&error), trace)
-                .map_err(OperationalError::Internal)?;
-            Err(OperationalError::delivery(
+            let failure = OperationalError::delivery(
                 error.class(),
                 format!("cannot publish Maildir delivery: {error}"),
-            ))
+            );
+            apply_publication(
+                PublicationAttempt::failed(
+                    (!error.published().is_empty())
+                        .then_some(PublicationResult::PartialFanout(&error)),
+                    error.class(),
+                    failure,
+                ),
+                PublicationDestinations::Plan(deliveries),
+                runtime,
+                trace,
+            )
         }
-    }
+    };
+    result.map_err(|error| error.error)
 }
 
 fn open_sinks(

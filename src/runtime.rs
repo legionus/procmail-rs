@@ -21,6 +21,18 @@ pub enum PublicationResult<'a> {
 }
 
 impl<'a> PublicationResult<'a> {
+    pub fn len(self) -> usize {
+        match self {
+            Self::Delivery(_) => 1,
+            Self::Fanout(report) => report.published().len(),
+            Self::PartialFanout(error) => error.published().len(),
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
     fn last_folder(self) -> Option<&'a Path> {
         match self {
             Self::Delivery(delivery) => Some(delivery.last_folder()),
