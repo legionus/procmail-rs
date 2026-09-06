@@ -4,6 +4,51 @@
 use super::*;
 
 #[test]
+fn assignment_targets_define_preparation_behavior_in_one_place() {
+    assert_eq!(
+        AssignmentTarget::Maildir.path(),
+        Some(AssignmentPath::Maildir)
+    );
+    assert_eq!(
+        AssignmentTarget::Maildir.value_limit(),
+        super::super::MAX_PATH_EXPRESSION_LEN
+    );
+    assert!(AssignmentTarget::Maildir.supports_conditional_assignment());
+    assert!(AssignmentTarget::Maildir.allowed_in_runtime_rc());
+    assert!(AssignmentTarget::Maildir.uses_path_error_label());
+
+    assert!(AssignmentTarget::LineBuf.controls_rc_parsing());
+    assert!(AssignmentTarget::RcLimit(RcLimitVariable::Recipes).controls_rc_parsing());
+    assert!(!AssignmentTarget::User.controls_rc_parsing());
+    assert!(!AssignmentTarget::LogFile.supports_conditional_assignment());
+    assert!(!AssignmentTarget::LogFile.allowed_in_runtime_rc());
+}
+
+#[test]
+fn target_validation_preserves_the_owner_specific_validation_phase() {
+    assert!(
+        AssignmentTarget::LockMethod
+            .validate_known_value("invalid")
+            .is_ok()
+    );
+    assert!(
+        AssignmentTarget::LockMethod
+            .validate_resolved_value("invalid")
+            .is_err()
+    );
+    assert!(
+        AssignmentTarget::LockExt
+            .validate_known_value("bad/path")
+            .is_err()
+    );
+    assert!(
+        AssignmentTarget::LockExt
+            .validate_resolved_value("bad/path")
+            .is_err()
+    );
+}
+
+#[test]
 fn assigns_explicit_sources_to_variable_classes() {
     assert_eq!(
         variable_policy("MAILDIR").assignment_target(VariableSource::RcFile),

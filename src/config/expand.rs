@@ -9,11 +9,11 @@ use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
 use super::shell_eval::{self, EvaluationContext, EvaluationDepth, UnsupportedPart, VariableValue};
 use super::{
-    Assignment, AssignmentTarget, Config, Destination, HeaderAction, HeaderOperation, HeaderValue,
-    MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH, MAX_PATH_EXPRESSION_LEN, PathExpression,
-    RcFileExpression, Recipe, RecipeAction, ShellExpandedCondition, ShellExpression, ShellPart,
-    Statement, SuppliedVariable, VariablePolicy, VariableSource, assignment_value_limit,
-    variable_policy,
+    Assignment, AssignmentPath, AssignmentTarget, Config, Destination, HeaderAction,
+    HeaderOperation, HeaderValue, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
+    MAX_PATH_EXPRESSION_LEN, PathExpression, RcFileExpression, Recipe, RecipeAction,
+    ShellExpandedCondition, ShellExpression, ShellPart, Statement, SuppliedVariable,
+    VariablePolicy, VariableSource, variable_policy,
 };
 
 #[derive(Debug, Clone)]
@@ -205,32 +205,20 @@ impl Assignment {
                 evaluate_with_linebuf(
                     expression,
                     self.line,
-                    assignment_value_limit(self.target),
+                    self.target.value_limit(),
                     &mut lookup,
                 )?
                 .text
             }
             None => self.value.clone(),
         };
-        match self.target {
-            AssignmentTarget::LockMethod => super::validate_lock_method(&value),
-            AssignmentTarget::LockTimeout => super::parse_lock_timeout_seconds(&value).map(drop),
-            AssignmentTarget::ProcessTimeout => {
-                super::parse_process_timeout_seconds(&value).map(drop)
-            }
-            AssignmentTarget::Umask => super::parse_umask(&value).map(drop),
-            AssignmentTarget::Trap => super::validate_trap_command(&value),
-            AssignmentTarget::LockExt => super::validate_lock_ext(&value),
-            AssignmentTarget::LogAbstract => super::validate_log_abstract(&value),
-            _ => Ok(()),
-        }
-        .map_err(|message| ExpansionError::new(self.line, message))?;
-        let (purpose, description) = match self.target {
-            AssignmentTarget::Maildir => (PathPurpose::Maildir, "MAILDIR"),
-            AssignmentTarget::LockFile => (PathPurpose::Lockfile, "LOCKFILE"),
-            AssignmentTarget::LogFile => (PathPurpose::Logfile, "LOGFILE"),
-            _ => return Ok(value),
+        self.target
+            .validate_resolved_value(&value)
+            .map_err(|message| ExpansionError::new(self.line, message))?;
+        let Some(path) = self.target.path() else {
+            return Ok(value);
         };
+        let (purpose, description) = assignment_path(path);
         let base = lookup("MAILDIR");
         PathResolver::new(purpose, description, self.line, base.as_deref()).resolve(&value)
     }
@@ -813,7 +801,7 @@ impl ConfigPreparer {
             return Ok(());
         }
 
-        let hard_limit = assignment_value_limit(assignment.target);
+        let hard_limit = assignment.target.value_limit();
         let limit = hard_limit.min(self.linebuf);
         let expanded = evaluate_config_expression(&parsed, assignment.line, limit, &self.known)
             .map_err(|error| relabel_linebuf_error(error, self.linebuf, hard_limit))?;
@@ -834,7 +822,7 @@ impl ConfigPreparer {
         &mut self,
         assignment: &mut Assignment,
     ) -> Result<(), ExpansionError> {
-        if !conditional_assignment_supported(assignment.target) {
+        if !assignment.target.supports_conditional_assignment() {
             return Err(ExpansionError::new(
                 assignment.line,
                 format!(
@@ -864,7 +852,10 @@ impl ConfigPreparer {
         &mut self,
         assignment: &Assignment,
     ) -> Result<(), ExpansionError> {
-        validate_known_assignment_value(assignment.target, &assignment.value, assignment.line)?;
+        assignment
+            .target
+            .validate_known_value(&assignment.value)
+            .map_err(|message| ExpansionError::new(assignment.line, message))?;
         if assignment.target == AssignmentTarget::LineBuf {
             self.linebuf = parse_linebuf(&assignment.value, assignment.line)?;
         }
@@ -875,12 +866,10 @@ impl ConfigPreparer {
         &mut self,
         assignment: &mut Assignment,
     ) -> Result<(), ExpansionError> {
-        let (purpose, description) = match assignment.target {
-            AssignmentTarget::Maildir => (PathPurpose::Maildir, "MAILDIR"),
-            AssignmentTarget::LogFile => (PathPurpose::Logfile, "LOGFILE"),
-            AssignmentTarget::LockFile => (PathPurpose::Lockfile, "LOCKFILE"),
-            _ => return Ok(()),
+        let Some(path) = assignment.target.path() else {
+            return Ok(());
         };
+        let (purpose, description) = assignment_path(path);
         assignment.value = PathResolver::new(
             purpose,
             description,
@@ -906,10 +895,13 @@ impl ConfigPreparer {
         let value = evaluate_config_expression(
             expression,
             assignment.line,
-            assignment_value_limit(assignment.target),
+            assignment.target.value_limit(),
             &self.known,
         )?;
-        validate_known_assignment_value(assignment.target, &value.text, assignment.line)
+        assignment
+            .target
+            .validate_known_value(&value.text)
+            .map_err(|message| ExpansionError::new(assignment.line, message))
     }
 
     fn prepare_recipe(
@@ -1002,42 +994,12 @@ impl ConfigPreparer {
     }
 }
 
-fn validate_known_assignment_value(
-    target: AssignmentTarget,
-    value: &str,
-    line: usize,
-) -> Result<(), ExpansionError> {
-    let result = match target {
-        AssignmentTarget::Trap => super::validate_trap_command(value),
-        AssignmentTarget::LockExt => super::validate_lock_ext(value),
-        AssignmentTarget::LogAbstract => super::validate_log_abstract(value),
-        AssignmentTarget::ProcessTimeout => super::parse_process_timeout_seconds(value).map(|_| ()),
-        AssignmentTarget::Umask => super::parse_umask(value).map(|_| ()),
-        _ => return Ok(()),
-    };
-    result.map_err(|message| ExpansionError::new(line, message))
-}
-
-fn conditional_assignment_supported(target: AssignmentTarget) -> bool {
-    matches!(
-        target,
-        AssignmentTarget::User
-            | AssignmentTarget::Maildir
-            | AssignmentTarget::Shell
-            | AssignmentTarget::ShellFlags
-            | AssignmentTarget::Path
-            | AssignmentTarget::ExitCode
-            | AssignmentTarget::Host
-            | AssignmentTarget::LockMethod
-            | AssignmentTarget::LockFile
-            | AssignmentTarget::LockExt
-            | AssignmentTarget::LockTimeout
-            | AssignmentTarget::LineBuf
-            | AssignmentTarget::ProcessTimeout
-            | AssignmentTarget::Umask
-            | AssignmentTarget::Trap
-            | AssignmentTarget::LogAbstract
-    )
+fn assignment_path(path: AssignmentPath) -> (PathPurpose, &'static str) {
+    match path {
+        AssignmentPath::Maildir => (PathPurpose::Maildir, "MAILDIR"),
+        AssignmentPath::LogFile => (PathPurpose::Logfile, "LOGFILE"),
+        AssignmentPath::LockFile => (PathPurpose::Lockfile, "LOCKFILE"),
+    }
 }
 
 fn prepare_command_assignment(

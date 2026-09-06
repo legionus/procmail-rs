@@ -12,8 +12,8 @@ use rustix::fd::OwnedFd;
 use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
 
 use crate::config::{
-    self, AssignmentTarget, Config, MAX_RC_SIZE, ParseBudget, RcFileExpression, RcLimitVariable,
-    RcLimits, RecipeAction, Statement,
+    self, Config, MAX_RC_SIZE, ParseBudget, RcFileExpression, RcLimitVariable, RcLimits,
+    RecipeAction, Statement,
 };
 use crate::runtime::RuntimeVariables;
 
@@ -435,26 +435,7 @@ impl RcCheckWarnings {
 fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &str)> {
     for statement in statements {
         match statement {
-            Statement::Assignment(assignment)
-                if !matches!(
-                    assignment.target,
-                    AssignmentTarget::User
-                        | AssignmentTarget::Maildir
-                        | AssignmentTarget::Shell
-                        | AssignmentTarget::ShellFlags
-                        | AssignmentTarget::Path
-                        | AssignmentTarget::Host
-                        | AssignmentTarget::LockMethod
-                        | AssignmentTarget::LockFile
-                        | AssignmentTarget::LockTimeout
-                        | AssignmentTarget::LineBuf
-                        | AssignmentTarget::ProcessTimeout
-                        | AssignmentTarget::Umask
-                        | AssignmentTarget::Trap
-                        | AssignmentTarget::LogAbstract
-                        | AssignmentTarget::RcLimit(_)
-                ) =>
-            {
+            Statement::Assignment(assignment) if !assignment.target.allowed_in_runtime_rc() => {
                 return Err((assignment.line, assignment.name.as_str()));
             }
             Statement::Recipe(recipe) => {

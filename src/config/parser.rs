@@ -258,12 +258,7 @@ fn parse_statements(
 
         if let Some(assignment) = parse_assignment(line, line_number)? {
             state.charge_assignment(line_number, AssignmentUse::Statement)?;
-            if depth != 0
-                && matches!(
-                    assignment.target,
-                    AssignmentTarget::RcLimit(_) | AssignmentTarget::LineBuf
-                )
-            {
+            if depth != 0 && assignment.target.controls_rc_parsing() {
                 return Err(ParseError::new(
                     line_number,
                     format!(
@@ -278,10 +273,7 @@ fn parse_statements(
                 assignment.double_quoted,
             )? {
                 Some(expression) => {
-                    if matches!(
-                        assignment.target,
-                        AssignmentTarget::RcLimit(_) | AssignmentTarget::LineBuf
-                    ) {
+                    if assignment.target.controls_rc_parsing() {
                         return Err(ParseError::new(
                             assignment.line,
                             format!(
@@ -446,12 +438,9 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
                 format!("variable {name} cannot be assigned in an rc file"),
             )
         })?;
-    let limit = super::assignment_value_limit(target);
+    let limit = target.value_limit();
     if value.len() > limit {
-        let kind = if matches!(
-            target,
-            AssignmentTarget::Maildir | AssignmentTarget::LogFile
-        ) {
+        let kind = if target.uses_path_error_label() {
             "path"
         } else {
             "value"

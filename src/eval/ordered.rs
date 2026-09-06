@@ -692,7 +692,7 @@ pub(super) fn active_command_value_limit<E>(
         .linebuf()
         .map_err(runtime_setting_eval_error)
         .map_err(OrderedExecutionError::Evaluation)?;
-    Ok(linebuf.min(crate::config::assignment_value_limit(target)))
+    Ok(linebuf.min(target.value_limit()))
 }
 
 impl ExecutionPlan {

@@ -7,8 +7,8 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::config::{
-    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING_LEN,
-    assignment_value_limit, variable_policy,
+    AssignmentTarget, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING_LEN,
+    variable_policy,
 };
 use crate::runtime::RuntimeVariables;
 
@@ -182,7 +182,7 @@ fn validate_entry(name: &str, value: &[u8]) -> Result<(), ProcessEnvironmentErro
     }
     let limit = variable_policy(name)
         .assignment_target(crate::config::VariableSource::RcFile)
-        .map_or(MAX_ASSIGNMENT_VALUE_LEN, assignment_value_limit);
+        .map_or(MAX_ASSIGNMENT_VALUE_LEN, AssignmentTarget::value_limit);
     if value.len() > limit {
         return Err(error(format!(
             "child environment variable {name} exceeds the hard limit of {limit} bytes"

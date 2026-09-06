@@ -148,6 +148,237 @@ pub enum AssignmentTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssignmentPath {
+    Maildir,
+    LogFile,
+    LockFile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentValueValidator {
+    None,
+    LockMethod,
+    LockTimeout,
+    ProcessTimeout,
+    Umask,
+    Trap,
+    LockExt,
+    LogAbstract,
+}
+
+impl AssignmentValueValidator {
+    fn validate(self, value: &str) -> Result<(), String> {
+        match self {
+            Self::None => Ok(()),
+            Self::LockMethod => validate_lock_method(value),
+            Self::LockTimeout => parse_lock_timeout_seconds(value).map(drop),
+            Self::ProcessTimeout => parse_process_timeout_seconds(value).map(drop),
+            Self::Umask => parse_umask(value).map(drop),
+            Self::Trap => validate_trap_command(value),
+            Self::LockExt => validate_lock_ext(value),
+            Self::LogAbstract => validate_log_abstract(value),
+        }
+    }
+}
+
+impl AssignmentTarget {
+    pub(crate) fn value_limit(self) -> usize {
+        match self {
+            Self::Maildir | Self::LogFile | Self::LockFile | Self::LockExt => {
+                super::MAX_PATH_EXPRESSION_LEN
+            }
+            Self::Shell | Self::ShellFlags | Self::Path => MAX_SHELL_SETTING_LEN,
+            Self::LogDetail
+            | Self::LogAbstract
+            | Self::Verbose
+            | Self::Durability
+            | Self::LockMethod
+            | Self::LockTimeout
+            | Self::LineBuf
+            | Self::ProcessTimeout
+            | Self::Umask
+            | Self::Trap
+            | Self::ExitCode
+            | Self::Host
+            | Self::MessageLimit(_)
+            | Self::RcLimit(_)
+            | Self::User => MAX_ASSIGNMENT_VALUE_LEN,
+        }
+    }
+
+    fn value_validator(self) -> AssignmentValueValidator {
+        match self {
+            Self::LockMethod => AssignmentValueValidator::LockMethod,
+            Self::LockTimeout => AssignmentValueValidator::LockTimeout,
+            Self::ProcessTimeout => AssignmentValueValidator::ProcessTimeout,
+            Self::Umask => AssignmentValueValidator::Umask,
+            Self::Trap => AssignmentValueValidator::Trap,
+            Self::LockExt => AssignmentValueValidator::LockExt,
+            Self::LogAbstract => AssignmentValueValidator::LogAbstract,
+            Self::Maildir
+            | Self::LogFile
+            | Self::LogDetail
+            | Self::Verbose
+            | Self::Durability
+            | Self::LockFile
+            | Self::LineBuf
+            | Self::Shell
+            | Self::ShellFlags
+            | Self::Path
+            | Self::ExitCode
+            | Self::Host
+            | Self::MessageLimit(_)
+            | Self::RcLimit(_)
+            | Self::User => AssignmentValueValidator::None,
+        }
+    }
+
+    pub(crate) fn validate_known_value(self, value: &str) -> Result<(), String> {
+        match self.value_validator() {
+            AssignmentValueValidator::LockMethod | AssignmentValueValidator::LockTimeout => Ok(()),
+            validator => validator.validate(value),
+        }
+    }
+
+    pub(crate) fn validate_resolved_value(self, value: &str) -> Result<(), String> {
+        self.value_validator().validate(value)
+    }
+
+    pub(crate) fn path(self) -> Option<AssignmentPath> {
+        match self {
+            Self::Maildir => Some(AssignmentPath::Maildir),
+            Self::LogFile => Some(AssignmentPath::LogFile),
+            Self::LockFile => Some(AssignmentPath::LockFile),
+            Self::LogDetail
+            | Self::LogAbstract
+            | Self::Verbose
+            | Self::Durability
+            | Self::LockMethod
+            | Self::LockExt
+            | Self::LockTimeout
+            | Self::LineBuf
+            | Self::ProcessTimeout
+            | Self::Umask
+            | Self::Trap
+            | Self::Shell
+            | Self::ShellFlags
+            | Self::Path
+            | Self::ExitCode
+            | Self::Host
+            | Self::MessageLimit(_)
+            | Self::RcLimit(_)
+            | Self::User => None,
+        }
+    }
+
+    pub(crate) fn supports_conditional_assignment(self) -> bool {
+        match self {
+            Self::User
+            | Self::Maildir
+            | Self::Shell
+            | Self::ShellFlags
+            | Self::Path
+            | Self::ExitCode
+            | Self::Host
+            | Self::LockMethod
+            | Self::LockFile
+            | Self::LockExt
+            | Self::LockTimeout
+            | Self::LineBuf
+            | Self::ProcessTimeout
+            | Self::Umask
+            | Self::Trap
+            | Self::LogAbstract => true,
+            Self::LogFile
+            | Self::LogDetail
+            | Self::Verbose
+            | Self::Durability
+            | Self::MessageLimit(_)
+            | Self::RcLimit(_) => false,
+        }
+    }
+
+    pub(crate) fn controls_rc_parsing(self) -> bool {
+        match self {
+            Self::RcLimit(_) | Self::LineBuf => true,
+            Self::Maildir
+            | Self::LogFile
+            | Self::LogDetail
+            | Self::LogAbstract
+            | Self::Verbose
+            | Self::Durability
+            | Self::LockMethod
+            | Self::LockFile
+            | Self::LockExt
+            | Self::LockTimeout
+            | Self::ProcessTimeout
+            | Self::Umask
+            | Self::Trap
+            | Self::Shell
+            | Self::ShellFlags
+            | Self::Path
+            | Self::ExitCode
+            | Self::Host
+            | Self::MessageLimit(_)
+            | Self::User => false,
+        }
+    }
+
+    pub(crate) fn allowed_in_runtime_rc(self) -> bool {
+        match self {
+            Self::User
+            | Self::Maildir
+            | Self::Shell
+            | Self::ShellFlags
+            | Self::Path
+            | Self::Host
+            | Self::LockMethod
+            | Self::LockFile
+            | Self::LockTimeout
+            | Self::LineBuf
+            | Self::ProcessTimeout
+            | Self::Umask
+            | Self::Trap
+            | Self::LogAbstract
+            | Self::RcLimit(_) => true,
+            Self::LogFile
+            | Self::LogDetail
+            | Self::Verbose
+            | Self::Durability
+            | Self::LockExt
+            | Self::ExitCode
+            | Self::MessageLimit(_) => false,
+        }
+    }
+
+    pub(crate) fn uses_path_error_label(self) -> bool {
+        match self {
+            Self::Maildir | Self::LogFile => true,
+            Self::LogDetail
+            | Self::LogAbstract
+            | Self::Verbose
+            | Self::Durability
+            | Self::LockMethod
+            | Self::LockFile
+            | Self::LockExt
+            | Self::LockTimeout
+            | Self::LineBuf
+            | Self::ProcessTimeout
+            | Self::Umask
+            | Self::Trap
+            | Self::Shell
+            | Self::ShellFlags
+            | Self::Path
+            | Self::ExitCode
+            | Self::Host
+            | Self::MessageLimit(_)
+            | Self::RcLimit(_)
+            | Self::User => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableSource {
     RcFile,
     CommandLine,
@@ -211,7 +442,7 @@ impl SuppliedVariable {
         let target = policy
             .assignment_target(VariableSource::CommandLine)
             .expect("an allowed command-line variable has an assignment target");
-        let limit = assignment_value_limit(target);
+        let limit = target.value_limit();
         if value.len() > limit {
             return Err(SuppliedVariableError::new(format!(
                 "--set {name} value exceeds the hard limit of {limit} bytes"
@@ -377,33 +608,6 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         }
         name if UNSUPPORTED_PROCMAIL_VARIABLES.contains(&name) => VariablePolicy::Unsupported,
         _ => VariablePolicy::RcOrCommandLine(AssignmentTarget::User),
-    }
-}
-
-pub fn assignment_value_limit(target: AssignmentTarget) -> usize {
-    match target {
-        AssignmentTarget::Maildir
-        | AssignmentTarget::LogFile
-        | AssignmentTarget::LockFile
-        | AssignmentTarget::LockExt => super::MAX_PATH_EXPRESSION_LEN,
-        AssignmentTarget::Shell | AssignmentTarget::ShellFlags | AssignmentTarget::Path => {
-            MAX_SHELL_SETTING_LEN
-        }
-        AssignmentTarget::LogDetail
-        | AssignmentTarget::LogAbstract
-        | AssignmentTarget::Verbose
-        | AssignmentTarget::Durability
-        | AssignmentTarget::LockMethod
-        | AssignmentTarget::LockTimeout
-        | AssignmentTarget::LineBuf
-        | AssignmentTarget::ProcessTimeout
-        | AssignmentTarget::Umask
-        | AssignmentTarget::Trap
-        | AssignmentTarget::ExitCode
-        | AssignmentTarget::Host
-        | AssignmentTarget::MessageLimit(_)
-        | AssignmentTarget::RcLimit(_)
-        | AssignmentTarget::User => MAX_ASSIGNMENT_VALUE_LEN,
     }
 }
 
