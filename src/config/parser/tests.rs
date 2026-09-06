@@ -374,7 +374,6 @@ fn parses_pipe_flags_and_preserves_continued_shell_text() {
         action.command,
         "FOO=1 formail \\\n    -I X-Spam: \\\n    -I X-Virus:"
     );
-    assert!(config.has_pipe_actions());
     assert_eq!(config.statements.len(), 2);
 }
 

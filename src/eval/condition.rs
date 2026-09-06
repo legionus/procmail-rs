@@ -4,7 +4,9 @@
 use regex::bytes::Regex;
 
 use super::message::CompleteMessage;
-use super::{ConditionExplanation, ConditionKindExplanation, EvalError, InputRequirements};
+use super::{
+    ConditionExplanation, ConditionKindExplanation, EvalError, InputRequirements, PlanProperties,
+};
 use crate::config::{
     CaseMode, Condition, ConditionInput, ConditionKind, Recipe, RegexCondition,
     ShellExpandedCondition,
@@ -130,18 +132,84 @@ fn compile_condition(
 }
 
 impl CompiledCondition {
-    pub(super) fn requires_ordered_execution(&self) -> bool {
-        matches!(
-            self.kind,
-            CompiledConditionKind::Program { .. } | CompiledConditionKind::ShellExpanded { .. }
-        )
-    }
-
-    pub(super) fn needs_message_contents(&self) -> bool {
-        matches!(
-            self.kind,
-            CompiledConditionKind::MessageRegex(_) | CompiledConditionKind::ShellExpanded { .. }
-        )
+    pub(super) fn properties(&self) -> PlanProperties {
+        let (requirements, ordered, message_contents, external) = match self.kind {
+            CompiledConditionKind::ShellExpanded { .. } => (
+                InputRequirements {
+                    needs_headers: true,
+                    needs_body_contents: true,
+                    needs_end_of_message: true,
+                },
+                true,
+                true,
+                true,
+            ),
+            CompiledConditionKind::HeaderRegex(_) => (
+                InputRequirements {
+                    needs_headers: true,
+                    ..InputRequirements::default()
+                },
+                false,
+                false,
+                false,
+            ),
+            CompiledConditionKind::BodyRegex(_) => (
+                InputRequirements {
+                    needs_headers: true,
+                    needs_body_contents: true,
+                    needs_end_of_message: true,
+                },
+                false,
+                false,
+                false,
+            ),
+            CompiledConditionKind::MessageRegex(_) => (
+                InputRequirements {
+                    needs_headers: true,
+                    needs_body_contents: true,
+                    needs_end_of_message: true,
+                },
+                false,
+                true,
+                false,
+            ),
+            CompiledConditionKind::VariableRegex { .. } => {
+                (InputRequirements::default(), false, false, false)
+            }
+            CompiledConditionKind::Program { input, .. } => (
+                match input {
+                    ConditionInput::Headers => InputRequirements {
+                        needs_headers: true,
+                        needs_end_of_message: true,
+                        ..InputRequirements::default()
+                    },
+                    ConditionInput::Body | ConditionInput::Message => InputRequirements {
+                        needs_headers: true,
+                        needs_body_contents: true,
+                        needs_end_of_message: true,
+                    },
+                },
+                true,
+                false,
+                true,
+            ),
+            CompiledConditionKind::SmallerThan(_) | CompiledConditionKind::LargerThan(_) => (
+                InputRequirements {
+                    needs_end_of_message: true,
+                    ..InputRequirements::default()
+                },
+                false,
+                false,
+                false,
+            ),
+        };
+        PlanProperties {
+            requirements,
+            requires_ordered_delivery: ordered,
+            requires_preemptive_ordered_delivery: ordered,
+            needs_message_contents: message_contents,
+            has_external_commands: external,
+        }
     }
 
     pub(super) fn resolve_shell_expansion(
@@ -265,46 +333,6 @@ impl CompiledCondition {
         ConditionExplanation {
             negated: self.negated,
             kind,
-        }
-    }
-
-    pub(super) fn requirements(&self) -> InputRequirements {
-        match self.kind {
-            CompiledConditionKind::ShellExpanded { .. } => InputRequirements {
-                needs_headers: true,
-                needs_body_contents: true,
-                needs_end_of_message: true,
-            },
-            CompiledConditionKind::HeaderRegex(_) => InputRequirements {
-                needs_headers: true,
-                ..InputRequirements::default()
-            },
-            CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
-                InputRequirements {
-                    needs_headers: true,
-                    needs_body_contents: true,
-                    needs_end_of_message: true,
-                }
-            }
-            CompiledConditionKind::VariableRegex { .. } => InputRequirements::default(),
-            CompiledConditionKind::Program { input, .. } => match input {
-                ConditionInput::Headers => InputRequirements {
-                    needs_headers: true,
-                    needs_end_of_message: true,
-                    ..InputRequirements::default()
-                },
-                ConditionInput::Body | ConditionInput::Message => InputRequirements {
-                    needs_headers: true,
-                    needs_body_contents: true,
-                    needs_end_of_message: true,
-                },
-            },
-            CompiledConditionKind::SmallerThan(_) | CompiledConditionKind::LargerThan(_) => {
-                InputRequirements {
-                    needs_end_of_message: true,
-                    ..InputRequirements::default()
-                }
-            }
         }
     }
 

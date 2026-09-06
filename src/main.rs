@@ -219,7 +219,7 @@ fn run() -> Result<u8, OperationalError> {
         for warning in warnings {
             eprintln!("procmail-rs: warning: {warning}");
         }
-        if config.has_external_commands() {
+        if ExecutionPlan::compile(&config).has_external_commands() {
             eprintln!(
                 "procmail-rs: warning: configuration contains external shell actions; no command was executed"
             );

@@ -232,48 +232,6 @@ impl Config {
 
         visit(&self.statements, &mut report);
     }
-
-    pub fn has_pipe_actions(&self) -> bool {
-        statements_have_pipe_actions(&self.statements)
-    }
-
-    pub fn has_external_commands(&self) -> bool {
-        statements_have_external_commands(&self.statements)
-    }
-}
-
-fn statements_have_pipe_actions(statements: &[Statement]) -> bool {
-    statements.iter().any(|statement| match statement {
-        Statement::Recipe(recipe) => match &recipe.action {
-            RecipeAction::Pipe(_) | RecipeAction::Capture(_) => true,
-            RecipeAction::Block(children) => statements_have_pipe_actions(children),
-            RecipeAction::Deliver(_) | RecipeAction::Headers(_) => false,
-        },
-        Statement::Assignment(_) | Statement::Include(_) | Statement::Switch(_) => false,
-        Statement::CommandAssignment(_) => false,
-    })
-}
-
-fn statements_have_external_commands(statements: &[Statement]) -> bool {
-    statements.iter().any(|statement| match statement {
-        Statement::Recipe(recipe) => {
-            recipe.conditions.iter().any(|condition| {
-                matches!(
-                    condition.kind,
-                    ConditionKind::Program(_) | ConditionKind::ShellExpanded(_)
-                )
-            }) || match &recipe.action {
-                RecipeAction::Pipe(action) => !action.command.is_empty(),
-                RecipeAction::Capture(_) => true,
-                RecipeAction::Block(children) => statements_have_external_commands(children),
-                RecipeAction::Deliver(destination) => destination.command_expression().is_some(),
-                RecipeAction::Headers(_) => false,
-            }
-        }
-        Statement::Assignment(assignment) => assignment.target == AssignmentTarget::Trap,
-        Statement::CommandAssignment(_) => true,
-        Statement::Include(_) | Statement::Switch(_) => false,
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

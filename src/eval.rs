@@ -125,7 +125,7 @@ pub struct InputRequirements {
 }
 
 impl InputRequirements {
-    fn union(self, other: Self) -> Self {
+    pub(super) fn union(self, other: Self) -> Self {
         Self {
             needs_headers: self.needs_headers || other.needs_headers,
             needs_body_contents: self.needs_body_contents || other.needs_body_contents,
@@ -134,11 +134,32 @@ impl InputRequirements {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PlanProperties {
+    requirements: InputRequirements,
+    requires_ordered_delivery: bool,
+    requires_preemptive_ordered_delivery: bool,
+    needs_message_contents: bool,
+    has_external_commands: bool,
+}
+
+impl PlanProperties {
+    fn union(self, other: Self) -> Self {
+        Self {
+            requirements: self.requirements.union(other.requirements),
+            requires_ordered_delivery: self.requires_ordered_delivery
+                || other.requires_ordered_delivery,
+            requires_preemptive_ordered_delivery: self.requires_preemptive_ordered_delivery
+                || other.requires_preemptive_ordered_delivery,
+            needs_message_contents: self.needs_message_contents || other.needs_message_contents,
+            has_external_commands: self.has_external_commands || other.has_external_commands,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ExecutionPlan {
     root: CompiledSequence,
-    requires_ordered_delivery: bool,
-    requires_preemptive_ordered_delivery: bool,
     message_limits: Result<MessageLimits, String>,
     runtime_rc: RuntimeRcState,
 }
@@ -311,13 +332,9 @@ impl ExecutionPlan {
             })
             .collect::<Vec<_>>();
         let root = CompiledSequence::compile(&config.statements, &mut initial_statements);
-        let requires_ordered_delivery = root.requires_ordered_delivery();
-        let requires_preemptive_ordered_delivery = root.requires_preemptive_ordered_delivery();
 
         Self {
             root,
-            requires_ordered_delivery,
-            requires_preemptive_ordered_delivery,
             message_limits: MessageLimits::from_config(config).map_err(|error| error.to_string()),
             runtime_rc: RuntimeRcState::new(loader),
         }
@@ -337,7 +354,7 @@ impl ExecutionPlan {
             requirements.needs_body_contents = true;
             requirements.needs_end_of_message = true;
         }
-        if self.requires_preemptive_ordered_delivery {
+        if self.root.properties().requires_preemptive_ordered_delivery {
             requirements.union(InputRequirements {
                 needs_end_of_message: true,
                 ..InputRequirements::default()
@@ -348,11 +365,16 @@ impl ExecutionPlan {
     }
 
     pub fn requires_ordered_delivery(&self) -> bool {
-        self.requires_ordered_delivery || self.runtime_rc.requires_ordered_delivery()
+        self.root.properties().requires_ordered_delivery
+            || self.runtime_rc.requires_ordered_delivery()
     }
 
     pub fn needs_message_contents(&self) -> bool {
-        self.root.needs_message_contents() || self.runtime_rc.needs_message_contents()
+        self.root.properties().needs_message_contents || self.runtime_rc.needs_message_contents()
+    }
+
+    pub fn has_external_commands(&self) -> bool {
+        self.root.properties().has_external_commands
     }
 
     pub fn explain(&self) -> PlanExplanation {
@@ -363,7 +385,7 @@ impl ExecutionPlan {
         self.root.collect_explanations(&[], 0, &mut recipes);
         PlanExplanation {
             requirements: self.requirements(),
-            requires_ordered_delivery: self.requires_ordered_delivery,
+            requires_ordered_delivery: self.root.properties().requires_ordered_delivery,
             recipes,
         }
     }

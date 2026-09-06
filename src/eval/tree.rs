@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use super::InputRequirements;
 use super::condition::{CompiledCondition, compile_conditions};
 use super::explanation::{
     ActionKindExplanation, ConditionExplanation, HeaderOperationExplanation, RecipeExplanation,
 };
 use super::runtime_rc::{CompiledInclude, CompiledSwitch};
+use super::{InputRequirements, PlanProperties};
 use crate::config::{
     ActionInput, Assignment, AssignmentTarget, CommandAssignment, ContinuationMode, ControlFlow,
     Destination, DestinationKind, HeaderAction, OutputEnding, PipeAction, Recipe, RecipeAction,
@@ -18,6 +18,7 @@ use crate::trace::VariableSource as TraceVariableSource;
 pub(super) struct CompiledSequence {
     pub(super) recipes: Vec<CompiledNode>,
     pub(super) trailing_statements: Vec<CompiledStatement>,
+    properties: PlanProperties,
 }
 
 #[derive(Debug)]
@@ -28,6 +29,7 @@ pub(super) struct CompiledNode {
     pub(super) control: ControlFlow,
     pub(super) conditions: Vec<CompiledCondition>,
     pub(super) action: CompiledAction,
+    properties: PlanProperties,
 }
 
 #[derive(Debug)]
@@ -85,41 +87,40 @@ pub(super) enum ActionExecution {
     Failed,
 }
 
-fn statement_requires_ordered_message(statement: &CompiledStatement) -> bool {
+fn statement_properties(statement: &CompiledStatement) -> PlanProperties {
+    let mut properties = PlanProperties::default();
     match statement {
-        CompiledStatement::CommandAssignment(_) => true,
+        CompiledStatement::CommandAssignment(_) => {
+            properties.requirements = InputRequirements {
+                needs_headers: true,
+                needs_body_contents: true,
+                needs_end_of_message: true,
+            };
+            properties.requires_ordered_delivery = true;
+            properties.requires_preemptive_ordered_delivery = true;
+            properties.has_external_commands = true;
+        }
         CompiledStatement::Assignment(assignment) => {
-            matches!(assignment.assignment.target, AssignmentTarget::LockFile)
+            properties.requires_ordered_delivery = assignment.assignment.target
+                == AssignmentTarget::LockFile
                 || assignment.assignment.target == AssignmentTarget::Trap
-                    && !assignment.assignment.value.is_empty()
+                    && !assignment.assignment.value.is_empty();
+            properties.requires_preemptive_ordered_delivery = properties.requires_ordered_delivery;
+            properties.has_external_commands =
+                assignment.assignment.target == AssignmentTarget::Trap;
         }
         CompiledStatement::Host(_)
         | CompiledStatement::Include(_)
-        | CompiledStatement::Switch(_) => false,
+        | CompiledStatement::Switch(_) => {}
     }
+    properties
 }
 
-fn statement_requirements(statement: &CompiledStatement) -> InputRequirements {
-    // Procmail gives every backquoted command the complete current message,
-    // regardless of where the substitution appears in its assignment. Mark
-    // all three needs here so top-level, nested, and trailing statements use
-    // the same conservative staging decision.
-    if matches!(statement, CompiledStatement::CommandAssignment(_)) {
-        InputRequirements {
-            needs_headers: true,
-            needs_body_contents: true,
-            needs_end_of_message: true,
-        }
-    } else {
-        InputRequirements::default()
-    }
-}
-
-fn statements_requirements(statements: &[CompiledStatement]) -> InputRequirements {
+fn statements_properties(statements: &[CompiledStatement]) -> PlanProperties {
     statements
         .iter()
-        .fold(InputRequirements::default(), |requirements, statement| {
-            requirements.union(statement_requirements(statement))
+        .fold(PlanProperties::default(), |properties, statement| {
+            properties.union(statement_properties(statement))
         })
 }
 
@@ -161,67 +162,56 @@ impl CompiledSequence {
         // Statements after the final recipe must remain executable because
         // include and switch operations may end an rc file without another
         // recipe to which the parser could attach them.
-        Self {
+        let mut compiled = Self {
             recipes,
             trailing_statements: std::mem::take(preceding),
-        }
-    }
-
-    pub(super) fn requirements(&self) -> InputRequirements {
-        let requirements = self
+            properties: PlanProperties::default(),
+        };
+        let mut properties = compiled
             .recipes
             .iter()
-            .fold(InputRequirements::default(), |requirements, recipe| {
-                requirements.union(recipe.requirements())
-            });
-        requirements.union(statements_requirements(&self.trailing_statements))
-    }
-
-    pub(super) fn requires_ordered_delivery(&self) -> bool {
-        self.trailing_statements
-            .iter()
-            .any(statement_requires_ordered_message)
-            || self.recipes.iter().enumerate().any(|(index, recipe)| {
-                recipe.requires_ordered_delivery()
-                    || recipe
-                        .preceding_statements
-                        .iter()
-                        .any(statement_requires_ordered_message)
-                    || (index != 0
-                        && matches!(
-                            recipe.control,
-                            ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
-                        ))
+            .fold(PlanProperties::default(), |properties, recipe| {
+                properties.union(recipe.properties)
             })
-    }
+            .union(statements_properties(&compiled.trailing_statements));
+        properties.requires_ordered_delivery |=
+            compiled.recipes.iter().enumerate().any(|(index, recipe)| {
+                index != 0
+                    && matches!(
+                        recipe.control,
+                        ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
+                    )
+            });
 
-    pub(super) fn requires_preemptive_ordered_delivery(&self) -> bool {
         // Header edits can run while only the bounded header section is
         // available. Keep them out of this early deferral decision so a
         // header-only configuration does not read or stage the body merely
         // because a later action must observe the edited bytes.
-        self.trailing_statements
-            .iter()
-            .any(statement_requires_ordered_message)
-            || self.recipes.iter().any(|recipe| {
-                recipe.requires_preemptive_ordered_delivery()
-                    || recipe
-                        .preceding_statements
-                        .iter()
-                        .any(statement_requires_ordered_message)
-            })
-            || self.recipes.windows(2).any(|pair| {
+        properties.requires_preemptive_ordered_delivery |=
+            compiled.recipes.windows(2).any(|pair| {
                 matches!(
                     pair[1].control,
                     ControlFlow::AfterPreviousSuccess | ControlFlow::AfterPreviousError
                 ) && !pair[0].header_action_result_is_known()
-            })
+            });
+        compiled.properties = properties;
+        compiled
     }
 
-    pub(super) fn needs_message_contents(&self) -> bool {
-        self.recipes
-            .iter()
-            .any(CompiledNode::needs_message_contents)
+    pub(super) fn properties(&self) -> PlanProperties {
+        self.properties
+    }
+
+    pub(super) fn requirements(&self) -> InputRequirements {
+        self.properties.requirements
+    }
+
+    pub(super) fn requires_ordered_delivery(&self) -> bool {
+        self.properties.requires_ordered_delivery
+    }
+
+    pub(super) fn requires_preemptive_ordered_delivery(&self) -> bool {
+        self.properties.requires_preemptive_ordered_delivery
     }
 
     pub(super) fn requirements_from(&self, start: usize) -> InputRequirements {
@@ -229,10 +219,14 @@ impl CompiledSequence {
         let requirements = recipes
             .iter()
             .fold(InputRequirements::default(), |requirements, recipe| {
-                requirements.union(recipe.requirements())
+                requirements.union(recipe.properties.requirements)
             });
-        let requirements = requirements.union(statements_requirements(&self.trailing_statements));
-        if recipes.iter().any(CompiledNode::requires_ordered_delivery) {
+        let requirements =
+            requirements.union(statements_properties(&self.trailing_statements).requirements);
+        if recipes
+            .iter()
+            .any(|recipe| recipe.properties.requires_ordered_delivery)
+        {
             requirements.union(InputRequirements {
                 needs_end_of_message: true,
                 ..InputRequirements::default()
@@ -353,6 +347,15 @@ impl CompiledNode {
             }
             RecipeAction::Headers(action) => CompiledAction::Headers(action.clone()),
         };
+        let mut properties = action_properties(&action);
+        properties = conditions.iter().fold(properties, |properties, condition| {
+            properties.union(condition.properties())
+        });
+        properties = properties.union(statements_properties(&preceding_statements));
+        if recipe.lock.is_some() {
+            properties.requires_ordered_delivery = true;
+            properties.requires_preemptive_ordered_delivery = true;
+        }
         Self {
             line: recipe.line,
             preceding_statements,
@@ -360,106 +363,78 @@ impl CompiledNode {
             control: recipe.options.control,
             conditions,
             action,
+            properties,
         }
     }
+}
 
-    fn requirements(&self) -> InputRequirements {
-        let action = match &self.action {
-            CompiledAction::Pipe { .. } => InputRequirements {
+fn action_properties(action: &CompiledAction) -> PlanProperties {
+    match action {
+        CompiledAction::Pipe { action, .. } => PlanProperties {
+            requirements: InputRequirements {
                 needs_headers: true,
                 needs_body_contents: true,
                 needs_end_of_message: true,
             },
-            // A capture action only observes the area selected by h/b. A
-            // header capture can finish at the header separator and must not
-            // force an otherwise streamable body into staging.
-            CompiledAction::Capture { options, .. } => match options.action_input {
-                ActionInput::Headers => InputRequirements {
+            requires_ordered_delivery: true,
+            requires_preemptive_ordered_delivery: true,
+            needs_message_contents: true,
+            has_external_commands: !action.command.is_empty(),
+        },
+        // A capture action only observes the area selected by h/b. A
+        // header capture can finish at the header separator and must not
+        // force an otherwise streamable body into staging.
+        CompiledAction::Capture { options, .. } => match options.action_input {
+            ActionInput::Headers => PlanProperties {
+                requirements: InputRequirements {
                     needs_headers: true,
                     ..InputRequirements::default()
                 },
-                ActionInput::Body | ActionInput::Message => InputRequirements {
+                requires_ordered_delivery: true,
+                has_external_commands: true,
+                ..PlanProperties::default()
+            },
+            ActionInput::Body | ActionInput::Message => PlanProperties {
+                requirements: InputRequirements {
                     needs_headers: true,
                     needs_body_contents: true,
                     needs_end_of_message: true,
                 },
+                requires_ordered_delivery: true,
+                requires_preemptive_ordered_delivery: true,
+                needs_message_contents: true,
+                has_external_commands: true,
             },
-            CompiledAction::Deliver { destination, .. }
-                if destination.command_expression().is_some() =>
-            {
-                InputRequirements {
-                    needs_headers: true,
-                    needs_body_contents: true,
-                    needs_end_of_message: true,
-                }
+        },
+        CompiledAction::Deliver { destination, .. } => {
+            let command = destination.command_expression().is_some();
+            let ordered =
+                destination.needs_runtime_variables() || destination.requires_ordered_delivery();
+            PlanProperties {
+                requirements: if command {
+                    InputRequirements {
+                        needs_headers: true,
+                        needs_body_contents: true,
+                        needs_end_of_message: true,
+                    }
+                } else {
+                    InputRequirements::default()
+                },
+                requires_ordered_delivery: ordered,
+                requires_preemptive_ordered_delivery: ordered,
+                needs_message_contents: command,
+                has_external_commands: command,
             }
-            CompiledAction::Deliver { .. } => InputRequirements::default(),
-            CompiledAction::Block(sequence) => sequence.requirements(),
-            CompiledAction::Headers(_) => InputRequirements {
+        }
+        CompiledAction::Block(sequence) => sequence.properties(),
+        CompiledAction::Headers(_) => PlanProperties {
+            requirements: InputRequirements {
                 needs_headers: true,
                 ..InputRequirements::default()
             },
-        };
-        let requirements = self
-            .conditions
-            .iter()
-            .fold(action, |requirements, condition| {
-                requirements.union(condition.requirements())
-            });
-        requirements.union(statements_requirements(&self.preceding_statements))
-    }
-
-    fn requires_ordered_delivery(&self) -> bool {
-        self.lock.is_some()
-            || self
-                .conditions
-                .iter()
-                .any(CompiledCondition::requires_ordered_execution)
-            || match &self.action {
-                CompiledAction::Pipe { .. } => true,
-                CompiledAction::Capture { .. } => true,
-                CompiledAction::Deliver { destination, .. } => {
-                    destination.needs_runtime_variables() || destination.requires_ordered_delivery()
-                }
-                CompiledAction::Block(sequence) => sequence.requires_ordered_delivery(),
-                CompiledAction::Headers(_) => true,
-            }
-    }
-
-    fn requires_preemptive_ordered_delivery(&self) -> bool {
-        self.lock.is_some()
-            || self
-                .conditions
-                .iter()
-                .any(CompiledCondition::requires_ordered_execution)
-            || match &self.action {
-                CompiledAction::Pipe { .. } => true,
-                CompiledAction::Capture { options, .. } => {
-                    options.action_input != ActionInput::Headers
-                }
-                CompiledAction::Deliver { destination, .. } => {
-                    destination.needs_runtime_variables() || destination.requires_ordered_delivery()
-                }
-                CompiledAction::Block(sequence) => sequence.requires_preemptive_ordered_delivery(),
-                CompiledAction::Headers(_) => false,
-            }
-    }
-
-    pub(super) fn needs_message_contents(&self) -> bool {
-        self.conditions
-            .iter()
-            .any(CompiledCondition::needs_message_contents)
-            || match &self.action {
-                CompiledAction::Pipe { .. } => true,
-                CompiledAction::Capture { options, .. } => {
-                    options.action_input != ActionInput::Headers
-                }
-                CompiledAction::Deliver { destination, .. } => {
-                    destination.command_expression().is_some()
-                }
-                CompiledAction::Block(sequence) => sequence.needs_message_contents(),
-                CompiledAction::Headers(_) => false,
-            }
+            requires_ordered_delivery: true,
+            ..PlanProperties::default()
+        },
     }
 }
 

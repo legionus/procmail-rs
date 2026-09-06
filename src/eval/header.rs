@@ -135,7 +135,7 @@ impl ExecutionPlan {
         // before any recipe is executed. Header editing is deliberately not
         // included here: it can safely update the bounded MessageHead and let
         // the existing streaming path forward the untouched body afterwards.
-        if self.requires_preemptive_ordered_delivery {
+        if self.root.properties().requires_preemptive_ordered_delivery {
             return Ok(HeaderEvaluation::NeedsMessage(Continuation {
                 frames: vec![ContinuationFrame {
                     recipe_index: 0,
