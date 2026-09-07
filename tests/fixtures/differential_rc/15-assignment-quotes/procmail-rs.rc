@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+EXPANDED=route
+MAILDIR=$CASE
+SINGLE='$EXPANDED-`printf wrong`-\-#'
+MIXED=pre'-'$EXPANDED"-"'post'
+HASH=value#suffix # ignored
+SPACE=left\ right
+
+:0 r
+* SINGLE ?? EXPANDED.*printf wrong.*\\-#
+* MIXED ?? pre-route-post
+* HASH ?? value#suffix
+* SPACE ?? left right
+mbox:$OUT/$MIXED

@@ -22,17 +22,18 @@ Blank lines and lines whose first non-whitespace byte is `#` are ignored.
 Assignments have the form `NAME=value`. A recipe begins with `:0`, contains
 zero or more condition lines beginning with `*`, and ends in one action.
 
-A standalone comment may occur between recipe conditions. On an assignment,
-an unquoted and unescaped `#` outside backquotes begins a comment; `#` inside
-one complete double-quoted value or a backquoted command is data. A recipe
-header may also have a trailing comment. Do not append an rc comment to a
-condition or destination action: there it belongs to the regex, path, or shell
-text being parsed.
+A standalone comment may occur between recipe conditions. An assignment value
+is one shell-like word. After that word, optional whitespace followed by `#`
+begins a comment. A `#` within the word, inside either quote mode, after a
+backslash, or inside a backquoted command is data. A second unquoted word is
+rejected instead of being ignored. A recipe header may also have a trailing
+comment. Do not append an rc comment to a condition or destination action:
+there it belongs to the regex, path, or shell text being parsed.
 
 Only a pipe command may span physical lines, and every continued physical line
 must retain its trailing backslash for the real shell. Continued conditions
-are rejected. A complete assignment value may use one outer pair of double
-quotes, but general shell tokenization is not applied to rc text.
+are rejected. Unquoted, single-quoted, and double-quoted assignment fragments
+may be concatenated without whitespace, as in `NAME=pre-'literal-'"$VALUE"`.
 
 Physical rc lines, expanded values, and continued pipe commands are bounded by
 the active `LINEBUF`. The root rc file itself is bounded independently.
@@ -45,22 +46,25 @@ continues with ASCII letters, digits, or underscores. The `:-` expression is
 used only when the named value is absent or empty.
 
 Inserted variable bytes are literal and are not scanned for another expansion.
-Outside double quotes, backslash makes the next byte literal. Inside a complete
-double-quoted assignment value, it quotes only `$`, backquote, double quote,
-backslash, and newline; before another byte the backslash is retained.
+Outside quotes, backslash makes the next byte literal. Inside double quotes,
+it quotes only `$`, backquote, double quote, backslash, and newline; before
+another byte the backslash is retained. Inside single quotes, every byte is
+literal until the next single quote: variables are not expanded, backquoted
+commands are not run, and backslash has no special meaning.
 
 ```
 MAILDIR=/srv/mail
 FOLDER=${ACCOUNT:-personal}
+LABEL='literal $ACCOUNT'-"-$FOLDER"
 
 :0
 maildir:$MAILDIR/$FOLDER/
 ```
 
-Single quotes, word splitting, globbing, tilde expansion, arithmetic
-substitution, special parameters, and other parameter operators are not rc
-expansion features. Shell command text is different: it is interpreted by the
-trusted shell selected by `SHELL` and `SHELLFLAGS`.
+Field splitting, globbing, tilde expansion, arithmetic substitution, special
+parameters, and other parameter operators are not rc expansion features.
+Shell command text is different: it is interpreted by the trusted shell
+selected by `SHELL` and `SHELLFLAGS`.
 
 # ASSIGNMENTS
 
@@ -892,8 +896,9 @@ TIMEOUT=60
 TRAP=printf 'filter status=%s\n' "$EXITCODE"
 ```
 
-The quotes in this example belong to the shell command text; rc single quotes
-themselves do not provide a separate rc quoting mode.
+The outer double quotes delimit the rc assignment word and are removed. The
+single quotes remain inside that word and are later interpreted by the trusted
+shell as part of the `TRAP` command.
 
 # LIMITS
 

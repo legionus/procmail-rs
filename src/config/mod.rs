@@ -245,7 +245,6 @@ pub struct CommandAssignment {
     pub name: String,
     pub source: String,
     pub target: AssignmentTarget,
-    pub(crate) double_quoted: bool,
     pub(crate) expression: ShellExpression,
 }
 
@@ -262,7 +261,6 @@ pub struct Assignment {
     pub name: String,
     pub value: String,
     pub target: AssignmentTarget,
-    pub(crate) double_quoted: bool,
     pub(crate) expansion: Option<ShellExpression>,
 }
 
@@ -450,6 +448,17 @@ impl ShellExpression {
             }
             ShellPart::Literal(_) | ShellPart::RegexQuotedVariable(_) => false,
         })
+    }
+
+    pub(crate) fn literal_text(&self) -> Option<String> {
+        let mut value = String::new();
+        for part in &self.parts {
+            let ShellPart::Literal(text) = part else {
+                return None;
+            };
+            value.push_str(text);
+        }
+        Some(value)
     }
 }
 

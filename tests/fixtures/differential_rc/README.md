@@ -44,3 +44,7 @@ newline removal rules before the resulting values select the destination.
 The shell-condition-command case records that a backquoted command inside a
 shell-expanded condition receives the complete message, can derive a new
 condition from the body, and has that bounded output reparsed before routing.
+
+The assignment-quotes case records single-quoted literal text, concatenated
+single-quoted, double-quoted, and unquoted fragments, comment word boundaries,
+and escaped whitespace. Its single-quoted command text must never execute.

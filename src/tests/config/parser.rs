@@ -22,8 +22,9 @@ fn parses_assignment_and_recipe() {
             name: "MAILDIR".into(),
             value: "/srv/mail".into(),
             target: crate::config::AssignmentTarget::Maildir,
-            double_quoted: false,
-            expansion: None,
+            expansion: Some(ShellExpression {
+                parts: vec![ShellPart::Literal("/srv/mail".into())],
+            }),
         })
     );
     assert_eq!(
@@ -687,7 +688,7 @@ fn parses_program_condition_and_quoted_block_assignment() {
     let Statement::Assignment(assignment) = &statements[0] else {
         panic!("expected assignment");
     };
-    assert_eq!(assignment.value, "$UNKNOWN_FOLDER");
+    assert_eq!(assignment.value, "\"$UNKNOWN_FOLDER\"");
 }
 
 #[test]
@@ -696,6 +697,38 @@ fn rejects_unterminated_quoted_assignment() {
 
     assert_eq!(error.line, 1);
     assert_eq!(error.message, "unterminated double-quoted assignment value");
+}
+
+#[test]
+fn assignment_comments_begin_only_at_a_shell_word_boundary() {
+    let config = parse("VALUE=one#two # ignored\nEMPTY= # ignored\n").unwrap();
+    let Statement::Assignment(value) = &config.statements[0] else {
+        panic!("expected assignment");
+    };
+    let Statement::Assignment(empty) = &config.statements[1] else {
+        panic!("expected assignment");
+    };
+
+    assert_eq!(value.value, "one#two");
+    assert_eq!(empty.value, "");
+}
+
+#[test]
+fn rejects_a_second_unquoted_assignment_word() {
+    let error = parse("VALUE=first second\n").unwrap_err();
+
+    assert_eq!(error.line, 1);
+    assert_eq!(
+        error.message,
+        "assignment value contains more than one shell word"
+    );
+}
+
+#[test]
+fn backquotes_inside_single_quotes_are_literal() {
+    let config = parse("VALUE='before `printf hidden` after'\n").unwrap();
+
+    assert!(matches!(config.statements[0], Statement::Assignment(_)));
 }
 
 #[test]
@@ -732,7 +765,7 @@ fn backquoted_assignment_quotes_do_not_hide_command_quotes() {
         panic!("expected command assignment");
     };
 
-    assert_eq!(assignment.source, "before `printf \"inside\"` after");
+    assert_eq!(assignment.source, "\"before `printf \"inside\"` after\"");
     assert_eq!(
         assignment.expression.parts,
         [
@@ -762,7 +795,7 @@ fn parses_command_substitution_inside_a_default_branch() {
 
 #[test]
 fn rejects_unterminated_backquoted_assignment_at_its_source_line() {
-    let error = parse("FIRST=value\nSECOND=before `printf value\n").unwrap_err();
+    let error = parse("FIRST=value\nSECOND=before`printf value\n").unwrap_err();
 
     assert_eq!(error.line, 2);
     assert_eq!(

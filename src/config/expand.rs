@@ -788,11 +788,10 @@ impl ConfigPreparer {
             return self.prepare_deferred_assignment(assignment);
         }
 
-        let parsed = parse_assignment_expression(
-            &assignment.value,
-            assignment.line,
-            assignment.double_quoted,
-        )?;
+        let parsed =
+            assignment.expansion.take().map(Ok).unwrap_or_else(|| {
+                parse_assignment_expression(&assignment.value, assignment.line)
+            })?;
         let analysis = ExpressionAnalysis::new(&parsed, &self.known, &self.dynamic);
         if analysis.references_dynamic {
             analysis.validate_runtime_references(assignment.line)?;
@@ -831,11 +830,10 @@ impl ConfigPreparer {
                 ),
             ));
         }
-        let expression = parse_assignment_expression(
-            &assignment.value,
-            assignment.line,
-            assignment.double_quoted,
-        )?;
+        let expression =
+            assignment.expansion.take().map(Ok).unwrap_or_else(|| {
+                parse_assignment_expression(&assignment.value, assignment.line)
+            })?;
         let analysis = ExpressionAnalysis::new(&expression, &self.known, &self.dynamic);
         analysis.validate_runtime_references(assignment.line)?;
         self.validate_known_deferred_assignment(assignment, &expression, &analysis)?;
@@ -1766,21 +1764,38 @@ pub(crate) fn parse_shell_condition_expression(
     ExpressionParser::new(input, line, ExpressionSyntax::ShellCondition).parse()
 }
 
+pub(crate) struct ParsedAssignmentWord {
+    pub(crate) source: String,
+    pub(crate) expression: ShellExpression,
+}
+
+pub(crate) fn parse_assignment_word(
+    input: &str,
+    line: usize,
+) -> Result<ParsedAssignmentWord, ExpansionError> {
+    ExpressionParser::new(
+        input,
+        line,
+        ExpressionSyntax::Ordinary {
+            allow_commands: true,
+        },
+    )
+    .parse_assignment_word()
+}
+
 fn parse_expression(input: &str, line: usize) -> Result<ShellExpression, ExpansionError> {
-    parse_assignment_expression(input, line, false)
+    parse_assignment_expression(input, line)
 }
 
 fn parse_assignment_expression(
     input: &str,
     line: usize,
-    double_quoted: bool,
 ) -> Result<ShellExpression, ExpansionError> {
     ExpressionParser::new(
         input,
         line,
         ExpressionSyntax::Ordinary {
             allow_commands: false,
-            double_quoted,
         },
     )
     .parse()
@@ -1789,25 +1804,17 @@ fn parse_assignment_expression(
 pub(crate) fn parse_command_expression(
     input: &str,
     line: usize,
-    double_quoted: bool,
 ) -> Result<Option<ShellExpression>, ExpansionError> {
     let syntax = ExpressionSyntax::Ordinary {
         allow_commands: true,
-        double_quoted,
     };
-    if !syntax.contains_command(input) {
-        return Ok(None);
-    }
     let expression = ExpressionParser::new(input, line, syntax).parse()?;
     Ok(expression.has_commands().then_some(expression))
 }
 
 #[derive(Debug, Clone, Copy)]
 enum ExpressionSyntax {
-    Ordinary {
-        allow_commands: bool,
-        double_quoted: bool,
-    },
+    Ordinary { allow_commands: bool },
     ShellCondition,
 }
 
@@ -1819,17 +1826,14 @@ impl ExpressionSyntax {
         }
     }
 
-    fn escapes(self, byte: u8) -> bool {
-        match self {
-            Self::Ordinary {
-                double_quoted: false,
-                ..
-            } => true,
-            Self::Ordinary {
-                double_quoted: true,
-                ..
-            } => matches!(byte, b'$' | b'`' | b'"' | b'\\' | b'\n'),
-            Self::ShellCondition => matches!(byte, b'$' | b'`' | b'"' | b'\\'),
+    fn escapes(self, quote: QuoteMode, byte: u8) -> bool {
+        match (self, quote) {
+            (Self::Ordinary { .. }, QuoteMode::Unquoted) => true,
+            (Self::Ordinary { .. }, QuoteMode::Double) => {
+                matches!(byte, b'$' | b'`' | b'"' | b'\\' | b'\n')
+            }
+            (Self::Ordinary { .. }, QuoteMode::Single) => false,
+            (Self::ShellCondition, _) => matches!(byte, b'$' | b'`' | b'"' | b'\\'),
         }
     }
 
@@ -1846,23 +1850,13 @@ impl ExpressionSyntax {
             Self::ShellCondition => "unterminated backquoted command in shell-expanded condition",
         }
     }
+}
 
-    fn contains_command(self, input: &str) -> bool {
-        let bytes = input.as_bytes();
-        let mut index = 0usize;
-        while index < bytes.len() {
-            if bytes[index] == b'\\' && bytes.get(index + 1).is_some_and(|next| self.escapes(*next))
-            {
-                index += 2;
-                continue;
-            }
-            if self.allows_commands() && bytes[index] == b'`' {
-                return true;
-            }
-            index += 1;
-        }
-        false
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuoteMode {
+    Unquoted,
+    Single,
+    Double,
 }
 
 struct ExpressionParser<'a> {
@@ -1885,15 +1879,49 @@ impl<'a> ExpressionParser<'a> {
     }
 
     fn parse(mut self) -> Result<ShellExpression, ExpansionError> {
-        let expression = self.parse_until(0, false)?;
+        let expression = self.parse_until(0, false, false, QuoteMode::Unquoted)?;
         debug_assert_eq!(self.index, self.bytes.len());
         Ok(expression)
+    }
+
+    fn parse_assignment_word(mut self) -> Result<ParsedAssignmentWord, ExpansionError> {
+        let expression = self
+            .parse_until(0, false, true, QuoteMode::Unquoted)
+            .map_err(|mut error| {
+                error.message = match error.message.as_str() {
+                    "unterminated single-quoted expression" => {
+                        "unterminated single-quoted assignment value".to_owned()
+                    }
+                    "unterminated double-quoted expression" => {
+                        "unterminated double-quoted assignment value".to_owned()
+                    }
+                    "unterminated backquoted command in expression" => {
+                        "unterminated backquoted command in assignment value".to_owned()
+                    }
+                    _ => error.message,
+                };
+                error
+            })?;
+        let word_end = self.index;
+        let trailing = self.input[word_end..].trim_start();
+        if !trailing.is_empty() && !trailing.starts_with('#') {
+            return Err(ExpansionError::new(
+                self.line,
+                "assignment value contains more than one shell word",
+            ));
+        }
+        Ok(ParsedAssignmentWord {
+            source: self.input[..word_end].to_owned(),
+            expression,
+        })
     }
 
     fn parse_until(
         &mut self,
         nesting: usize,
         stop_at_brace: bool,
+        stop_at_word: bool,
+        initial_quote: QuoteMode,
     ) -> Result<ShellExpression, ExpansionError> {
         // Build owned parts once so later delivery phases never reinterpret
         // bytes obtained from a variable as expression syntax. The explicit
@@ -1901,17 +1929,64 @@ impl<'a> ExpressionParser<'a> {
         check_expansion_depth(nesting, self.line)?;
         let mut parts = Vec::new();
         let mut literal = String::new();
+        let mut quote = initial_quote;
+        let mut word_started = false;
         while self.index < self.bytes.len() {
-            if stop_at_brace && self.bytes[self.index] == b'}' {
+            if stop_at_brace && quote == initial_quote && self.bytes[self.index] == b'}' {
                 break;
             }
+            if stop_at_word && quote == QuoteMode::Unquoted {
+                if matches!(self.bytes[self.index], b' ' | b'\t') {
+                    break;
+                }
+                if self.bytes[self.index] == b'#' && !word_started {
+                    break;
+                }
+            }
+            if matches!(self.syntax, ExpressionSyntax::Ordinary { .. }) {
+                match (quote, self.bytes[self.index]) {
+                    (QuoteMode::Unquoted, b'\'') => {
+                        word_started = true;
+                        quote = QuoteMode::Single;
+                        self.index += 1;
+                        continue;
+                    }
+                    (QuoteMode::Single, b'\'') => {
+                        quote = QuoteMode::Unquoted;
+                        self.index += 1;
+                        continue;
+                    }
+                    (QuoteMode::Unquoted, b'"') => {
+                        word_started = true;
+                        quote = QuoteMode::Double;
+                        self.index += 1;
+                        continue;
+                    }
+                    (QuoteMode::Double, b'"') => {
+                        quote = QuoteMode::Unquoted;
+                        self.index += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if quote == QuoteMode::Single {
+                let character = self.input[self.index..].chars().next().ok_or_else(|| {
+                    ExpansionError::new(self.line, self.syntax.invalid_utf8_message())
+                })?;
+                literal.push(character);
+                word_started = true;
+                self.index += character.len_utf8();
+                continue;
+            }
             if self.bytes[self.index] == b'\\' {
+                word_started = true;
                 let Some(next) = self.bytes.get(self.index + 1).copied() else {
                     literal.push('\\');
                     self.index += 1;
                     continue;
                 };
-                if !self.syntax.escapes(next) {
+                if !self.syntax.escapes(quote, next) {
                     literal.push('\\');
                     self.index += 1;
                     continue;
@@ -1924,6 +1999,7 @@ impl<'a> ExpressionParser<'a> {
                 continue;
             }
             if self.syntax.allows_commands() && self.bytes[self.index] == b'`' {
+                word_started = true;
                 if !literal.is_empty() {
                     push_literal_part(&mut parts, &std::mem::take(&mut literal));
                 }
@@ -1935,18 +2011,31 @@ impl<'a> ExpressionParser<'a> {
                     ExpansionError::new(self.line, self.syntax.invalid_utf8_message())
                 })?;
                 literal.push(character);
+                word_started = true;
                 self.index += character.len_utf8();
                 continue;
             }
             if !literal.is_empty() {
                 push_literal_part(&mut parts, &std::mem::take(&mut literal));
             }
-            if let Some(part) = self.parse_variable(nesting, &mut literal)? {
+            word_started = true;
+            if let Some(part) = self.parse_variable(nesting, quote, &mut literal)? {
                 parts.push(part);
             }
         }
         if !literal.is_empty() {
             push_literal_part(&mut parts, &literal);
+        }
+        if quote != initial_quote {
+            let kind = if quote == QuoteMode::Single {
+                "single"
+            } else {
+                "double"
+            };
+            return Err(ExpansionError::new(
+                self.line,
+                format!("unterminated {kind}-quoted expression"),
+            ));
         }
         if stop_at_brace && self.index == self.bytes.len() {
             return Err(ExpansionError::new(
@@ -1984,6 +2073,7 @@ impl<'a> ExpressionParser<'a> {
     fn parse_variable(
         &mut self,
         nesting: usize,
+        quote: QuoteMode,
         literal: &mut String,
     ) -> Result<Option<ShellPart>, ExpansionError> {
         self.index += 1;
@@ -2018,7 +2108,7 @@ impl<'a> ExpressionParser<'a> {
                     "regex-escaped condition variables use $\\NAME syntax",
                 ));
             }
-            self.parse_braced_variable(nesting)?
+            self.parse_braced_variable(nesting, quote)?
         } else {
             if !is_name_start(first) {
                 if matches!(self.syntax, ExpressionSyntax::ShellCondition) {
@@ -2056,6 +2146,7 @@ impl<'a> ExpressionParser<'a> {
     fn parse_braced_variable(
         &mut self,
         nesting: usize,
+        quote: QuoteMode,
     ) -> Result<(String, Option<ShellExpression>), ExpansionError> {
         self.index += 1;
         let name = self.parse_name();
@@ -2063,7 +2154,7 @@ impl<'a> ExpressionParser<'a> {
         match self.bytes.get(self.index..self.index + 2) {
             Some(b":-") => {
                 self.index += 2;
-                let default = self.parse_until(nesting + 1, true)?;
+                let default = self.parse_until(nesting + 1, true, false, quote)?;
                 if self.bytes.get(self.index) != Some(&b'}') {
                     return Err(ExpansionError::new(
                         self.line,

@@ -256,7 +256,7 @@ fn parse_statements(
             continue;
         }
 
-        if let Some(assignment) = parse_assignment(line, line_number)? {
+        if let Some(assignment) = parse_assignment(lines[index].trim_start(), line_number)? {
             state.charge_assignment(line_number, AssignmentUse::Statement)?;
             if depth != 0 && assignment.target.controls_rc_parsing() {
                 return Err(ParseError::new(
@@ -267,43 +267,45 @@ fn parse_statements(
                     ),
                 ));
             }
-            let statement = match parse_command_substitutions(
-                &assignment.value,
-                assignment.line,
-                assignment.double_quoted,
-            )? {
-                Some(expression) => {
-                    if assignment.target.controls_rc_parsing() {
-                        return Err(ParseError::new(
-                            assignment.line,
-                            format!(
-                                "variable {} cannot be set from command output because it controls rc parsing",
-                                assignment.name
-                            ),
-                        ));
-                    }
-                    Statement::CommandAssignment(CommandAssignment {
-                        line: assignment.line,
-                        name: assignment.name,
-                        source: assignment.value,
-                        target: assignment.target,
-                        double_quoted: assignment.double_quoted,
-                        expression,
-                    })
+            let statement = if assignment
+                .expansion
+                .as_ref()
+                .is_some_and(ShellExpression::has_commands)
+            {
+                let mut assignment = assignment;
+                let expression = assignment.expansion.take().ok_or_else(|| {
+                    ParseError::new(assignment.line, "parsed assignment expression is missing")
+                })?;
+                if assignment.target.controls_rc_parsing() {
+                    return Err(ParseError::new(
+                        assignment.line,
+                        format!(
+                            "variable {} cannot be set from command output because it controls rc parsing",
+                            assignment.name
+                        ),
+                    ));
                 }
-                None => match assignment.name.as_str() {
+                Statement::CommandAssignment(CommandAssignment {
+                    line: assignment.line,
+                    name: assignment.name,
+                    source: assignment.value,
+                    target: assignment.target,
+                    expression,
+                })
+            } else {
+                match assignment.name.as_str() {
                     "INCLUDERC" => Statement::Include(RcFileExpression {
                         line: assignment.line,
                         value: assignment.value,
-                        expansion: None,
+                        expansion: assignment.expansion,
                     }),
                     "SWITCHRC" => Statement::Switch(RcFileExpression {
                         line: assignment.line,
                         value: assignment.value,
-                        expansion: None,
+                        expansion: assignment.expansion,
                     }),
                     _ => Statement::Assignment(assignment),
-                },
+                }
             };
             if let Statement::Assignment(assignment) = &statement {
                 state.apply_assignment(assignment)?;
@@ -416,7 +418,9 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
     {
         return Ok(None);
     }
-    let (value, double_quoted) = parse_assignment_value(value.trim(), line_number)?;
+    let parsed = super::expand::parse_assignment_word(value.trim_start(), line_number)
+        .map_err(|error| ParseError::new(error.line, error.message))?;
+    let mut value = parsed.source;
     if value.len() > MAX_ASSIGNMENT_VALUE_LEN {
         return Err(ParseError::new(
             line_number,
@@ -438,6 +442,11 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
                 format!("variable {name} cannot be assigned in an rc file"),
             )
         })?;
+    if target.controls_rc_parsing()
+        && let Some(literal) = parsed.expression.literal_text()
+    {
+        value = literal;
+    }
     let limit = target.value_limit();
     if value.len() > limit {
         let kind = if target.uses_path_error_label() {
@@ -456,8 +465,7 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
         name: name.to_owned(),
         value,
         target,
-        double_quoted,
-        expansion: None,
+        expansion: Some(parsed.expression),
     }))
 }
 
@@ -726,7 +734,8 @@ fn destination_path_expression(
     line: usize,
     typed_destination: bool,
 ) -> Result<PathExpression, ParseError> {
-    let expansion = parse_command_substitutions(&source, line, false)?;
+    let expansion = super::expand::parse_command_expression(&source, line)
+        .map_err(|error| ParseError::new(error.line, error.message))?;
     Ok(PathExpression {
         source,
         base: None,
@@ -770,21 +779,6 @@ fn parse_capture_action_prefix(
         .assignment_target(VariableSource::RcFile)
         .ok_or_else(|| ParseError::new(line, format!("variable {name} cannot be assigned")))?;
     Ok(Some((name.to_owned(), target)))
-}
-
-fn parse_command_substitutions(
-    value: &str,
-    line: usize,
-    double_quoted: bool,
-) -> Result<Option<ShellExpression>, ParseError> {
-    super::expand::parse_command_expression(value, line, double_quoted).map_err(|error| {
-        let message = if error.message == "unterminated backquoted command in expression" {
-            "unterminated backquoted command in assignment value".to_owned()
-        } else {
-            error.message
-        };
-        ParseError::new(error.line, message)
-    })
 }
 
 fn parse_header_action(
@@ -1525,75 +1519,6 @@ fn check_path_length(path: &str, line: usize, description: &str) -> Result<(), P
 
 fn strip_comment(value: &str) -> &str {
     value.split_once('#').map_or(value, |(value, _)| value)
-}
-
-fn parse_assignment_value(value: &str, line: usize) -> Result<(String, bool), ParseError> {
-    if !value.starts_with('"') {
-        return Ok((strip_assignment_comment(value).trim().to_owned(), false));
-    }
-
-    // An outer double-quoted value is a single rc value, so a '#' within it
-    // is data rather than a comment. Preserve the quote mode separately after
-    // removing the delimiters because backslash handling differs inside the
-    // quotes and cannot be reconstructed from the remaining text alone.
-    let quoted = &value[1..];
-    let Some(closing) = find_outer_assignment_quote(quoted) else {
-        return Err(ParseError::new(
-            line,
-            "unterminated double-quoted assignment value",
-        ));
-    };
-    let inner = &quoted[..closing];
-    let trailing = quoted[closing + 1..].trim();
-    if !trailing.is_empty() && !trailing.starts_with('#') {
-        return Err(ParseError::new(
-            line,
-            "syntax after a double-quoted assignment value is not supported",
-        ));
-    }
-    Ok((inner.to_owned(), true))
-}
-
-fn strip_assignment_comment(value: &str) -> &str {
-    let mut in_command = false;
-    let mut escaped = false;
-    for (index, character) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if character == '\\' {
-            escaped = true;
-            continue;
-        }
-        if character == '`' {
-            in_command = !in_command;
-        } else if character == '#' && !in_command {
-            return &value[..index];
-        }
-    }
-    value
-}
-
-fn find_outer_assignment_quote(value: &str) -> Option<usize> {
-    let mut in_command = false;
-    let mut escaped = false;
-    for (index, character) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if character == '\\' {
-            escaped = true;
-            continue;
-        }
-        if character == '`' {
-            in_command = !in_command;
-        } else if character == '"' && !in_command {
-            return Some(index);
-        }
-    }
-    None
 }
 
 fn validate_program_condition(command: &str, line: usize) -> Result<(), ParseError> {

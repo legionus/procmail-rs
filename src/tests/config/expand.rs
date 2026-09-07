@@ -89,7 +89,7 @@ fn known_assignment_values_are_validated_equally_at_root_and_in_blocks() {
 #[test]
 fn shared_expression_syntax_has_identical_parts_in_common_modes() {
     let source = r"pre-${EMPTY:-$NAME-\${LITERAL}-`printf x`}-post";
-    let ordinary = parse_command_expression(source, 4, true)
+    let ordinary = parse_command_expression(source, 4)
         .unwrap()
         .expect("source contains a command");
     let condition = parse_shell_condition_expression(source, 4).unwrap();
@@ -100,12 +100,12 @@ fn shared_expression_syntax_has_identical_parts_in_common_modes() {
 #[test]
 fn expression_modes_keep_their_distinct_escape_and_dollar_rules() {
     assert_eq!(
-        parse_assignment_expression(r"\q", 6, false).unwrap().parts,
+        parse_assignment_expression(r"\q", 6).unwrap().parts,
         [ShellPart::Literal("q".to_owned())]
     );
     let quoted = [ShellPart::Literal(r"\q".to_owned())];
     assert_eq!(
-        parse_assignment_expression(r"\q", 6, true).unwrap().parts,
+        parse_assignment_expression(r#""\q""#, 6).unwrap().parts,
         quoted
     );
     assert_eq!(
@@ -113,7 +113,7 @@ fn expression_modes_keep_their_distinct_escape_and_dollar_rules() {
         quoted
     );
 
-    assert!(parse_assignment_expression("$!", 7, false).is_err());
+    assert!(parse_assignment_expression("$!", 7).is_err());
     assert_eq!(
         parse_shell_condition_expression("$!", 7).unwrap().parts,
         [ShellPart::Literal("$!".to_owned())]
@@ -125,6 +125,79 @@ fn expression_modes_keep_their_distinct_escape_and_dollar_rules() {
             .parts,
         [ShellPart::RegexQuotedVariable("NAME".to_owned())]
     );
+}
+
+#[test]
+fn single_quotes_are_literal_and_can_be_concatenated_with_other_quote_modes() {
+    let expression =
+        parse_assignment_expression(r#"pre'$NAME `printf hidden` \ raw'"-$NAME"-post"#, 10)
+            .unwrap();
+
+    assert_eq!(
+        expression.parts,
+        [
+            ShellPart::Literal("pre$NAME `printf hidden` \\ raw-".to_owned()),
+            ShellPart::Variable {
+                name: "NAME".to_owned(),
+                default: None,
+            },
+            ShellPart::Literal("-post".to_owned()),
+        ]
+    );
+    assert!(!expression.has_commands());
+}
+
+#[test]
+fn assignment_quotes_report_their_unterminated_mode() {
+    for (source, expected) in [
+        ("'value", "unterminated single-quoted expression"),
+        ("\"value", "unterminated double-quoted expression"),
+    ] {
+        let error = parse_assignment_expression(source, 11).unwrap_err();
+        assert_eq!(error.line, 11);
+        assert_eq!(error.message, expected);
+    }
+}
+
+#[test]
+fn quoted_and_escaped_assignment_words_expand_to_one_value() {
+    let config = parse(concat!(
+        "NAME=world\n",
+        "VALUE=hello\\ '$NAME '\"$NAME\"\n",
+        "TRAIL=right\\ \n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let Statement::Assignment(value) = &config.statements[1] else {
+        panic!("expected assignment");
+    };
+
+    assert_eq!(value.value, "hello $NAME world");
+    let Statement::Assignment(trailing) = &config.statements[2] else {
+        panic!("expected assignment");
+    };
+    assert_eq!(trailing.value, "right ");
+}
+
+#[test]
+fn nested_defaults_preserve_their_surrounding_quote_mode() {
+    let config = parse(concat!(
+        "NAME=world\n",
+        "EMPTY=\n",
+        "DOUBLE=\"${EMPTY:-'$NAME'}\"\n",
+        "SINGLE=${EMPTY:-'a}b'}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+
+    for (index, expected) in [(2, "'world'"), (3, "a}b")] {
+        let Statement::Assignment(value) = &config.statements[index] else {
+            panic!("expected assignment");
+        };
+        assert_eq!(value.value, expected);
+    }
 }
 
 #[test]
@@ -717,7 +790,7 @@ fn runtime_bare_path_is_classified_after_variable_expansion() {
 
 #[test]
 fn rejects_unmarked_destination_lists_after_expansion() {
-    let error = parse("BOX=first second\n:0\n$BOX\n")
+    let error = parse("BOX=\"first second\"\n:0\n$BOX\n")
         .unwrap()
         .expand(&[])
         .unwrap_err();
@@ -742,7 +815,7 @@ fn rejects_unmarked_destination_lists_after_expansion() {
     );
 
     assert!(
-        parse("BOX=path with spaces\n:0\nmbox:$BOX\n")
+        parse("BOX='path with spaces'\n:0\nmbox:$BOX\n")
             .unwrap()
             .expand(&[])
             .is_ok()
@@ -805,7 +878,7 @@ fn expands_destinations_inside_recipe_blocks() {
 #[test]
 fn rejects_unsupported_and_malformed_references() {
     for source in ["A=$$\n", "A=${NAME:=value}\n", "A=${NAME\n", "A=$\n"] {
-        assert!(parse(source).unwrap().expand(&[]).is_err(), "{source:?}");
+        assert!(parse(source).is_err(), "{source:?}");
     }
 }
 
@@ -813,10 +886,7 @@ fn rejects_unsupported_and_malformed_references() {
 fn rejects_unsupported_procmail_variables_inside_expansions() {
     for name in super::super::UNSUPPORTED_PROCMAIL_VARIABLES {
         let value = format!("${{{name}}}");
-        let error = parse(&format!("VALUE={value}\n"))
-            .unwrap()
-            .expand(&[])
-            .unwrap_err();
+        let error = parse(&format!("VALUE={value}\n")).unwrap_err();
         assert_eq!(error.line, 1, "{name}");
         assert_eq!(
             error.message,
@@ -926,7 +996,7 @@ fn bounds_nested_default_syntax_depth() {
 
     let beyond_limit = format!("${{OUTER:-{within_limit}}}");
     let source = format!("A={beyond_limit}\n");
-    let error = parse_wide(&source).unwrap().expand(&[]).unwrap_err();
+    let error = parse_wide(&source).unwrap_err();
     assert_eq!(
         error.message,
         format!("variable expansion exceeds the hard depth limit of {MAX_EXPANSION_DEPTH}")

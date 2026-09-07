@@ -50,7 +50,9 @@ fn caps_message_and_body_for_32_bit_address_space() {
 #[test]
 fn rejects_spaces_and_unknown_suffixes() {
     for value in ["10 K", "10KB", "-1", ""] {
-        let config = config::parse(&format!("LIMIT_MSG_BODY={value}\n")).unwrap();
-        assert!(MessageLimits::from_config(&config).is_err(), "{value}");
+        let parsed = config::parse(&format!("LIMIT_MSG_BODY={value}\n"));
+        if let Ok(config) = parsed {
+            assert!(MessageLimits::from_config(&config).is_err(), "{value}");
+        }
     }
 }
