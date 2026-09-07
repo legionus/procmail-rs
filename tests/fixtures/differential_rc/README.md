@@ -40,3 +40,7 @@ delivery destination.
 The command-assignments case records header-only capture, a following success
 recipe, a backquoted assignment inside its block, and the distinct trailing
 newline removal rules before the resulting values select the destination.
+
+The shell-condition-command case records that a backquoted command inside a
+shell-expanded condition receives the complete message, can derive a new
+condition from the body, and has that bounded output reparsed before routing.

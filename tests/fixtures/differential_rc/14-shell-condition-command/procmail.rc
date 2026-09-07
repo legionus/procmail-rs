@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+OUT=$1
+COMSAT=no
+MAILDIR=.
+
+:0
+* $`grep -q 'body token' && printf '^Subject: wanted$'`
+$OUT/selected
+
+:0
+$OUT/fallback
