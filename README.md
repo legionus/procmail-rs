@@ -30,6 +30,13 @@ Development and release checks are described in
 The project is distributed under the MIT license; dependency and fixture
 provenance is recorded in [Documentation/Licenses.md](Documentation/Licenses.md).
 
+The editable manual-page sources are
+[Documentation/man/procmail-rs.1.md](Documentation/man/procmail-rs.1.md) and
+[Documentation/man/procmail-rs.rc.5.md](Documentation/man/procmail-rs.rc.5.md).
+`make man` regenerates the checked-in roff pages under `man/`, and
+`make check-man` verifies that they are current. These documentation targets
+require Pandoc; building the Rust program itself does not.
+
 ## Minimal configuration
 
 Create the Maildir structure before filtering; delivery never creates or
@@ -321,8 +328,9 @@ that observes dotlock creation and deletion is more important than protection
 against hostile same-directory changes. `LOCKMETHOD` takes effect in rc
 statement order.
 
-Local lockfiles on recipe blocks remain unsupported and are rejected before
-message input.
+An explicit local lockfile on a recipe block is held across the complete child
+sequence. A block cannot derive an implicit lockfile because it has no single
+destination from which to construct the name.
 
 `LOCKFILE=PATH` holds a global lock from that assignment until another
 `LOCKFILE` assignment replaces it, an empty assignment releases it, or the

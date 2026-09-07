@@ -80,7 +80,7 @@ a review source; installed procmail-rs tests do not depend on it.
 | Status | Variables | Notes |
 | --- | --- | --- |
 | Supported or intentionally narrowed | `HOME`, `LOGNAME`, `PATH`, `SHELL`, `SHELLFLAGS`, `MAILDIR`, `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, `LOCKFILE`, `LOCKEXT`, `LOCKTIMEOUT`, `TIMEOUT`, `HOST`, `UMASK`, `TRAP`, `EXITCODE`, `LASTFOLDER`, `MATCH`, `INCLUDERC`, `SWITCHRC`, `PROCMAIL_VERSION`, and `LINEBUF` | Exact restrictions are recorded in this document and in the limits documentation. `MATCH1`, `MATCH2`, and later numbered captures are procmail-rs additions. |
-| Explicitly rejected | `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` | These names cannot accidentally act as ordinary variables. Implementing `DROPPRIVS` is outside project scope; a bounded `LOCKSLEEP` could later control lock retry intervals. |
+| Explicitly rejected | `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, `SHIFT`, and `LIMIT_RC_SIZE` | These names cannot accidentally act as ordinary variables. Implementing `DROPPRIVS` is outside project scope; a bounded `LOCKSLEEP` could later control lock retry intervals. `LIMIT_RC_SIZE` cannot safely configure the read which has already consumed its own assignment. |
 | Original startup environment behavior | `IFS`, `ENV`, and `PWD` are cleared or preset, and other ambient variables are generally imported. | procmail-rs instead builds a bounded child environment from its runtime variable table. This is deliberate, but rc assignments with these names remain ordinary exported variables. |
 
 ### Coverage of `procmailex(5)` patterns
@@ -303,9 +303,9 @@ behavior is required.
 Reserved procmail variables `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`,
 `DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`,
 `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and
-`SHIFT` are rejected by name. Forward actions beginning with `!` are also
-rejected. This makes unsupported behavior visible instead of silently assigning
-it another meaning.
+`SHIFT`, as well as the project-reserved `LIMIT_RC_SIZE`, are rejected by name.
+Forward actions beginning with `!` are also rejected. This makes unsupported
+behavior visible instead of silently assigning it another meaning.
 
 ## Deliberate differences
 
@@ -320,7 +320,7 @@ it another meaning.
 | Runtime rc files | Opens paths using the process filesystem permissions. | Requires trusted regular files owned by the current uid and rejects broadly writable files and symlinks. |
 | Initial variables | Imports a broad process environment. | Gets `HOME` and `LOGNAME` from the current uid and accepts other external values only through `--set`. |
 | `PROCMAIL_VERSION` | Contains the running procmail version number and cannot be changed. | Contains the bounded package version from `Cargo.toml` and cannot be changed. The value identifies procmail-rs and does not claim to be procmail 3.22. |
-| Unsupported reserved variables | Variables such as `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` retain their original special meanings. | Rejects these names explicitly in assignments, `--set`, and expansion references. Unknown names remain ordinary user variables. |
+| Unsupported reserved variables | Variables such as `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` retain their original special meanings. | Rejects these names and the project-reserved `LIMIT_RC_SIZE` explicitly in assignments, `--set`, and expansion references. Unknown names remain ordinary user variables. |
 | `LOGABSTRACT` | Defaults to a final abstract containing `From`, `Subject`, destination, and message size; `no` suppresses it and `all` logs every successful delivery. | Accepts only the exact value `no`, including after bounded variable expansion. Abstract logging remains disabled because other modes could expose sensitive header values. A statically known unsupported value is rejected before message input; a runtime-derived value is rejected when its selected assignment executes. |
 | Pipe command parsing | Uses a hybrid direct-command and shell parser. | Runs every trusted pipe command through the configured, policy-checked shell. |
 | Captured NUL bytes | A NUL from a backquoted command terminates the assigned value. | Preserves NUL as variable data. A later external command cannot receive such a value because operating-system environment entries cannot contain NUL. |

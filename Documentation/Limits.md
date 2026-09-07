@@ -22,6 +22,23 @@ rejected.
 | `LIMIT_HEADER_LINE` | 64 KiB | 1 MiB | One physical header line |
 | `LIMIT_HEADER_FIELD` | 256 KiB | 16 MiB | One unfolded logical field |
 
+The message limits count bytes as follows:
+
+- `LIMIT_MSG_SIZE` covers the complete message, including raw headers, their
+  separator, and the body. Streaming does not exempt body bytes. Replacement
+  messages from filters and native header edits are checked again.
+- `LIMIT_MSG_HEADERS` covers raw header bytes, line endings, and the empty
+  header/body separator. Without a separator, all input through EOF is header
+  data.
+- `LIMIT_MSG_BODY` covers only bytes after the first empty header line. Without
+  a separator, the body is empty.
+- `LIMIT_HEADER_LINE` covers one physical line including its LF or CRLF, or all
+  bytes of a final unterminated line.
+- `LIMIT_HEADER_FIELD` covers the original bytes of one logical field: its
+  first physical line plus immediately following space- or tab-led continuation
+  lines, including line endings. Every component is also checked against
+  `LIMIT_HEADER_LINE`.
+
 Structural rc limits accept only unsigned decimal integers. The assignment
 which changes a limit is checked using the preceding assignment limit; its new
 value applies only to following syntax. These assignments are rejected inside
@@ -36,6 +53,33 @@ recipe blocks.
 | `LIMIT_RC_REGEXES` | 256 | 1024 | Compiled regular expressions |
 | `LIMIT_RECIPE_CONDITIONS` | 256 | 4096 | Conditions in one recipe |
 | `LIMIT_RECIPE_NESTING` | 64 | 256 | Nested recipe blocks |
+
+The structural limits count syntax as follows:
+
+- `LIMIT_MAX_ASSIGNMENTS` covers ordinary assignments and `NAME=| command`
+  capture actions across every loaded rc file. A limit-changing assignment is
+  checked with the preceding value before the new value takes effect.
+- `LIMIT_RC_STATEMENTS` covers assignment and recipe statements, including
+  those in nested blocks. Conditions, actions, comments, and blank lines are
+  not separate statements. A capture action is not a second statement beyond
+  its recipe.
+- `LIMIT_RC_RECIPES` covers every `:0` recipe. A block-owning recipe and each
+  recipe inside that block count separately.
+- `LIMIT_RC_CONDITIONS` covers every `*` condition, regardless of whether it is
+  a regex, size test, program test, or shell-expanded condition.
+- `LIMIT_RC_REGEXES` covers ordinary regex conditions and reserves one entry
+  for every shell-expanded `$` condition which may produce a regex at runtime.
+  Size and program conditions do not count.
+- `LIMIT_RECIPE_CONDITIONS` applies independently to each recipe; those same
+  conditions also contribute to `LIMIT_RC_CONDITIONS`.
+- `LIMIT_RECIPE_NESTING` covers recipe-action blocks. Root recipes have depth
+  zero and entering their `{ ... }` action creates depth one.
+
+All message and structural limits accept zero. Exactly `limit` bytes or items
+are permitted and the next byte or item is rejected. Lowering a structural
+limit below its already consumed count is accepted; the next matching item is
+rejected. Runtime includes and switches retain their caller's accumulated
+counts and active settings.
 
 `LINEBUF` defaults to 2048 bytes and accepts a literal decimal value from 128
 through 1048576. It bounds following physical rc lines, a continued pipe

@@ -26,6 +26,7 @@ pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "SENDMAIL",
     "SENDMAILFLAGS",
     "SHIFT",
+    "LIMIT_RC_SIZE",
 ];
 
 pub fn parse_umask(value: &str) -> Result<u32, String> {

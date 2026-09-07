@@ -17,6 +17,11 @@ release benchmark over identical workloads and several rounds. A passing smoke
 run is evidence that exercised cases worked; it is not a claim that every
 possible input, filesystem, or process behavior has been explored.
 
+Run `make check-man` with Pandoc before packaging a release. The generated
+`man/procmail-rs.1` and `man/procmail-rs.rc.5` files must match their Markdown
+sources under `Documentation/man/`; release packages install the generated
+files and do not need Pandoc at build or installation time.
+
 The supported release platform is 32-bit and 64-bit Linux. Non-Linux Unix and
 Windows releases remain deferred until their delivery behavior has dedicated
 implementation and runtime tests.
