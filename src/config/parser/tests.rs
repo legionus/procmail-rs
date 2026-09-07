@@ -1683,7 +1683,7 @@ fn rejects_unclosed_header_action() {
 #[test]
 fn prepares_parsed_header_action_for_execution() {
     let config = parse(":0\nheaders {\n remove X-Test\n}\n").unwrap();
-    assert!(config.expand().is_ok());
+    assert!(config.expand(&[]).is_ok());
 }
 
 #[test]

@@ -25,7 +25,7 @@ fn temporary_directory(name: &str) -> PathBuf {
 fn parses_lock_method_and_defaults_to_flock() {
     let default = crate::config::parse(":0\nmaildir:inbox\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     assert_eq!(
         LockMethod::from_config(&default).unwrap(),
@@ -38,14 +38,14 @@ fn parses_lock_method_and_defaults_to_flock() {
     ] {
         let config = crate::config::parse(&format!("LOCKMETHOD={value}\n"))
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap();
         assert_eq!(LockMethod::from_config(&config).unwrap(), expected);
     }
 
     let invalid = crate::config::parse("LOCKMETHOD=other\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     assert_eq!(
         LockMethod::from_config(&invalid).unwrap_err(),
@@ -64,14 +64,14 @@ fn parses_lock_timeout_at_supported_boundaries() {
         assert!(parse_lock_timeout(value).is_err(), "accepted {value:?}");
     }
 
-    let default = crate::config::parse("").unwrap().expand().unwrap();
+    let default = crate::config::parse("").unwrap().expand(&[]).unwrap();
     assert_eq!(
         lock_timeout_from_config(&default).unwrap(),
         DEFAULT_LOCK_TIMEOUT
     );
     let repeated = crate::config::parse("LOCKTIMEOUT=1\nLOCKTIMEOUT=2\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     assert_eq!(
         lock_timeout_from_config(&repeated).unwrap(),
@@ -150,13 +150,13 @@ fn flock_rejects_symlinks_and_broad_permissions() {
     fs::write(&target, b"").unwrap();
     let link = directory.join("link");
     symlink(&target, &link).unwrap();
-    assert!(LocalLock::acquire(&link, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT).is_err());
+    assert!(LocalLock::acquire(&link, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT, 0).is_err());
 
     let broad = directory.join("broad");
     fs::write(&broad, b"").unwrap();
     fs::set_permissions(&broad, fs::Permissions::from_mode(0o666)).unwrap();
     let error =
-        LocalLock::acquire(&broad, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT).unwrap_err();
+        LocalLock::acquire(&broad, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT, 0).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     fs::remove_dir_all(directory).unwrap();
 }
@@ -203,8 +203,7 @@ fn creation_mask_can_only_remove_lockfile_permissions() {
         (LockMethod::Dotlock, "dotlock"),
     ] {
         let path = directory.join(name);
-        let lock =
-            LocalLock::acquire_with_mask(&path, method, uid, DEFAULT_LOCK_TIMEOUT, 0o777).unwrap();
+        let lock = LocalLock::acquire(&path, method, uid, DEFAULT_LOCK_TIMEOUT, 0o777).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0);
         drop(lock);
     }

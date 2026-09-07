@@ -73,14 +73,14 @@ fn reads_explicit_durability_policy_in_statement_order() {
     ] {
         let config = crate::config::parse(&format!("DURABILITY={value}\n:0\nmaildir:box\n"))
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap();
         assert_eq!(Durability::from_config(&config).unwrap(), expected);
     }
 
     let config = crate::config::parse("DURABILITY=file\nDURABILITY=none\n:0\nmaildir:box\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     assert_eq!(Durability::from_config(&config).unwrap(), Durability::None);
 }
@@ -89,7 +89,7 @@ fn reads_explicit_durability_policy_in_statement_order() {
 fn rejects_unknown_durability_before_delivery() {
     let config = crate::config::parse("DURABILITY=strong\n:0\nmaildir:box\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     assert!(Durability::from_config(&config).is_err());
@@ -99,8 +99,7 @@ fn rejects_unknown_durability_before_delivery() {
 fn every_durability_mode_can_publish_a_complete_message() {
     for durability in [Durability::None, Durability::File, Durability::Full] {
         let maildir = TestMaildir::create();
-        let mut sink =
-            Box::new(MaildirSink::create_with_durability(maildir.path(), durability).unwrap());
+        let mut sink = Box::new(MaildirSink::create(maildir.path(), durability, 0).unwrap());
         sink.write_all(b"Subject: sync\n\nbody").unwrap();
 
         let published = PendingSink::commit(sink).unwrap();
@@ -175,7 +174,7 @@ fn collision_retry_stops_after_its_fixed_limit() {
 #[test]
 fn commit_atomically_moves_the_complete_file_from_tmp_to_new() {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
     sink.write_all(b"Subject: test\n\nbody").unwrap();
 
     assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
@@ -197,7 +196,7 @@ fn commit_atomically_moves_the_complete_file_from_tmp_to_new() {
 #[test]
 fn abort_closes_the_unnamed_file_without_removing_a_path() {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
     sink.write_all(b"partial").unwrap();
 
     PendingSink::abort(sink).unwrap();
@@ -208,7 +207,7 @@ fn abort_closes_the_unnamed_file_without_removing_a_path() {
 #[test]
 fn injected_write_failure_never_creates_a_maildir_entry() {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
     sink.file = openat(
         CWD,
         "/dev/full",
@@ -230,8 +229,7 @@ fn injected_write_failure_never_creates_a_maildir_entry() {
 #[test]
 fn injected_file_sync_failure_happens_before_maildir_publication() {
     let maildir = TestMaildir::create();
-    let mut sink =
-        Box::new(MaildirSink::create_with_durability(maildir.path(), Durability::File).unwrap());
+    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::File, 0).unwrap());
     sink.write_all(b"complete message").unwrap();
 
     let error = (*sink)
@@ -249,7 +247,7 @@ fn injected_file_sync_failure_happens_before_maildir_publication() {
 #[test]
 fn injected_rename_failure_does_not_publish_a_maildir_message() {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
     sink.write_all(b"complete message").unwrap();
 
     let error = (*sink)
@@ -267,8 +265,7 @@ fn injected_rename_failure_does_not_publish_a_maildir_message() {
 #[test]
 fn injected_directory_sync_failure_reports_visible_maildir_message() {
     let maildir = TestMaildir::create();
-    let mut sink =
-        Box::new(MaildirSink::create_with_durability(maildir.path(), Durability::Full).unwrap());
+    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::Full, 0).unwrap());
     sink.write_all(b"complete message").unwrap();
     let mut sync_calls = 0usize;
 
@@ -298,7 +295,7 @@ fn injected_directory_sync_failure_reports_visible_maildir_message() {
 #[test]
 fn creates_a_file_without_group_or_other_access() {
     let maildir = TestMaildir::create();
-    let sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+    let sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
     let metadata = rustix::fs::fstat(&sink.file).unwrap();
 
     assert_eq!(metadata.st_mode & 0o777 & !MAILDIR_FILE_MODE, 0);
@@ -311,7 +308,9 @@ fn rejects_symlinked_maildir_component() {
     let link = maildir.path().with_extension("link");
     symlink(maildir.path(), &link).unwrap();
 
-    let error = MaildirSink::create(&link).err().unwrap();
+    let error = MaildirSink::create(&link, Durability::None, 0)
+        .err()
+        .unwrap();
     let code = error.raw_os_error();
     assert!(
         code == Some(rustix::io::Errno::LOOP.raw_os_error())
@@ -326,7 +325,7 @@ fn rejects_symlinked_tmp_directory() {
     fs::remove_dir(maildir.path().join("tmp")).unwrap();
     symlink(maildir.path().join("new"), maildir.path().join("tmp")).unwrap();
 
-    assert!(MaildirSink::create(maildir.path()).is_err());
+    assert!(MaildirSink::create(maildir.path(), Durability::None, 0).is_err());
     assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
 }
 
@@ -334,7 +333,7 @@ fn rejects_symlinked_tmp_directory() {
 fn directory_replacement_cannot_redirect_an_open_delivery() {
     let maildir = TestMaildir::create();
     let moved = maildir.path().with_extension("opened");
-    let mut sink = Box::new(MaildirSink::create(maildir.path()).unwrap());
+    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
     sink.write_all(b"Subject: original directories\n\nbody")
         .unwrap();
 
@@ -367,7 +366,9 @@ fn requires_an_existing_complete_maildir() {
         let maildir = TestMaildir::create();
         fs::remove_dir(maildir.path().join(component)).unwrap();
 
-        let error = MaildirSink::create(maildir.path()).err().unwrap();
+        let error = MaildirSink::create(maildir.path(), Durability::None, 0)
+            .err()
+            .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{component}");
         assert!(!maildir.path().join(component).exists());
     }
@@ -402,7 +403,7 @@ fn concurrent_deliveries_publish_unique_complete_messages() {
         let path = maildir.path().to_owned();
         threads.push(std::thread::spawn(move || {
             let message = format!("Subject: {index}\n\nbody {index}").into_bytes();
-            let mut sink = Box::new(MaildirSink::create(&path).unwrap());
+            let mut sink = Box::new(MaildirSink::create(&path, Durability::None, 0).unwrap());
             sink.write_all(&message).unwrap();
             PendingSink::commit(sink).unwrap();
             message
@@ -425,6 +426,8 @@ fn concurrent_deliveries_publish_unique_complete_messages() {
 
 #[test]
 fn rejects_parent_components() {
-    let error = MaildirSink::create(Path::new("mail/../dir")).err().unwrap();
+    let error = MaildirSink::create(Path::new("mail/../dir"), Durability::None, 0)
+        .err()
+        .unwrap();
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 }

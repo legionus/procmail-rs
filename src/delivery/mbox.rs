@@ -23,6 +23,7 @@ use super::{DeliveryFailureClass, PublishedDelivery};
 
 pub const MAX_POSTMARK_LEN: usize = 512;
 const MBOX_FILE_MODE: u32 = 0o600;
+#[cfg(test)]
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -121,11 +122,7 @@ impl fmt::Display for PostmarkError {
 impl std::error::Error for PostmarkError {}
 
 impl MboxFile {
-    pub fn open(path: &Path) -> io::Result<Self> {
-        Self::open_with_mask(path, 0)
-    }
-
-    pub fn open_with_mask(path: &Path, mask: u32) -> io::Result<Self> {
+    pub fn open(path: &Path, mask: u32) -> io::Result<Self> {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "mbox path has no file name")
         })?;
@@ -158,11 +155,7 @@ impl MboxFile {
         })
     }
 
-    pub fn lock(self) -> io::Result<LockedMbox> {
-        self.lock_with_policy(LOCK_TIMEOUT, LOCK_RETRY_INTERVAL)
-    }
-
-    pub fn lock_with_timeout(self, timeout: Duration) -> io::Result<LockedMbox> {
+    pub fn lock(self, timeout: Duration) -> io::Result<LockedMbox> {
         self.lock_with_policy(timeout, LOCK_RETRY_INTERVAL)
     }
 
@@ -198,7 +191,7 @@ impl LockedMbox {
     ) -> Result<PublishedDelivery, MboxAppendError> {
         self.append_with(durability, |file| {
             let postmark = Postmark::generated(SystemTime::now()).map_err(io::Error::other)?;
-            write_record_with_ending(&mut FdWriter(file), &postmark, message, output_ending)
+            write_record(&mut FdWriter(file), &postmark, message, output_ending)
         })
     }
 
@@ -329,14 +322,6 @@ impl std::error::Error for MboxAppendError {
 }
 
 pub fn write_record(
-    writer: &mut impl Write,
-    postmark: &Postmark,
-    message: &[u8],
-) -> io::Result<()> {
-    write_record_with_ending(writer, postmark, message, OutputEnding::Normalize)
-}
-
-pub fn write_record_with_ending(
     writer: &mut impl Write,
     postmark: &Postmark,
     message: &[u8],

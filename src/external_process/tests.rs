@@ -494,7 +494,7 @@ fn parses_timeout_at_boundaries_and_in_statement_order() {
 
     let config = crate::config::parse("TIMEOUT=1\nTIMEOUT=2\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     assert_eq!(
         process_timeout_from_config(&config).unwrap(),

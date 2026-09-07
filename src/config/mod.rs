@@ -162,11 +162,7 @@ impl ParseBudget {
 }
 
 impl Config {
-    pub fn expand(self) -> Result<Self, ExpansionError> {
-        expand::expand(self, &[])
-    }
-
-    pub fn expand_with(self, supplied: &[SuppliedVariable]) -> Result<Self, ExpansionError> {
+    pub fn expand(self, supplied: &[SuppliedVariable]) -> Result<Self, ExpansionError> {
         expand::expand(self, supplied)
     }
 

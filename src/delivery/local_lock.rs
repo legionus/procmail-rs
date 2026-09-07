@@ -93,15 +93,6 @@ impl LocalLock {
         method: LockMethod,
         expected_uid: u32,
         timeout: Duration,
-    ) -> io::Result<Self> {
-        Self::acquire_with_mask(path, method, expected_uid, timeout, 0)
-    }
-
-    pub fn acquire_with_mask(
-        path: &Path,
-        method: LockMethod,
-        expected_uid: u32,
-        timeout: Duration,
         mask: u32,
     ) -> io::Result<Self> {
         let retry = match method {

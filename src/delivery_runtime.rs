@@ -445,7 +445,7 @@ fn acquire_configured_lock(
     let mask = settings
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
-    LocalLock::acquire_with_mask(Path::new(path), method, uid, timeout, mask).map_err(|error| {
+    LocalLock::acquire(Path::new(path), method, uid, timeout, mask).map_err(|error| {
         OperationalError::delivery(
             DeliveryFailureClass::from_io_error(&error),
             format!("cannot acquire local lockfile: {error}"),
@@ -709,8 +709,8 @@ fn deliver_file_destination(
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
         .map_err(OrderedStepError::before_publication)?;
-    let locked = MboxFile::open_with_mask(path, mask)
-        .and_then(|mbox| mbox.lock_with_timeout(lock_timeout))
+    let locked = MboxFile::open(path, mask)
+        .and_then(|mbox| mbox.lock(lock_timeout))
         .map_err(|error| {
             let class = DeliveryFailureClass::from_io_error(&error);
             record_delivery(
@@ -838,18 +838,17 @@ fn open_sink(
     match destination.kind() {
         DestinationKind::Maildir => {
             let path = Path::new(destination.path());
-            let sink = MaildirSink::create_with_durability_and_mask(path, durability, mask)
-                .map_err(|error| {
-                    record_delivery(
-                        unresolved,
-                        DeliveryStage::Failed(FailureClass::Transient),
-                        trace,
-                    );
-                    OperationalError::delivery(
-                        DeliveryFailureClass::from_io_error(&error),
-                        format!("cannot open Maildir {}: {error}", path.display()),
-                    )
-                })?;
+            let sink = MaildirSink::create(path, durability, mask).map_err(|error| {
+                record_delivery(
+                    unresolved,
+                    DeliveryStage::Failed(FailureClass::Transient),
+                    trace,
+                );
+                OperationalError::delivery(
+                    DeliveryFailureClass::from_io_error(&error),
+                    format!("cannot open Maildir {}: {error}", path.display()),
+                )
+            })?;
             Ok(Box::new(sink))
         }
         DestinationKind::Mbox => {

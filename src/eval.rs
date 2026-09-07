@@ -294,15 +294,7 @@ fn execute_host_assignment(
 }
 
 impl ExecutionPlan {
-    pub fn compile(config: &Config) -> Self {
-        Self::compile_with_optional_loader(config, None)
-    }
-
-    pub fn compile_with_loader(config: &Config, loader: RcFileLoader) -> Self {
-        Self::compile_with_optional_loader(config, Some(loader))
-    }
-
-    fn compile_with_optional_loader(config: &Config, loader: Option<RcFileLoader>) -> Self {
+    pub fn compile(config: &Config, loader: Option<RcFileLoader>) -> Self {
         let mut initial_statements = config
             .initial_variables()
             .iter()

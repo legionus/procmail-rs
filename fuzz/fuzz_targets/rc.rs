@@ -10,6 +10,6 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     if let Ok(config) = procmail_rs::config::parse(source) {
-        let _ = config.expand();
+        let _ = config.expand(&[]);
     }
 });

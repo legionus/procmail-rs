@@ -9,9 +9,7 @@ use std::{sync::Arc, sync::Barrier, thread};
 
 use crate::config::OutputEnding;
 
-use super::{
-    MAX_POSTMARK_LEN, MboxFile, Postmark, PostmarkError, write_record, write_record_with_ending,
-};
+use super::{LOCK_TIMEOUT, MAX_POSTMARK_LEN, MboxFile, Postmark, PostmarkError, write_record};
 use crate::delivery::maildir::Durability;
 
 fn temporary_path(name: &str) -> std::path::PathBuf {
@@ -35,7 +33,7 @@ fn quotes_every_mboxrd_line_reversibly() {
         b"From hostile header\nX: value\n\nFrom body\n>From quoted\n>>From twice\nnot From safe\n";
     let mut output = Vec::new();
 
-    write_record(&mut output, &postmark(), message).unwrap();
+    write_record(&mut output, &postmark(), message, OutputEnding::Normalize).unwrap();
 
     assert_eq!(
             output,
@@ -53,7 +51,7 @@ fn adds_record_separator_without_changing_input() {
     ] {
         let original = message.to_vec();
         let mut output = Vec::new();
-        write_record(&mut output, &postmark(), message).unwrap();
+        write_record(&mut output, &postmark(), message, OutputEnding::Normalize).unwrap();
         assert!(output.ends_with(suffix));
         assert_eq!(message, original);
     }
@@ -68,8 +66,7 @@ fn raw_mode_adds_only_the_line_ending_required_for_mbox_framing() {
         (&b""[..], &b"1970\n"[..]),
     ] {
         let mut output = Vec::new();
-        write_record_with_ending(&mut output, &postmark(), message, OutputEnding::Preserve)
-            .unwrap();
+        write_record(&mut output, &postmark(), message, OutputEnding::Preserve).unwrap();
         assert!(output.ends_with(suffix), "{output:?}");
     }
 }
@@ -116,7 +113,7 @@ fn opens_regular_mailbox_without_following_symlinks_or_hard_links() {
     let directory = temporary_path("open");
     fs::create_dir(&directory).unwrap();
     let mailbox = directory.join("mailbox");
-    let _opened = MboxFile::open(&mailbox).unwrap();
+    let _opened = MboxFile::open(&mailbox, 0).unwrap();
     assert_eq!(
         fs::metadata(&mailbox).unwrap().permissions().mode() & 0o077,
         0
@@ -124,17 +121,17 @@ fn opens_regular_mailbox_without_following_symlinks_or_hard_links() {
 
     let symlink = directory.join("symlink");
     std::os::unix::fs::symlink(&mailbox, &symlink).unwrap();
-    assert!(MboxFile::open(&symlink).is_err());
+    assert!(MboxFile::open(&symlink, 0).is_err());
 
     let hardlink = directory.join("hardlink");
     fs::hard_link(&mailbox, &hardlink).unwrap();
-    assert!(MboxFile::open(&mailbox).is_err());
+    assert!(MboxFile::open(&mailbox, 0).is_err());
 
     let inaccessible = directory.join("inaccessible");
     fs::write(&inaccessible, b"").unwrap();
     fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o000)).unwrap();
     assert_eq!(
-        MboxFile::open(&inaccessible).err().unwrap().kind(),
+        MboxFile::open(&inaccessible, 0).err().unwrap().kind(),
         std::io::ErrorKind::PermissionDenied
     );
     drop(_opened);
@@ -146,8 +143,11 @@ fn lock_timeout_is_finite() {
     let directory = temporary_path("lock");
     fs::create_dir(&directory).unwrap();
     let mailbox = directory.join("mailbox");
-    let first = MboxFile::open(&mailbox).unwrap().lock().unwrap();
-    let second = MboxFile::open(&mailbox).unwrap();
+    let first = MboxFile::open(&mailbox, 0)
+        .unwrap()
+        .lock(LOCK_TIMEOUT)
+        .unwrap();
+    let second = MboxFile::open(&mailbox, 0).unwrap();
 
     let error = second
         .lock_with_policy(Duration::ZERO, Duration::ZERO)
@@ -164,9 +164,9 @@ fn append_publishes_complete_record_and_reports_path() {
     let directory = temporary_path("append");
     fs::create_dir(&directory).unwrap();
     let mailbox = directory.join("mailbox");
-    let published = MboxFile::open(&mailbox)
+    let published = MboxFile::open(&mailbox, 0)
         .unwrap()
-        .lock()
+        .lock(LOCK_TIMEOUT)
         .unwrap()
         .append(
             b"Subject: test\n\nFrom body",
@@ -188,7 +188,10 @@ fn append_failure_restores_original_length() {
     fs::create_dir(&directory).unwrap();
     let mailbox = directory.join("mailbox");
     fs::write(&mailbox, b"existing").unwrap();
-    let locked = MboxFile::open(&mailbox).unwrap().lock().unwrap();
+    let locked = MboxFile::open(&mailbox, 0)
+        .unwrap()
+        .lock(LOCK_TIMEOUT)
+        .unwrap();
 
     let error = locked
         .append_with(Durability::None, |file| {
@@ -214,7 +217,10 @@ fn durability_failure_is_rolled_back_and_not_published() {
     fs::create_dir(&directory).unwrap();
     let mailbox = directory.join("mailbox");
     fs::write(&mailbox, b"existing").unwrap();
-    let locked = MboxFile::open(&mailbox).unwrap().lock().unwrap();
+    let locked = MboxFile::open(&mailbox, 0)
+        .unwrap()
+        .lock(LOCK_TIMEOUT)
+        .unwrap();
 
     let mut sync_calls = 0usize;
     let error = locked
@@ -247,7 +253,10 @@ fn truncate_failure_reports_failed_rollback_and_preserves_partial_bytes() {
     fs::create_dir(&directory).unwrap();
     let mailbox = directory.join("mailbox");
     fs::write(&mailbox, b"existing").unwrap();
-    let locked = MboxFile::open(&mailbox).unwrap().lock().unwrap();
+    let locked = MboxFile::open(&mailbox, 0)
+        .unwrap()
+        .lock(LOCK_TIMEOUT)
+        .unwrap();
 
     let error = locked
         .append_with_operations(
@@ -282,9 +291,9 @@ fn concurrent_writers_append_intact_records() {
         workers.push(thread::spawn(move || {
             let message = format!("Subject: writer-{index:02}\n\nbody-{index:02}\n");
             barrier.wait();
-            MboxFile::open(&mailbox)
+            MboxFile::open(&mailbox, 0)
                 .unwrap()
-                .lock()
+                .lock(LOCK_TIMEOUT)
                 .unwrap()
                 .append(
                     message.as_bytes(),
@@ -327,9 +336,9 @@ fn malformed_existing_bytes_are_not_parsed_or_rewritten() {
     let original = b"not an mbox\x00\xffwithout newline";
     fs::write(&mailbox, original).unwrap();
 
-    MboxFile::open(&mailbox)
+    MboxFile::open(&mailbox, 0)
         .unwrap()
-        .lock()
+        .lock(LOCK_TIMEOUT)
         .unwrap()
         .append(
             b"Subject: appended\n\nbody",

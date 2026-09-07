@@ -20,7 +20,7 @@ fn bounded_rc_corpus_always_finishes_parsing_and_expansion() {
         for ordinal in 0..combinations {
             let source = generated_ascii_word(ALPHABET, length, ordinal);
             if let Ok(parsed) = config::parse(&source) {
-                let _ = parsed.expand();
+                let _ = parsed.expand(&[]);
             }
         }
     }
@@ -39,7 +39,7 @@ fn bounded_rc_corpus_always_finishes_parsing_and_expansion() {
                 let separator = if condition.is_empty() { "" } else { "\n" };
                 let source = format!("{prefix}:0\n{condition}{separator}{action}\n");
                 if let Ok(parsed) = config::parse(&source) {
-                    let _ = parsed.expand();
+                    let _ = parsed.expand(&[]);
                 }
             }
         }

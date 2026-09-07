@@ -176,7 +176,7 @@ fn run() -> Result<u8, OperationalError> {
         .map_err(|error| OperationalError::Configuration(error.to_string()))?;
     let config = config::parse(root_rc.source())
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
-        .expand_with(&supplied)
+        .expand(&supplied)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     rc_loader
         .account_root_config(&config)
@@ -219,7 +219,7 @@ fn run() -> Result<u8, OperationalError> {
         for warning in warnings {
             eprintln!("procmail-rs: warning: {warning}");
         }
-        if ExecutionPlan::compile(&config).has_external_commands() {
+        if ExecutionPlan::compile(&config, None).has_external_commands() {
             eprintln!(
                 "procmail-rs: warning: configuration contains external shell actions; no command was executed"
             );
@@ -227,7 +227,7 @@ fn run() -> Result<u8, OperationalError> {
         return Ok(ExitStatus::Success as u8);
     }
 
-    let plan = ExecutionPlan::compile_with_loader(&config, rc_loader);
+    let plan = ExecutionPlan::compile(&config, Some(rc_loader));
 
     // A deferred decision needs a replayable private copy of stdin. Requiring
     // MAILDIR before reading headers prevents a configuration failure from

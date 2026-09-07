@@ -75,11 +75,11 @@ fn known_assignment_values_are_validated_equally_at_root_and_in_blocks() {
     ] {
         let root = parse(&format!("{assignment}\n"))
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap_err();
         let nested = parse(&format!(":0\n{{\n{assignment}\n}}\n"))
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap_err();
 
         assert_eq!(root.message, nested.message, "{assignment}");
@@ -268,7 +268,7 @@ fn shell_condition_regex_quoting_accepts_binary_without_reinterpreting_it() {
 fn static_shell_condition_is_reparsed_before_message_input() {
     let error = parse("BROKEN=[\n:0\n* $$BROKEN\nmaildir:unused\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap_err();
     assert_eq!(error.line, 3);
     assert!(error.message.contains("invalid regular expression"));
@@ -279,7 +279,7 @@ fn nested_static_shell_condition_is_reparsed_before_message_input() {
     let supplied = [SuppliedVariable::from_environment("HOME", "$$INNER".to_owned()).unwrap()];
     let error = parse("INNER=[\n:0\n* $$HOME\nmaildir:unused\n")
         .unwrap()
-        .expand_with(&supplied)
+        .expand(&supplied)
         .unwrap_err();
     assert_eq!(error.line, 3);
     assert!(error.message.contains("invalid regular expression"));
@@ -418,7 +418,7 @@ fn resolved_destination(config: &Config, statement_index: usize) -> Destination 
 fn expands_both_variable_reference_forms_sequentially() {
     let config = parse("ROOT=mail\nBOX=${ROOT}/inbox\nMAILDIR=/srv/$ROOT\n:0\nmaildir:$BOX\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     let Statement::Assignment(box_assignment) = &config.statements[1] else {
@@ -438,7 +438,7 @@ fn prepares_named_and_implicit_delivery_lockfiles() {
         "MAILDIR=/srv/mail\nNAME=selected\n:0 c:named-$NAME.lock\nmaildir:one\n:0 :\nmaildir:two\n",
     )
     .unwrap()
-    .expand()
+    .expand(&[])
     .unwrap();
     let Statement::Recipe(named) = &config.statements[2] else {
         panic!("expected named-lock recipe");
@@ -457,7 +457,7 @@ fn prepares_named_and_implicit_delivery_lockfiles() {
     };
     assert_eq!(implicit.lock.as_ref().unwrap().source(), "");
 
-    let error = parse(":0 :\n| command\n").unwrap().expand().unwrap_err();
+    let error = parse(":0 :\n| command\n").unwrap().expand(&[]).unwrap_err();
     assert_eq!(error.line, 1);
     assert_eq!(
         error.message,
@@ -469,7 +469,7 @@ fn prepares_named_and_implicit_delivery_lockfiles() {
 fn expands_lockext_from_its_default_and_in_statement_order() {
     let config = parse("DEFAULT_EXT=$LOCKEXT\nLOCKEXT=.next\nSELECTED_EXT=$LOCKEXT\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     let Statement::Assignment(default_ext) = &config.statements[0] else {
@@ -486,7 +486,7 @@ fn expands_lockext_from_its_default_and_in_statement_order() {
 fn validates_logabstract_after_static_and_conditional_expansion() {
     let config = parse("MODE=no\nLOGABSTRACT=$MODE\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     let Statement::Assignment(assignment) = &config.statements[1] else {
         panic!("expected LOGABSTRACT assignment");
@@ -496,7 +496,7 @@ fn validates_logabstract_after_static_and_conditional_expansion() {
 
     let error = parse("MODE=all\n:0\n{\nLOGABSTRACT=$MODE\n}\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap_err();
     assert_eq!(error.line, 4);
     assert_eq!(
@@ -509,7 +509,7 @@ fn validates_logabstract_after_static_and_conditional_expansion() {
 fn validates_runtime_logabstract_value_when_the_block_executes() {
     let config = parse(":0\n{\nLOGABSTRACT=$MATCH\n}\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     let Statement::Recipe(recipe) = &config.statements[0] else {
         panic!("expected block recipe");
@@ -541,7 +541,7 @@ fn validates_runtime_logabstract_value_when_the_block_executes() {
 fn rejects_lockext_that_adds_a_path_component_after_expansion() {
     let error = parse("SEPARATOR=/\nLOCKEXT=.locks${SEPARATOR}shared\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap_err();
 
     assert_eq!(error.line, 2);
@@ -557,7 +557,7 @@ fn expands_supplied_variables_before_rc_assignments() {
     ];
     let config = parse("FIRST=$BOX\nBOX=rc\nSECOND=$BOX\n:0\nmaildir:$FIRST-$SECOND\n")
         .unwrap()
-        .expand_with(&supplied)
+        .expand(&supplied)
         .unwrap();
 
     let Statement::Recipe(_) = &config.statements[3] else {
@@ -575,10 +575,7 @@ fn inserts_passwd_values_without_rescanning_their_text() {
         SuppliedVariable::from_environment("HOME", "/home/$literal".into()).unwrap(),
         SuppliedVariable::from_environment("LOGNAME", "user".into()).unwrap(),
     ];
-    let config = parse("VALUE=$HOME\n")
-        .unwrap()
-        .expand_with(&supplied)
-        .unwrap();
+    let config = parse("VALUE=$HOME\n").unwrap().expand(&supplied).unwrap();
     let Statement::Assignment(assignment) = &config.statements[0] else {
         panic!("expected assignment");
     };
@@ -591,7 +588,7 @@ fn exposes_the_system_hostname_to_rc_expansion_without_rescanning_it() {
     let supplied = [SuppliedVariable::from_system_hostname("mail-$literal".to_owned()).unwrap()];
     let config = parse("SAVED_HOST=$HOST\nHOST=$SAVED_HOST\n")
         .unwrap()
-        .expand_with(&supplied)
+        .expand(&supplied)
         .unwrap();
 
     let Statement::Assignment(saved) = &config.statements[0] else {
@@ -609,7 +606,7 @@ fn exposes_the_program_version_to_rc_expansion() {
     let supplied = [SuppliedVariable::from_program_version().unwrap()];
     let config = parse("VERSION=$PROCMAIL_VERSION\n")
         .unwrap()
-        .expand_with(&supplied)
+        .expand(&supplied)
         .unwrap();
     let Statement::Assignment(assignment) = &config.statements[0] else {
         panic!("expected VERSION assignment");
@@ -621,13 +618,13 @@ fn exposes_the_program_version_to_rc_expansion() {
 #[test]
 fn rejects_self_references_and_cycles_without_recursive_scanning() {
     for source in ["A=$A\n", "A=$B\nB=$A\n"] {
-        let error = parse(source).unwrap().expand().unwrap_err();
+        let error = parse(source).unwrap().expand(&[]).unwrap_err();
         assert_eq!(error.line, 1);
         assert!(error.message.contains("is not defined"));
     }
 
     let supplied = [SuppliedVariable::parse("A=$A".into()).unwrap()];
-    let error = parse("").unwrap().expand_with(&supplied).unwrap_err();
+    let error = parse("").unwrap().expand(&supplied).unwrap_err();
     assert_eq!(error.line, 0);
     assert_eq!(error.to_string(), "command line: variable A is not defined");
 }
@@ -638,14 +635,14 @@ fn enforces_expansion_depth_at_the_boundary() {
     for depth in 1..=MAX_EXPANSION_DEPTH {
         source.push_str(&format!("V{depth}=$V{}\n", depth - 1));
     }
-    assert!(parse(&source).unwrap().expand().is_ok());
+    assert!(parse(&source).unwrap().expand(&[]).is_ok());
 
     source.push_str(&format!(
         "V{}=$V{}\n",
         MAX_EXPANSION_DEPTH + 1,
         MAX_EXPANSION_DEPTH
     ));
-    let error = parse_wide(&source).unwrap().expand().unwrap_err();
+    let error = parse_wide(&source).unwrap().expand(&[]).unwrap_err();
     assert_eq!(error.line, MAX_EXPANSION_DEPTH + 2);
     assert_eq!(
         error.message,
@@ -657,7 +654,7 @@ fn enforces_expansion_depth_at_the_boundary() {
 fn resolves_paths_against_maildir_active_at_each_recipe() {
     let config = parse("MAILDIR=/srv/first\n:0 c\none/\nMAILDIR=second\n:0\nmaildir:two\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     let Statement::Recipe(_) = &config.statements[1] else {
@@ -681,14 +678,17 @@ fn resolves_paths_against_maildir_active_at_each_recipe() {
 fn bare_paths_resolve_to_mbox_except_for_the_null_device() {
     let mbox = parse("MAILDIR=/srv/mail\n:0\ninbox\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     assert_eq!(
         resolved_destination(&mbox, 1),
         Destination::Mbox("/srv/mail/inbox".into())
     );
 
-    let discard = parse("MAILDIR=/dev\n:0\nnull\n").unwrap().expand().unwrap();
+    let discard = parse("MAILDIR=/dev\n:0\nnull\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
     assert_eq!(
         resolved_destination(&discard, 1),
         Destination::Discard("/dev/null".into())
@@ -699,7 +699,7 @@ fn bare_paths_resolve_to_mbox_except_for_the_null_device() {
 fn runtime_bare_path_is_classified_after_variable_expansion() {
     let config = parse("MAILDIR=/mail\n:0\n${LASTFOLDER}\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     let Statement::Recipe(recipe) = &config.statements[1] else {
         panic!("expected recipe");
@@ -719,14 +719,14 @@ fn runtime_bare_path_is_classified_after_variable_expansion() {
 fn rejects_unmarked_destination_lists_after_expansion() {
     let error = parse("BOX=first second\n:0\n$BOX\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap_err();
     assert_eq!(
         error.message,
         "multiple unmarked mailbox destinations are not supported"
     );
 
-    let config = parse(":0\n${LASTFOLDER}/\n").unwrap().expand().unwrap();
+    let config = parse(":0\n${LASTFOLDER}/\n").unwrap().expand(&[]).unwrap();
     let Statement::Recipe(recipe) = &config.statements[0] else {
         panic!("expected recipe");
     };
@@ -744,14 +744,14 @@ fn rejects_unmarked_destination_lists_after_expansion() {
     assert!(
         parse("BOX=path with spaces\n:0\nmbox:$BOX\n")
             .unwrap()
-            .expand()
+            .expand(&[])
             .is_ok()
     );
 }
 
 #[test]
 fn rejects_undefined_forward_references() {
-    let error = parse("A=$B\nB=value\n").unwrap().expand().unwrap_err();
+    let error = parse("A=$B\nB=value\n").unwrap().expand(&[]).unwrap_err();
     assert_eq!(error.message, "variable B is not defined");
 }
 
@@ -759,7 +759,7 @@ fn rejects_undefined_forward_references() {
 fn resolves_runtime_path_only_when_it_is_used() {
     let config = parse("MAILDIR=/mail\n:0\nmaildir:${LASTFOLDER}-related\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     let Statement::Recipe(recipe) = &config.statements[1] else {
         panic!("expected recipe");
@@ -781,7 +781,7 @@ fn resolves_runtime_path_only_when_it_is_used() {
 fn expands_destinations_inside_recipe_blocks() {
     let config = parse("MAILDIR=/mail\nBOX=lists\n:0\n{\n:0\nmaildir:$BOX/inbox\n}\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     let Statement::Recipe(parent) = &config.statements[2] else {
         panic!("expected parent recipe");
@@ -805,7 +805,7 @@ fn expands_destinations_inside_recipe_blocks() {
 #[test]
 fn rejects_unsupported_and_malformed_references() {
     for source in ["A=$$\n", "A=${NAME:=value}\n", "A=${NAME\n", "A=$\n"] {
-        assert!(parse(source).unwrap().expand().is_err(), "{source:?}");
+        assert!(parse(source).unwrap().expand(&[]).is_err(), "{source:?}");
     }
 }
 
@@ -815,7 +815,7 @@ fn rejects_unsupported_procmail_variables_inside_expansions() {
         let value = format!("${{{name}}}");
         let error = parse(&format!("VALUE={value}\n"))
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap_err();
         assert_eq!(error.line, 1, "{name}");
         assert_eq!(
@@ -829,7 +829,7 @@ fn rejects_unsupported_procmail_variables_inside_expansions() {
 fn follows_shell_like_name_boundaries() {
     let config = parse("NAME=mail\nNAMEsuffix=archive\nA=$NAMEsuffix\nB=${NAME}suffix\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     let Statement::Assignment(a) = &config.statements[2] else {
@@ -862,7 +862,7 @@ E3="\."
 T0=\`printf\`
 T1="\`printf\`"
 "#;
-    let config = parse(source).unwrap().expand().unwrap();
+    let config = parse(source).unwrap().expand(&[]).unwrap();
     let values = config
         .statements
         .iter()
@@ -902,7 +902,7 @@ fn expands_shell_like_defaults_lazily() {
             "EMPTY=\nROOT=/mail\nA=${MISSING:-$ROOT/inbox}\nB=${EMPTY:-${MISSING:-fallback}}\nC=${ROOT:-$UNDEFINED}\n",
         )
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     for (index, expected) in [(2, "/mail/inbox"), (3, "fallback"), (4, "/mail")] {
@@ -922,11 +922,11 @@ fn bounds_nested_default_syntax_depth() {
     within_limit.push_str("value");
     within_limit.push_str(&"}".repeat(MAX_EXPANSION_DEPTH));
     let source = format!("A={within_limit}\n");
-    assert!(parse(&source).unwrap().expand().is_ok());
+    assert!(parse(&source).unwrap().expand(&[]).is_ok());
 
     let beyond_limit = format!("${{OUTER:-{within_limit}}}");
     let source = format!("A={beyond_limit}\n");
-    let error = parse_wide(&source).unwrap().expand().unwrap_err();
+    let error = parse_wide(&source).unwrap().expand(&[]).unwrap_err();
     assert_eq!(
         error.message,
         format!("variable expansion exceeds the hard depth limit of {MAX_EXPANSION_DEPTH}")
@@ -937,7 +937,7 @@ fn bounds_nested_default_syntax_depth() {
 fn resolves_runtime_defaults_without_rescanning_values() {
     let config = parse("MAILDIR=/mail\n:0\nmaildir:${LASTFOLDER:-$MAILDIR}/next\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     let Statement::Recipe(recipe) = &config.statements[1] else {
         panic!("expected recipe");
@@ -961,7 +961,7 @@ fn resolves_runtime_defaults_without_rescanning_values() {
 fn resolves_deferred_logfile_against_the_active_maildir() {
     let config = parse("MAILDIR=/mail\nNAME=`printf logs/run`\nLOGFILE=$NAME\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     let Statement::Assignment(logfile) = &config.statements[2] else {
         panic!("expected LOGFILE assignment");
@@ -984,7 +984,7 @@ fn bounds_expanded_paths_before_allocation_growth() {
         "a".repeat(MAX_PATH_EXPRESSION_LEN),
         "b"
     );
-    let error = parse_wide(&source).unwrap().expand().unwrap_err();
+    let error = parse_wide(&source).unwrap().expand(&[]).unwrap_err();
 
     assert_eq!(error.line, 4);
     assert_eq!(
@@ -1003,7 +1003,7 @@ fn bounds_expanded_assignment_values_at_the_boundary() {
     ] {
         let suffix = "b".repeat(length - prefix.len());
         let source = format!("PREFIX={prefix}\nVALUE=${{PREFIX}}{suffix}\n");
-        let result = parse_wide(&source).unwrap().expand();
+        let result = parse_wide(&source).unwrap().expand(&[]);
 
         if length <= MAX_ASSIGNMENT_VALUE_LEN {
             let config = result.unwrap();
@@ -1031,7 +1031,7 @@ fn linebuf_rejects_a_following_expansion_before_growth() {
         "LINEBUF=128\nPREFIX={prefix}\nVALUE=$PREFIX$PREFIX\n"
     ))
     .unwrap();
-    let error = config.expand().unwrap_err();
+    let error = config.expand(&[]).unwrap_err();
 
     assert_eq!(error.line, 3);
     assert_eq!(
@@ -1044,7 +1044,7 @@ fn linebuf_rejects_a_following_expansion_before_growth() {
 fn bounds_expanded_shell_settings() {
     let prefix = "x".repeat(MAX_SHELL_SETTING_LEN / 2 + 1);
     let source = format!("PREFIX={prefix}\nSHELL=$PREFIX$PREFIX\n");
-    let error = parse_wide(&source).unwrap().expand().unwrap_err();
+    let error = parse_wide(&source).unwrap().expand(&[]).unwrap_err();
 
     assert_eq!(error.line, 2);
     assert_eq!(
@@ -1063,7 +1063,7 @@ fn bounds_expanded_destination_paths_at_the_boundary() {
     ] {
         let suffix = "b".repeat(length - prefix.len());
         let source = format!("PREFIX={prefix}\n:0\nmaildir:${{PREFIX}}{suffix}\n");
-        let result = parse_wide(&source).unwrap().expand();
+        let result = parse_wide(&source).unwrap().expand(&[]);
         if length <= MAX_PATH_EXPRESSION_LEN {
             let config = result.unwrap();
             let resolved = resolved_destination(&config, 1);
@@ -1085,7 +1085,7 @@ fn bounds_maildir_path_join_before_allocation_growth() {
         "MAILDIR=/{}\n:0\nmaildir:child\n",
         "a".repeat(MAX_PATH_EXPRESSION_LEN - 1)
     );
-    let error = parse_wide(&source).unwrap().expand().unwrap_err();
+    let error = parse_wide(&source).unwrap().expand(&[]).unwrap_err();
 
     assert_eq!(error.line, 3);
     assert_eq!(
@@ -1103,7 +1103,7 @@ fn bounds_maildir_path_join_at_the_boundary() {
     ] {
         let base_len = length - 2;
         let source = format!("MAILDIR=/{}\n:0\nmaildir:x\n", "a".repeat(base_len - 1));
-        let result = parse_wide(&source).unwrap().expand();
+        let result = parse_wide(&source).unwrap().expand(&[]);
 
         if length <= MAX_PATH_EXPRESSION_LEN {
             let config = result.unwrap();
@@ -1163,7 +1163,7 @@ fn validates_paths_after_variable_expansion() {
         "BAD=one/./two\n:0 :$BAD\nmaildir:target\n",
         "BAD=box/\n:0\nmbox:$BAD\n",
     ] {
-        assert!(parse(source).unwrap().expand().is_err(), "{source:?}");
+        assert!(parse(source).unwrap().expand(&[]).is_err(), "{source:?}");
     }
 }
 
@@ -1171,7 +1171,7 @@ fn validates_paths_after_variable_expansion() {
 fn leaves_regex_patterns_unchanged() {
     let config = parse("NAME=value\n:0\n* ^Subject: $NAME$\ninbox/\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
     let Statement::Recipe(recipe) = &config.statements[1] else {
         panic!("expected recipe");

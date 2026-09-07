@@ -71,19 +71,7 @@ pub struct MaildirSink {
 }
 
 impl MaildirSink {
-    pub fn create(path: &Path) -> io::Result<Self> {
-        Self::create_with_durability(path, Durability::None)
-    }
-
-    pub fn create_with_durability(path: &Path, durability: Durability) -> io::Result<Self> {
-        Self::create_with_durability_and_mask(path, durability, 0)
-    }
-
-    pub fn create_with_durability_and_mask(
-        path: &Path,
-        durability: Durability,
-        mask: u32,
-    ) -> io::Result<Self> {
+    pub fn create(path: &Path, durability: Durability, mask: u32) -> io::Result<Self> {
         let maildir = open_directory_path(path)?;
 
         // Validate all three standard components before creating a pending

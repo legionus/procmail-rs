@@ -95,7 +95,7 @@ fn evaluate(
     message: &Message,
     delivery: &mut impl Delivery,
 ) -> Result<Outcome, EvalError> {
-    let plan = ExecutionPlan::compile(config);
+    let plan = ExecutionPlan::compile(config, None);
     let prepared_matching = PreparedMatchingMessage::new(message, plan.needs_message_contents());
     let matching = Some(prepared_matching.views(message));
     let mut runtime = RuntimeVariables::default();
@@ -138,7 +138,7 @@ fn evaluate(
 }
 
 fn compile(source: &str) -> ExecutionPlan {
-    ExecutionPlan::compile(&config::parse(source).unwrap())
+    ExecutionPlan::compile(&config::parse(source).unwrap(), None)
 }
 
 fn destinations(plan: &DeliveryPlan) -> Vec<Destination> {
@@ -174,9 +174,9 @@ fn header_edit_updates_following_header_rules_without_buffering_body() {
         ":0\nheaders {\n set X-State: new\n}\n:0\n* ^X-State: new$\nmaildir:selected\n",
     )
     .unwrap()
-    .expand()
+    .expand(&[])
     .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut head = head(b"X-State: old\n\nbody");
     let mut runtime = RuntimeVariables::default();
 
@@ -198,9 +198,9 @@ fn ordered_header_edit_updates_later_delivery_bytes() {
         ":0 B\n* needle\nheaders {\n add X-Body-Matched: yes\n}\n:0\n* ^X-Body-Matched: yes$\nmaildir:selected\n",
     )
     .unwrap()
-    .expand()
+    .expand(&[])
     .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"Subject: test\n\nneedle body";
     let mut runtime = RuntimeVariables::default();
     let mut delivered = Vec::new();
@@ -231,9 +231,9 @@ fn ordered_header_edit_updates_later_delivery_bytes() {
 fn external_action_observes_edited_headers() {
     let config = config::parse(":0\nheaders {\n set X-State: new\n}\n:0 w\n| consume\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"X-State: old\n\nbody";
     let mut runtime = RuntimeVariables::default();
     let mut calls = 0usize;
@@ -283,9 +283,9 @@ fn computes_static_input_requirements() {
 fn static_shell_condition_escapes_variable_text_and_stays_header_only() {
     let config = config::parse("NEEDLE=a.b\n:0\n* $^Subject: $\\NEEDLE$\nmaildir:selected\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     assert_eq!(
         plan.requirements(),
         InputRequirements {
@@ -322,9 +322,9 @@ fn runtime_shell_condition_reparses_match_as_a_size_test() {
     let config =
         config::parse(":0 c\n* ^X-Condition: \\/(.*)$\nmbox:first\n:0\n* $$MATCH\nmbox:second\n")
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"X-Condition: < 128\n\nbody";
     let mut runtime = RuntimeVariables::default();
     let mut paths = Vec::new();
@@ -350,9 +350,9 @@ fn runtime_shell_condition_can_reparse_to_a_program_test() {
     let config =
         config::parse(":0 c\n* ^X-Condition: \\/(.*)$\nmbox:first\n:0\n* $$MATCH\nmbox:second\n")
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"X-Condition: ? selected-command\n\nbody";
     let header_len = b"X-Condition: ? selected-command\n\n".len();
     let mut runtime = RuntimeVariables::default();
@@ -433,7 +433,7 @@ fn capture_action_requirements_follow_h_and_b_flags() {
 #[test]
 fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
     let config = config::parse("VALUE=pre`first`mid`second`post\n:0\nmaildir:selected\n").unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"Subject: test\n\nbody";
     let mut runtime = RuntimeVariables::default();
     let mut trace = NoTrace;
@@ -468,9 +468,9 @@ fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
 fn destination_command_substitution_uses_complete_message_and_runtime_values() {
     let config = config::parse("MAILDIR=/mail\nBOX=archive\n:0\nmbox:`choose`-$BOX\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     assert_eq!(
         plan.requirements(),
         InputRequirements {
@@ -511,9 +511,9 @@ fn destination_command_output_obeys_active_linebuf() {
     for length in [127, 128, 129] {
         let config = config::parse("MAILDIR=/mail\nLINEBUF=128\n:0\nmbox:`choose`\n")
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap();
-        let plan = ExecutionPlan::compile(&config);
+        let plan = ExecutionPlan::compile(&config, None);
         let mut runtime = RuntimeVariables::default();
         let mut delivered = false;
         let result = plan.execute_ordered(
@@ -551,9 +551,9 @@ fn destination_command_output_obeys_active_linebuf() {
 fn destination_command_rejects_non_utf8_output_before_delivery() {
     let config = config::parse("MAILDIR=/mail\n:0\nmbox:`choose`\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut delivered = false;
     let result = plan.execute_ordered(
         MappedMessageInput::new(b"X: y\n\nbody", 6, None),
@@ -582,7 +582,7 @@ fn destination_command_rejects_non_utf8_output_before_delivery() {
 #[test]
 fn ordered_capture_uses_selected_area_strips_one_lf_and_continues() {
     let config = config::parse(":0 hW\nVALUE=| capture\n:0\nmaildir:selected\n").unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"Subject: test\n\nbody";
     let mut runtime = RuntimeVariables::default();
     let mut trace = NoTrace;
@@ -620,9 +620,9 @@ fn ordered_capture_uses_selected_area_strips_one_lf_and_continues() {
 fn header_capture_runs_without_body_staging_and_updates_later_paths() {
     let config = config::parse(":0 h\nVALUE=| capture\nNEXT=$VALUE\n:0\nmaildir:selected\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut head = head(b"Subject: test\n\nbody-not-read");
     let mut runtime = RuntimeVariables::default();
     let mut called = false;
@@ -658,9 +658,9 @@ fn header_capture_runs_without_body_staging_and_updates_later_paths() {
 fn failed_header_capture_preserves_value_and_selects_error_handler() {
     let config = config::parse("VALUE=old\n:0 hW\nVALUE=| capture\n:0 e\nmaildir:recovered\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut head = head(b"Subject: test\n\nbody-not-read");
     let mut runtime = RuntimeVariables::default();
 
@@ -689,9 +689,9 @@ fn failed_header_capture_preserves_value_and_selects_error_handler() {
 fn successful_header_capture_selects_success_handler() {
     let config = config::parse(":0 hW\nVALUE=| capture\n:0 a\nmaildir:succeeded\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut head = head(b"Subject: test\n\nbody-not-read");
     let mut runtime = RuntimeVariables::default();
 
@@ -720,9 +720,9 @@ fn header_capture_validates_output_limit_before_replacing_value() {
     let config =
         config::parse("VALUE=old\nLINEBUF=128\n:0 h\nVALUE=| capture\n:0\nmaildir:selected\n")
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
 
     for length in [127, 128, 129] {
         let mut head = head(b"Subject: test\n\nbody-not-read");
@@ -757,9 +757,9 @@ fn failed_backquoted_fragment_does_not_publish_a_partial_value() {
     let config =
         config::parse("VALUE=old\nVALUE=pre`first`middle`second`post\n:0\nmaildir:selected\n")
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"Subject: test\n\nbody";
     let mut runtime = RuntimeVariables::default();
 
@@ -790,9 +790,9 @@ fn failed_backquoted_fragment_does_not_publish_a_partial_value() {
 fn metadata_trace_excludes_capture_command_output_and_message_values() {
     let config = config::parse(":0 h\nCAPTURED=| command-secret\n:0\nmaildir:selected\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut head = head(b"X-Secret: header-secret\n\nbody-secret");
     let mut runtime = RuntimeVariables::default();
     let mut trace = BoundedTraceWriter::new(Vec::new());
@@ -851,9 +851,9 @@ fn finds_ordered_delivery_inside_the_compiled_tree() {
 fn forwards_evaluation_events_to_the_selected_sink() {
     let config = config::parse("BOX=inbox\n:0\n* ^Subject: wanted$\nmaildir:$BOX\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut runtime = RuntimeVariables::default();
     let mut trace = MemoryTrace::default();
 
@@ -894,9 +894,9 @@ fn forwards_evaluation_events_to_the_selected_sink() {
 fn executes_assignments_after_the_final_recipe() {
     let config = config::parse(":0\n* ^X-Never: yes$\nmaildir:unused\nAFTER=tail\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut runtime = RuntimeVariables::default();
 
     let result = plan.evaluate_headers_with_runtime(&head(b"Subject: test\n\nbody"), &mut runtime);
@@ -911,9 +911,9 @@ fn nested_assignment_uses_runtime_capture_before_delivery() {
         ":0\n* ^Subject: \\/(.*)$\n{\nBOX=${MATCH1:-fallback}\n:0\nmaildir:$BOX\n}\n",
     )
     .unwrap()
-    .expand()
+    .expand(&[])
     .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut runtime = RuntimeVariables::default();
 
     let raw = b"Subject: selected\n\nbody";
@@ -943,9 +943,9 @@ fn nested_assignment_uses_runtime_capture_before_delivery() {
 fn skipped_block_does_not_apply_its_assignment() {
     let config = config::parse(":0\n* ^X-Select: yes$\n{\nBOX=selected\n}\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut runtime = RuntimeVariables::default();
 
     let result =
@@ -960,9 +960,9 @@ fn nested_maildir_changes_the_base_for_following_destination() {
     let config =
         config::parse("MAILDIR=/srv/mail\n:0\n{\nMAILDIR=selected\n:0\nmaildir:inbox\n}\n")
             .unwrap()
-            .expand()
+            .expand(&[])
             .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"Subject: test\n\nbody";
     let mut runtime = RuntimeVariables::default();
     let HeaderEvaluation::NeedsMessage(continuation) =
@@ -989,9 +989,9 @@ fn rendered_default_trace_excludes_message_and_configuration_values() {
             "TOKEN=variable-secret\n:0 c\n* ^Subject: header-secret$\nmaildir:path-secret\n:0\nmaildir:final-secret\n",
         )
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut runtime = RuntimeVariables::default();
     let mut trace = BoundedTraceWriter::new(Vec::new());
 
@@ -1024,9 +1024,9 @@ fn rendered_trace_excludes_edited_header_names_and_values() {
         ":0\nheaders {\n add X-Private-Edited-Name: private-edited-value\n}\n:0\nmaildir:selected\n",
     )
     .unwrap()
-    .expand()
+    .expand(&[])
     .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut head = head(b"Subject: test\n\nbody");
     let mut runtime = RuntimeVariables::default();
     let mut trace = BoundedTraceWriter::new(Vec::new());
@@ -1044,9 +1044,9 @@ fn rendered_trace_excludes_edited_header_names_and_values() {
 fn variable_values_require_an_explicit_high_detail_sink() {
     let config = config::parse("TOKEN=secret-value\n:0\nmaildir:inbox\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let mut runtime = RuntimeVariables::default();
     let mut trace = BoundedTraceWriter::with_detail(Vec::new(), crate::trace::TraceDetail::Values);
 
@@ -1064,9 +1064,9 @@ fn explains_plan_shape_without_private_configuration_values() {
             "PRIVATE_TOKEN=do-not-print\n:0 HBc\n* ! private-pattern\nmaildir:${LASTFOLDER:-private-path}\n",
         )
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
-    let explanation = ExecutionPlan::compile(&config).explain();
+    let explanation = ExecutionPlan::compile(&config, None).explain();
 
     assert!(explanation.requirements().needs_headers);
     assert!(explanation.requirements().needs_body_contents);
@@ -1105,9 +1105,9 @@ fn explains_header_operation_kinds_without_private_fields() {
         ":0\nheaders {\n remove X-Secret-Remove\n set X-Secret-Set: secret-set-value\n add X-Secret-Add: secret-add-value\n add X-Other-Add: other-add-value\n prepend X-Secret-Prepend: secret-prepend-value\n}\n",
     )
     .unwrap()
-    .expand()
+    .expand(&[])
     .unwrap();
-    let explanation = ExecutionPlan::compile(&config).explain();
+    let explanation = ExecutionPlan::compile(&config, None).explain();
     let [recipe] = explanation.recipes() else {
         panic!("expected one recipe");
     };
@@ -1136,8 +1136,11 @@ fn explains_header_operation_kinds_without_private_fields() {
 
 #[test]
 fn explains_static_null_destination_as_discard() {
-    let config = config::parse(":0\n/dev/null\n").unwrap().expand().unwrap();
-    let explanation = ExecutionPlan::compile(&config).explain();
+    let config = config::parse(":0\n/dev/null\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    let explanation = ExecutionPlan::compile(&config, None).explain();
     let [recipe] = explanation.recipes() else {
         panic!("expected one recipe");
     };
@@ -1892,9 +1895,9 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
         "MAILDIR=/mail\nLOCKMETHOD=flock\nLOCKTIMEOUT=7\nUMASK=077\nLOCKNAME=block.lock\n:0 : $LOCKNAME\n{\n:0\nmaildir:selected\n}\n",
     )
     .unwrap()
-    .expand()
+    .expand(&[])
     .unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let plan = ExecutionPlan::compile(&config, None);
     let raw = b"Subject: lock\n\nbody";
     let held = std::rc::Rc::new(std::cell::Cell::new(false));
     let observed = held.clone();

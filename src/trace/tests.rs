@@ -205,7 +205,7 @@ fn reads_procmail_style_trace_controls_in_statement_order() {
             "MAILDIR=/mail\nVERBOSE=off\nLOGFILE=logs/first\nLOGDETAIL=metadata\nVERBOSE=YesPlease\nLOGFILE=$MAILDIR/log\nLOGDETAIL=values\n",
         )
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     let settings = TraceConfig::from_config(&config).unwrap();
@@ -217,10 +217,10 @@ fn reads_procmail_style_trace_controls_in_statement_order() {
 
 #[test]
 fn tracing_is_disabled_without_an_explicit_verbose_assignment() {
-    let empty = crate::config::parse("").unwrap().expand().unwrap();
+    let empty = crate::config::parse("").unwrap().expand(&[]).unwrap();
     let logfile_only = crate::config::parse("LOGFILE=/mail/filter.log\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     for config in [&empty, &logfile_only] {
@@ -257,7 +257,7 @@ fn accepts_documented_procmail_boolean_prefixes() {
 fn rejects_invalid_verbose_value_with_its_source_line() {
     let config = crate::config::parse("VERBOSE=maybe\n:0\nmaildir:inbox\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     let error = TraceConfig::from_config(&config).unwrap_err();
@@ -269,7 +269,7 @@ fn rejects_invalid_verbose_value_with_its_source_line() {
 fn rejects_unknown_log_detail_with_its_source_line() {
     let config = crate::config::parse("LOGDETAIL=everything\n:0\nmaildir:inbox\n")
         .unwrap()
-        .expand()
+        .expand(&[])
         .unwrap();
 
     let error = TraceConfig::from_config(&config).unwrap_err();

@@ -17,8 +17,8 @@ fn header_fallback_matches_reference_procmail_decisions() {
     let source = include_str!("fixtures/differential_trace/header_fallback/procmail-rs.rc");
     let message = include_bytes!("fixtures/differential_trace/header_fallback/message.eml");
     let expected = include_str!("fixtures/differential_trace/header_fallback/expected.events");
-    let config = config::parse(source).unwrap().expand().unwrap();
-    let plan = ExecutionPlan::compile(&config);
+    let config = config::parse(source).unwrap().expand(&[]).unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
     let limits = MessageLimits::from_config(&config).unwrap();
     let mut head = Message::read_headers(&mut Cursor::new(message), limits).unwrap();
     let mut runtime = RuntimeVariables::default();

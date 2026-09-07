@@ -134,7 +134,7 @@ fn supported_milestone_7_behavior_matches_reference_procmail() {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let expected_outcome = fs::read_to_string(directory.join("expected.outcome")).unwrap();
-        let config = config::parse(&source).unwrap().expand().unwrap();
+        let config = config::parse(&source).unwrap().expand(&[]).unwrap();
         let failures = fs::read_to_string(directory.join("fail.destinations"))
             .unwrap_or_default()
             .lines()
@@ -159,7 +159,7 @@ fn evaluate(
     message: &Message,
     recorder: &mut Recorder,
 ) -> DeliveryOutcome {
-    let plan = ExecutionPlan::compile(config);
+    let plan = ExecutionPlan::compile(config, None);
     let mut runtime = RuntimeVariables::default();
     let prepared_matching = PreparedMatchingMessage::new(message, plan.needs_message_contents());
     let matching = Some(prepared_matching.views(message));
