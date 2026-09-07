@@ -415,4 +415,5 @@ fn civil_from_days(days_since_epoch: i64) -> Option<(i64, u32, u32)> {
 }
 
 #[cfg(test)]
+#[path = "../tests/delivery/mbox.rs"]
 mod tests;

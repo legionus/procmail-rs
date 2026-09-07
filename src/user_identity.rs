@@ -137,4 +137,5 @@ impl fmt::Display for UserIdentityError {
 impl std::error::Error for UserIdentityError {}
 
 #[cfg(test)]
+#[path = "tests/user_identity.rs"]
 mod tests;

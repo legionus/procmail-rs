@@ -651,4 +651,5 @@ pub enum FailureClass {
 }
 
 #[cfg(test)]
+#[path = "tests/trace.rs"]
 mod tests;

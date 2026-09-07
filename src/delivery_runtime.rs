@@ -905,5 +905,5 @@ pub(super) fn validate_maildir_path(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[path = "delivery_runtime_tests.rs"]
+#[path = "tests/delivery_runtime.rs"]
 mod tests;

@@ -2138,4 +2138,5 @@ fn push_bounded(
 }
 
 #[cfg(test)]
+#[path = "../tests/config/expand.rs"]
 mod tests;

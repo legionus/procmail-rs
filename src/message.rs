@@ -501,4 +501,5 @@ fn find_body_start(raw: &[u8]) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[path = "tests/message.rs"]
 mod tests;

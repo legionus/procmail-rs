@@ -100,4 +100,5 @@ fn io_error(error: rustix::io::Errno) -> io::Error {
 }
 
 #[cfg(test)]
+#[path = "tests/mapped_file.rs"]
 mod tests;

@@ -714,4 +714,5 @@ fn process_error(message: impl Into<String>) -> ExternalProcessError {
 }
 
 #[cfg(test)]
+#[path = "tests/external_process.rs"]
 mod tests;

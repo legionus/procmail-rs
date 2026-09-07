@@ -44,4 +44,5 @@ impl fmt::Display for HostnameError {
 impl std::error::Error for HostnameError {}
 
 #[cfg(test)]
+#[path = "tests/hostname.rs"]
 mod tests;

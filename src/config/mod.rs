@@ -631,4 +631,5 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 #[cfg(test)]
+#[path = "../tests/config/mod.rs"]
 mod tests;

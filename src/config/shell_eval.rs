@@ -6,6 +6,7 @@ use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use super::{MAX_EXPANSION_DEPTH, ShellExpression, ShellPart};
 
 #[cfg(test)]
+#[path = "../tests/config/shell_eval.rs"]
 mod tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

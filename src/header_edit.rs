@@ -334,5 +334,5 @@ fn header_separator_start(header: &[u8]) -> Option<usize> {
 }
 
 #[cfg(test)]
-#[path = "header_edit/tests.rs"]
+#[path = "tests/header_edit.rs"]
 mod tests;

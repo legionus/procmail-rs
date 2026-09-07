@@ -120,4 +120,5 @@ fn parse_size(input: &str) -> Result<usize, String> {
 }
 
 #[cfg(test)]
+#[path = "tests/limits.rs"]
 mod tests;

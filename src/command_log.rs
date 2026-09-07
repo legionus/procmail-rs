@@ -100,5 +100,5 @@ impl DiagnosticWriteError {
 }
 
 #[cfg(test)]
-#[path = "command_log_tests.rs"]
+#[path = "tests/command_log.rs"]
 mod tests;

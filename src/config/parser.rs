@@ -1618,4 +1618,5 @@ fn validate_program_condition(command: &str, line: usize) -> Result<(), ParseErr
 }
 
 #[cfg(test)]
+#[path = "../tests/config/parser.rs"]
 mod tests;

@@ -226,4 +226,5 @@ fn shell_policy_error(message: impl Into<String>) -> ShellPolicyError {
 }
 
 #[cfg(test)]
+#[path = "tests/environment.rs"]
 mod tests;

@@ -158,4 +158,5 @@ impl CommandDecision {
 }
 
 #[cfg(test)]
+#[path = "tests/external_command.rs"]
 mod tests;

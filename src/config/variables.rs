@@ -638,4 +638,5 @@ impl VariablePolicy {
 }
 
 #[cfg(test)]
+#[path = "../tests/config/variables.rs"]
 mod tests;

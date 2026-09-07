@@ -59,4 +59,5 @@ impl BoundedBytes {
 }
 
 #[cfg(test)]
+#[path = "tests/bounded_bytes.rs"]
 mod tests;

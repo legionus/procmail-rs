@@ -224,4 +224,5 @@ impl RuntimeVariables {
 }
 
 #[cfg(test)]
+#[path = "tests/runtime.rs"]
 mod tests;

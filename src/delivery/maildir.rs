@@ -280,4 +280,5 @@ fn io_error(error: rustix::io::Errno) -> io::Error {
 }
 
 #[cfg(test)]
+#[path = "../tests/delivery/maildir.rs"]
 mod tests;

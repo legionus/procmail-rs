@@ -283,5 +283,5 @@ impl<'a> CompleteMessage<'a> {
 }
 
 #[cfg(test)]
-#[path = "message_tests.rs"]
+#[path = "../tests/eval/message.rs"]
 mod tests;

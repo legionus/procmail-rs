@@ -551,4 +551,5 @@ impl std::error::Error for AppendError {
 }
 
 #[cfg(test)]
+#[path = "tests/delivery/mod.rs"]
 mod tests;

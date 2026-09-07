@@ -310,4 +310,5 @@ fn io_error(error: rustix::io::Errno) -> io::Error {
 }
 
 #[cfg(test)]
+#[path = "../tests/delivery/local_lock.rs"]
 mod tests;

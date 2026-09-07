@@ -384,4 +384,5 @@ impl ExecutionPlan {
 }
 
 #[cfg(test)]
+#[path = "tests/eval/mod.rs"]
 mod tests;
