@@ -85,27 +85,74 @@ pub(crate) fn remove(
     })
 }
 
+pub(crate) fn transform_matching_bytes(
+    value: &[u8],
+    pattern: &[u8],
+    all: bool,
+    mut transform: impl FnMut(u8) -> u8,
+) -> Result<Vec<u8>, PatternError> {
+    let tokens = tokenize(if pattern.is_empty() { b"?" } else { pattern });
+    let candidates = if all {
+        value.len()
+    } else {
+        usize::from(!value.is_empty())
+    };
+    check_steps(candidates, 1, &tokens)?;
+
+    // Tokenize and account for the complete scan once. Checking each byte in
+    // isolation would let a long value repeat a near-limit pattern match and
+    // exceed the intended CPU ceiling without any individual call failing.
+    let mut result = value.to_vec();
+    let bytes = if all {
+        result.as_mut_slice()
+    } else {
+        result.get_mut(..1).unwrap_or_default()
+    };
+    for byte in bytes {
+        if matches!(
+            matching_endpoint_unchecked(std::iter::once(*byte), &tokens, Selection::Longest),
+            Some(1)
+        ) {
+            *byte = transform(*byte);
+        }
+    }
+    Ok(result)
+}
+
 fn matching_endpoint(
     input: impl Iterator<Item = u8>,
     input_len: usize,
     tokens: &[Token],
     selection: Selection,
 ) -> Result<Option<usize>, PatternError> {
-    let width = tokens.len().saturating_add(1);
+    check_steps(1, input_len, tokens)?;
+    Ok(matching_endpoint_unchecked(input, tokens, selection))
+}
+
+fn check_steps(candidates: usize, input_len: usize, tokens: &[Token]) -> Result<(), PatternError> {
     let transition_cost = tokens.iter().fold(0usize, |total, token| {
         total.saturating_add(match token {
             Token::Class(class) => class.ranges.len().max(1),
             _ => 1,
         })
     });
-    let attempted = input_len
-        .checked_add(1)
-        .and_then(|length| length.checked_mul(transition_cost.max(1)));
+    let attempted = candidates
+        .checked_mul(input_len.saturating_add(1))
+        .and_then(|total| total.checked_mul(transition_cost.max(1)));
     if attempted.is_none_or(|steps| steps > MAX_PATTERN_STEPS) {
         return Err(PatternError::TooComplex {
             attempted: attempted.unwrap_or(usize::MAX),
         });
     }
+    Ok(())
+}
+
+fn matching_endpoint_unchecked(
+    input: impl Iterator<Item = u8>,
+    tokens: &[Token],
+    selection: Selection,
+) -> Option<usize> {
+    let width = tokens.len().saturating_add(1);
 
     // Keep one NFA row per pattern token, rather than one entry per message
     // byte. This bounds auxiliary memory by the rc-controlled pattern size;
@@ -116,7 +163,7 @@ fn matching_endpoint(
     close_stars(&mut states, tokens);
     let mut matched = states[tokens.len()].then_some(0);
     if matched.is_some() && selection == Selection::Shortest {
-        return Ok(matched);
+        return matched;
     }
     let mut next = vec![false; width];
     for (offset, byte) in input.enumerate() {
@@ -138,12 +185,12 @@ fn matching_endpoint(
         if states[tokens.len()] {
             let endpoint = offset + 1;
             if selection == Selection::Shortest {
-                return Ok(Some(endpoint));
+                return Some(endpoint);
             }
             matched = Some(endpoint);
         }
     }
-    Ok(matched)
+    matched
 }
 
 fn close_stars(states: &mut [bool], tokens: &[Token]) {

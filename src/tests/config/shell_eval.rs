@@ -270,3 +270,25 @@ fn length_and_pattern_removal_operate_on_bytes() {
         b"5:\xff"
     );
 }
+
+#[test]
+fn case_transformation_preserves_non_ascii_bytes() {
+    let expression = ShellExpression {
+        parts: vec![ShellPart::Variable {
+            name: "VALUE".to_owned(),
+            operation: ParameterOperation::ChangeCase {
+                pattern: literal("?"),
+                direction: CaseDirection::Upper,
+                all: true,
+            },
+        }],
+    };
+    let mut context = TestContext {
+        values: BTreeMap::from([("VALUE".to_owned(), b"a\xffz".to_vec())]),
+    };
+
+    assert_eq!(
+        evaluate(&expression, 32, &mut context).unwrap().bytes,
+        b"A\xffZ"
+    );
+}

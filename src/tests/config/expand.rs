@@ -905,9 +905,77 @@ fn expands_destinations_inside_recipe_blocks() {
 
 #[test]
 fn rejects_unsupported_and_malformed_references() {
-    for source in ["A=$$\n", "A=${NAME^pattern}\n", "A=${NAME\n", "A=$\n"] {
+    for source in ["A=$$\n", "A=${NAME@pattern}\n", "A=${NAME\n", "A=$\n"] {
         assert!(parse(source).is_err(), "{source:?}");
     }
+}
+
+#[test]
+fn expands_ascii_case_transformations() {
+    let config = parse(concat!(
+        "VALUE=aBc-aBc\n",
+        "UPPER_FIRST=${VALUE^[a-z]}\n",
+        "UPPER_ALL=${VALUE^^[a-z]}\n",
+        "LOWER_FIRST=${VALUE,[A-Z]}\n",
+        "LOWER_ALL=${VALUE,,[A-Z]}\n",
+        "DEFAULT_UPPER=${VALUE^}\n",
+        "DEFAULT_LOWER=${VALUE,,}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let values = config
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Assignment(assignment) => {
+                Some((assignment.name.as_str(), assignment.value.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(values["UPPER_FIRST"], "ABc-aBc");
+    assert_eq!(values["UPPER_ALL"], "ABC-ABC");
+    assert_eq!(values["LOWER_FIRST"], "aBc-aBc");
+    assert_eq!(values["LOWER_ALL"], "abc-abc");
+    assert_eq!(values["DEFAULT_UPPER"], "ABc-aBc");
+    assert_eq!(values["DEFAULT_LOWER"], "abc-abc");
+}
+
+#[test]
+fn single_case_transformation_only_considers_the_first_byte() {
+    let config = parse("VALUE=aBc\nRESULT=${VALUE^[B]}\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    let Statement::Assignment(result) = &config.statements[1] else {
+        panic!("expected assignment");
+    };
+
+    assert_eq!(result.value, "aBc");
+}
+
+#[test]
+fn case_pattern_quoting_controls_inserted_metacharacters() {
+    let config = parse(concat!(
+        "VALUE=abc\n",
+        "PATTERN=*\n",
+        "ACTIVE=${VALUE^^$PATTERN}\n",
+        "QUOTED=${VALUE^^\"$PATTERN\"}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let Statement::Assignment(active) = &config.statements[2] else {
+        panic!("expected assignment");
+    };
+    let Statement::Assignment(quoted) = &config.statements[3] else {
+        panic!("expected assignment");
+    };
+
+    assert_eq!(active.value, "ABC");
+    assert_eq!(quoted.value, "abc");
 }
 
 #[test]

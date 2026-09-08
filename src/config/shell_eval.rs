@@ -4,7 +4,7 @@
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
 use super::shell_pattern::{self, Edge, PatternError, Selection};
-use super::{MAX_EXPANSION_DEPTH, ParameterOperation, ShellExpression, ShellPart};
+use super::{CaseDirection, MAX_EXPANSION_DEPTH, ParameterOperation, ShellExpression, ShellPart};
 
 #[cfg(test)]
 #[path = "../tests/config/shell_eval.rs"]
@@ -121,6 +121,21 @@ fn evaluate_at<C: EvaluationContext>(
                     append(&mut output, &selected, limit, context)?;
                     continue;
                 }
+                if let ParameterOperation::ChangeCase {
+                    pattern,
+                    direction,
+                    all,
+                } = operation
+                {
+                    let value = found.ok_or_else(|| context.missing_variable(name))?;
+                    let pattern =
+                        evaluate_word(pattern, &output, limit, nesting, context, assignments)?;
+                    let transformed =
+                        change_case(&value.bytes, &pattern.bytes, *direction, *all, context)?;
+                    result_depth = result_depth.max(value.depth).max(pattern.depth);
+                    append(&mut output, &transformed, limit, context)?;
+                    continue;
+                }
                 if matches!(operation, ParameterOperation::ErrorIfUnsetOrEmpty(_))
                     && (!is_set || is_empty)
                 {
@@ -197,6 +212,20 @@ fn evaluate_at<C: EvaluationContext>(
         depth: result_depth,
         assignments: Vec::new(),
     })
+}
+
+fn change_case<C: EvaluationContext>(
+    value: &[u8],
+    pattern: &[u8],
+    direction: CaseDirection,
+    all: bool,
+    context: &C,
+) -> Result<Vec<u8>, C::Error> {
+    shell_pattern::transform_matching_bytes(value, pattern, all, |byte| match direction {
+        CaseDirection::Upper => byte.to_ascii_uppercase(),
+        CaseDirection::Lower => byte.to_ascii_lowercase(),
+    })
+    .map_err(|error| context.pattern_error(error))
 }
 
 fn removal_operation(

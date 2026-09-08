@@ -9,7 +9,7 @@ use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
 use super::shell_eval::{self, EvaluationContext, EvaluationDepth, UnsupportedPart, VariableValue};
 use super::{
-    Assignment, AssignmentPath, AssignmentTarget, Config, Destination, HeaderAction,
+    Assignment, AssignmentPath, AssignmentTarget, CaseDirection, Config, Destination, HeaderAction,
     HeaderOperation, HeaderValue, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
     MAX_PATH_EXPRESSION_LEN, ParameterOperation, PathExpression, RcFileExpression, Recipe,
     RecipeAction, ShellExpandedCondition, ShellExpression, ShellPart, Statement, SuppliedVariable,
@@ -1882,6 +1882,15 @@ fn bind_parameter_operation(
                 longest: *longest,
             })
         }
+        ParameterOperation::ChangeCase {
+            pattern,
+            direction,
+            all,
+        } => Ok(ParameterOperation::ChangeCase {
+            pattern: bind(pattern, lookup)?,
+            direction: *direction,
+            all: *all,
+        }),
     }
 }
 
@@ -2495,6 +2504,22 @@ impl<'a> ExpressionParser<'a> {
                     longest: true,
                 },
             )),
+            Some(b"^^") => Ok((
+                name,
+                ParameterOperation::ChangeCase {
+                    pattern: self.parse_parameter_word(nesting, quote, 2, true)?,
+                    direction: CaseDirection::Upper,
+                    all: true,
+                },
+            )),
+            Some(b",,") => Ok((
+                name,
+                ParameterOperation::ChangeCase {
+                    pattern: self.parse_parameter_word(nesting, quote, 2, true)?,
+                    direction: CaseDirection::Lower,
+                    all: true,
+                },
+            )),
             _ if self.bytes.get(self.index) == Some(&b'#') => Ok((
                 name,
                 ParameterOperation::RemovePrefix {
@@ -2507,6 +2532,22 @@ impl<'a> ExpressionParser<'a> {
                 ParameterOperation::RemoveSuffix {
                     pattern: self.parse_parameter_word(nesting, quote, 1, true)?,
                     longest: false,
+                },
+            )),
+            _ if self.bytes.get(self.index) == Some(&b'^') => Ok((
+                name,
+                ParameterOperation::ChangeCase {
+                    pattern: self.parse_parameter_word(nesting, quote, 1, true)?,
+                    direction: CaseDirection::Upper,
+                    all: false,
+                },
+            )),
+            _ if self.bytes.get(self.index) == Some(&b',') => Ok((
+                name,
+                ParameterOperation::ChangeCase {
+                    pattern: self.parse_parameter_word(nesting, quote, 1, true)?,
+                    direction: CaseDirection::Lower,
+                    all: false,
                 },
             )),
             _ if self.bytes.get(self.index) == Some(&b'-') => Ok((

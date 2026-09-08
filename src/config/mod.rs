@@ -526,6 +526,17 @@ pub(crate) enum ParameterOperation {
         pattern: ShellExpression,
         longest: bool,
     },
+    ChangeCase {
+        pattern: ShellExpression,
+        direction: CaseDirection,
+        all: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaseDirection {
+    Upper,
+    Lower,
 }
 
 impl ParameterOperation {
@@ -538,9 +549,9 @@ impl ParameterOperation {
             | Self::AlternateIfSetAndNotEmpty(word)
             | Self::AssignIfUnsetOrEmpty(word) => Some(word),
             Self::ErrorIfUnsetOrEmpty(_) => None,
-            Self::RemovePrefix { pattern, .. } | Self::RemoveSuffix { pattern, .. } => {
-                Some(pattern)
-            }
+            Self::RemovePrefix { pattern, .. }
+            | Self::RemoveSuffix { pattern, .. }
+            | Self::ChangeCase { pattern, .. } => Some(pattern),
         }
     }
 
@@ -564,27 +575,37 @@ impl ParameterOperation {
             | Self::ErrorIfUnsetOrEmpty(_)
             | Self::Length
             | Self::RemovePrefix { .. }
-            | Self::RemoveSuffix { .. } => None,
+            | Self::RemoveSuffix { .. }
+            | Self::ChangeCase { .. } => None,
         }
     }
 
     pub(crate) fn requires_value(&self) -> bool {
         matches!(
             self,
-            Self::Value | Self::Length | Self::RemovePrefix { .. } | Self::RemoveSuffix { .. }
+            Self::Value
+                | Self::Length
+                | Self::RemovePrefix { .. }
+                | Self::RemoveSuffix { .. }
+                | Self::ChangeCase { .. }
         )
     }
 
     pub(crate) fn is_value_transform(&self) -> bool {
         matches!(
             self,
-            Self::Length | Self::RemovePrefix { .. } | Self::RemoveSuffix { .. }
+            Self::Length
+                | Self::RemovePrefix { .. }
+                | Self::RemoveSuffix { .. }
+                | Self::ChangeCase { .. }
         )
     }
 
     pub(crate) fn evaluates_word(&self, is_set: bool, is_empty: bool) -> bool {
         match self {
-            Self::RemovePrefix { .. } | Self::RemoveSuffix { .. } => is_set,
+            Self::RemovePrefix { .. } | Self::RemoveSuffix { .. } | Self::ChangeCase { .. } => {
+                is_set
+            }
             _ => self.selects_word(is_set, is_empty),
         }
     }
@@ -599,6 +620,7 @@ impl ParameterOperation {
                 | Self::Length
                 | Self::RemovePrefix { .. }
                 | Self::RemoveSuffix { .. }
+                | Self::ChangeCase { .. }
         )
     }
 

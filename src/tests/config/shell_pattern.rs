@@ -109,3 +109,16 @@ fn accepts_work_through_the_fixed_step_ceiling() {
         Err(PatternError::TooComplex { .. })
     ));
 }
+
+#[test]
+fn bounds_aggregate_case_transformation_work() {
+    let pattern = vec![b'z'; 1024];
+    let limit = MAX_PATTERN_STEPS / (2 * pattern.len());
+
+    assert!(transform_matching_bytes(&vec![b'a'; limit - 1], &pattern, true, |byte| byte).is_ok());
+    assert!(transform_matching_bytes(&vec![b'a'; limit], &pattern, true, |byte| byte).is_ok());
+    assert!(matches!(
+        transform_matching_bytes(&vec![b'a'; limit + 1], &pattern, true, |byte| byte),
+        Err(PatternError::TooComplex { .. })
+    ));
+}

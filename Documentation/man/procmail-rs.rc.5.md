@@ -81,6 +81,13 @@ it and never includes it in the diagnostic. `word` may be empty.
 `${NAME%%pattern}` apply the corresponding operations to a suffix. If no
 prefix or suffix matches, the value is unchanged.
 
+`${NAME^pattern}` converts the first byte to ASCII uppercase when that byte
+matches `pattern`; `${NAME^^pattern}` applies the conversion to every matching
+byte. `${NAME,pattern}` and `${NAME,,pattern}` provide the corresponding ASCII
+lowercase operations. An omitted or empty pattern behaves as `?`, matching any
+single byte. These operations are byte-oriented and locale-independent:
+ASCII letters change case and every non-ASCII byte is preserved.
+
 Patterns operate on bytes. `*` matches zero or more bytes, `?` matches one
 byte, and bracket expressions select bytes or inclusive byte ranges. A leading
 `!` or `^` negates a class. Backslash quotes the next pattern byte. An
@@ -98,6 +105,7 @@ ARCHIVE=reports/2026/final.tar.gz
 NAME=${ARCHIVE##*/}
 STEM=${NAME%%.*}
 BYTES=${#STEM}
+LOWER=${STEM,,}
 ```
 
 Inserted variable bytes are literal and are not scanned for another expansion.
