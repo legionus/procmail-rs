@@ -58,8 +58,9 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         lock: Option<&str>,
         runtime: &mut RuntimeVariables,
     ) -> Result<(), DeliveryAttemptError<Self::Error>> {
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
         let _local_lock = acquire_recipe_lock(lock, Some(destination), runtime, self.uid)
-            .map_err(DeliveryAttemptError::Recoverable)?;
+            .map_err(classify_execution_error)?;
         let result = if destination.supports_fanout_delivery() {
             deliver_one_sink(destination, message, self.durability, runtime, self.trace)
         } else {
@@ -72,6 +73,7 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
                 self.trace,
             )
         };
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
         result.map_err(|error| {
             if error.can_handle {
                 DeliveryAttemptError::Recoverable(error.error)
@@ -89,10 +91,14 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         input: ExternalActionInput<'_>,
         runtime: &mut RuntimeVariables,
     ) -> Result<Option<procmail_rs::message::Message>, DeliveryAttemptError<Self::Error>> {
-        let _local_lock = acquire_recipe_lock(lock, None, runtime, self.uid)
-            .map_err(DeliveryAttemptError::Recoverable)?;
-        self.command_runner
-            .action(action.command.as_str(), options, input, runtime)
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        let _local_lock =
+            acquire_recipe_lock(lock, None, runtime, self.uid).map_err(classify_execution_error)?;
+        let result = self
+            .command_runner
+            .action(action.command.as_str(), options, input, runtime);
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        result
     }
 
     fn capture(
@@ -104,8 +110,12 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         limit: usize,
         runtime: &mut RuntimeVariables,
     ) -> Result<CapturedCommand, DeliveryAttemptError<Self::Error>> {
-        self.command_runner
-            .capture(command, input, output_ending, options, limit, runtime)
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        let result =
+            self.command_runner
+                .capture(command, input, output_ending, options, limit, runtime);
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        result
     }
 
     fn external_condition(
@@ -114,7 +124,10 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         input: &[u8],
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<Self::Error>> {
-        self.command_runner.condition(command, input, runtime)
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        let result = self.command_runner.condition(command, input, runtime);
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        result
     }
 
     fn replace_global_lock(
@@ -122,6 +135,7 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         path: &str,
         runtime: &mut RuntimeVariables,
     ) -> Result<(), Self::Error> {
+        check_signal()?;
         // Replacing LOCKFILE first releases the preceding global lock. Clear
         // its visible value on failure so later statements cannot treat an
         // unheld path as an active lock.
@@ -146,9 +160,10 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         path: &str,
         runtime: &mut RuntimeVariables,
     ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<Self::Error>> {
+        check_signal().map_err(DeliveryAttemptError::Fatal)?;
         acquire_configured_lock(path, runtime, self.uid)
             .map(|lock| Box::new(lock) as Box<dyn RecipeLockGuard>)
-            .map_err(DeliveryAttemptError::Recoverable)
+            .map_err(classify_execution_error)
     }
 
     fn complete(
@@ -157,6 +172,9 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         runtime: &mut RuntimeVariables,
         state: CompletionState<'_, Self::Error>,
     ) {
+        if procmail_rs::signal_state::received().is_some() {
+            return;
+        }
         self.command_runner
             .trap(message.as_bytes(), runtime, completion_exit_status(state));
     }
@@ -230,12 +248,14 @@ impl DeliveryRuntime {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<(), OperationalError> {
+        check_signal()?;
         let sinks = open_sinks(plan.deliveries(), self.durability, runtime, trace)?;
         let pending = PendingFanout::new(sinks)
             .map_err(|error| OperationalError::Internal(error.to_string()))?;
         let (validated, _) = pending.stream(head, reader).map_err(|error| {
             OperationalError::Input(format!("cannot stream message from stdin: {error}"))
         })?;
+        check_signal()?;
         let published = commit_delivery(validated, plan.deliveries(), runtime, trace)?;
         self.publications
             .record(published, plan.original_delivered())?;
@@ -251,6 +271,7 @@ impl DeliveryRuntime {
         runtime: &mut RuntimeVariables,
         trace: &mut T,
     ) -> Result<(), OperationalError> {
+        check_signal()?;
         let runtime_staging = RuntimeSettings::new(runtime).maildir().map(PathBuf::from);
         let staging_directory = runtime_staging
             .as_deref()
@@ -287,6 +308,7 @@ impl DeliveryRuntime {
         let (validated, _) = pending.stage(head, reader, &mut staging).map_err(|error| {
             OperationalError::Input(format!("cannot stage message from stdin: {error}"))
         })?;
+        check_signal()?;
         let staged = staging.map(MAX_MESSAGE_SIZE, header_len).map_err(|error| {
             OperationalError::Internal(format!("cannot map staged message: {error}"))
         })?;
@@ -304,6 +326,7 @@ impl DeliveryRuntime {
             .map(|header| MatchingMessage::from_normalized_parts(header, matching_raw));
 
         if execution.requires_ordered_delivery() {
+            check_signal()?;
             let host = OrderedDeliveryHost {
                 command_runner: CommandRunner::new(self.limits),
                 durability: self.durability,
@@ -338,6 +361,7 @@ impl DeliveryRuntime {
             .map_err(|error| {
                 OperationalError::PermanentDestination(format!("cannot evaluate message: {error}"))
             })?;
+        check_signal()?;
         let late_deliveries = plan.deliveries().get(early_count..).ok_or_else(|| {
             OperationalError::Internal(
                 "internal error: deferred delivery discarded an early copy destination".to_owned(),
@@ -349,6 +373,7 @@ impl DeliveryRuntime {
         let validated = validated
             .append_bytes(late, staged.as_bytes())
             .map_err(|error| OperationalError::delivery(error.class(), error.to_string()))?;
+        check_signal()?;
         let published = commit_delivery(validated, plan.deliveries(), runtime, trace)?;
         self.publications
             .record(published, plan.original_delivered())?;
@@ -365,9 +390,22 @@ fn completion_exit_status(state: CompletionState<'_, OperationalError>) -> u8 {
         CompletionState::Failed(OrderedExecutionError::Evaluation(_)) => {
             ExitStatus::PermanentDestination as u8
         }
-        CompletionState::Failed(OrderedExecutionError::Delivery(error)) => {
-            error.exit_status() as u8
-        }
+        CompletionState::Failed(OrderedExecutionError::Delivery(error)) => error.exit_code(),
+    }
+}
+
+fn check_signal() -> Result<(), OperationalError> {
+    match procmail_rs::signal_state::received() {
+        Some(signal) => Err(OperationalError::Signaled(signal)),
+        None => Ok(()),
+    }
+}
+
+fn classify_execution_error(error: OperationalError) -> DeliveryAttemptError<OperationalError> {
+    if matches!(error, OperationalError::Signaled(_)) {
+        DeliveryAttemptError::Fatal(error)
+    } else {
+        DeliveryAttemptError::Recoverable(error)
     }
 }
 
@@ -449,6 +487,9 @@ fn acquire_configured_lock(
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
     LocalLock::acquire(Path::new(path), method, uid, timeout, retry, mask).map_err(|error| {
+        if let Some(signal) = procmail_rs::signal_state::received() {
+            return OperationalError::Signaled(signal);
+        }
         OperationalError::delivery(
             DeliveryFailureClass::from_io_error(&error),
             format!("cannot acquire local lockfile: {error}"),
@@ -777,6 +818,7 @@ fn commit_delivery(
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
 ) -> Result<usize, OperationalError> {
+    check_signal()?;
     let result = match validated.commit() {
         Ok(report) => apply_publication(
             PublicationAttempt::published(PublicationResult::Fanout(&report)),

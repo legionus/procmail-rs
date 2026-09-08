@@ -144,9 +144,17 @@ procmail-rs filter --config rules.rc <message.eml
 : No final recipe delivered the original message. Copy destinations may
   already have been published.
 
+**129**, **130**, **131**, or **143**
+
+: Filtering was interrupted by `SIGHUP`, `SIGINT`, `SIGQUIT`, or `SIGTERM`,
+  respectively. An active external command process group is terminated and
+  `TRAP` is not run.
+
 An invoking MTA must retain the message unless **filter** exits with status 0.
 A retry after one of several copy destinations was published can create a
-duplicate at that destination.
+duplicate at that destination. A signal observed before publication prevents
+it; a signal arriving after an atomic Maildir publication or completed mbox
+append cannot retract that delivery and a retry may duplicate it.
 
 # FILES
 

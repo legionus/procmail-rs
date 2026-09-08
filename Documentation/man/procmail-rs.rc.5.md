@@ -917,7 +917,8 @@ shell; timeout terminates its process group with `SIGTERM` followed by
 
 `TRAP` is the last executed non-empty trusted command assigned in statement
 order. It runs after complete input validation and recipe processing, receives
-the final message plus one LF, and writes stdout and stderr to `LOGFILE`.
+the final message plus one LF, and writes stdout and stderr to `LOGFILE`. It is
+not run after `SIGHUP`, `SIGINT`, `SIGQUIT`, or `SIGTERM` interrupts filtering.
 
 ```
 TIMEOUT=60

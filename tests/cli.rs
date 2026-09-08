@@ -4,7 +4,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -36,6 +36,22 @@ fn delivered_messages(path: &std::path::Path) -> Vec<Vec<u8>> {
         .unwrap()
         .map(|entry| fs::read(entry.unwrap().path()).unwrap())
         .collect()
+}
+
+fn send_sigterm(child: &std::process::Child) {
+    let pid = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+}
+
+fn wait_for_path(path: &std::path::Path) {
+    let started = Instant::now();
+    while !path.exists() {
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn assert_message_contents_absent(stderr: &[u8], secrets: &[&str]) {
@@ -1911,6 +1927,175 @@ fn null_include_remains_subject_to_regular_file_checks() {
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
     assert!(String::from_utf8_lossy(&output.stderr).contains("INCLUDERC failed"));
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn sigterm_interrupts_header_input_without_delivery_or_trap() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    let trap = base.join("trap-ran");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nTRAP=\": > {}\"\n:0\nmaildir:selected\n",
+            base.display(),
+            trap.display()
+        ),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    send_sigterm(&child);
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(143), "{:?}", output.stderr);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(delivered_messages(&selected).is_empty());
+    assert!(!trap.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn sigterm_cleans_partial_staging_without_delivery_or_trap() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    let trap = base.join("trap-ran");
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nTRAP=\": > {}\"\n:0 B\n* selected\nmaildir:selected\n",
+            base.display(),
+            trap.display()
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"Subject: staging\n\npartial")
+        .unwrap();
+    let staging = base.join(".procmail-rs-staging");
+    wait_for_path(&staging);
+    send_sigterm(&child);
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(143), "{:?}", output.stderr);
+    assert!(delivered_messages(&selected).is_empty());
+    assert!(!trap.exists());
+    assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn sigterm_interrupts_lock_wait_without_delivery_or_trap() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let selected = base.join("selected");
+    let lock_path = base.join("held.lock");
+    let trap = base.join("trap-ran");
+    create_maildir(&selected);
+    let lock = rustix::fs::open(
+        lock_path.as_os_str().as_bytes(),
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CREATE,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nLOCKSLEEP=8\nLOCKFILE={}\nTRAP=\": > {}\"\n:0\nmaildir:selected\n",
+            base.display(),
+            lock_path.display(),
+            trap.display()
+        ),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: lock\n\nbody")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    send_sigterm(&child);
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(143), "{:?}", output.stderr);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(delivered_messages(&selected).is_empty());
+    assert!(!trap.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn sigterm_terminates_external_process_group_without_error_recipe_or_trap() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let started_marker = base.join("command-started");
+    let fallback = base.join("fallback");
+    let trap = base.join("trap-ran");
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nTRAP=\": > {}\"\n:0 w\n| : > {}; sleep 30\n:0 e\nmaildir:fallback\n",
+            base.display(),
+            trap.display(),
+            started_marker.display()
+        ),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Subject: command\n\nbody")
+        .unwrap();
+    wait_for_path(&started_marker);
+    send_sigterm(&child);
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(143), "{:?}", output.stderr);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(delivered_messages(&fallback).is_empty());
+    assert!(!trap.exists());
     fs::remove_dir_all(base).unwrap();
 }
 

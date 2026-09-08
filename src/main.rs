@@ -30,6 +30,7 @@ use procmail_rs::limits::MessageLimits;
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::RcFileLoader;
 use procmail_rs::runtime::RuntimeVariables;
+use procmail_rs::signal_state::{self, InterruptibleReader, ReceivedSignal};
 use procmail_rs::trace::{NoTrace, TraceConfig};
 use procmail_rs::user_identity::UserIdentity;
 
@@ -81,6 +82,7 @@ enum OperationalError {
     PermanentDestination(String),
     Undelivered(String),
     Internal(String),
+    Signaled(ReceivedSignal),
 }
 
 // Use the established sysexits values when they describe the action a caller
@@ -107,6 +109,7 @@ impl std::fmt::Display for OperationalError {
             | Self::PermanentDestination(message)
             | Self::Undelivered(message)
             | Self::Internal(message) => message,
+            Self::Signaled(signal) => return write!(formatter, "interrupted by {}", signal.name()),
         };
         formatter.write_str(message)
     }
@@ -121,14 +124,15 @@ impl OperationalError {
         }
     }
 
-    fn exit_status(&self) -> ExitStatus {
+    fn exit_code(&self) -> u8 {
         match self {
-            Self::Configuration(_) => ExitStatus::Configuration,
-            Self::Input(_) => ExitStatus::Input,
-            Self::TemporaryDelivery(_) => ExitStatus::TemporaryDelivery,
-            Self::PermanentDestination(_) => ExitStatus::PermanentDestination,
-            Self::Undelivered(_) => ExitStatus::Undelivered,
-            Self::Internal(_) => ExitStatus::Internal,
+            Self::Configuration(_) => ExitStatus::Configuration as u8,
+            Self::Input(_) => ExitStatus::Input as u8,
+            Self::TemporaryDelivery(_) => ExitStatus::TemporaryDelivery as u8,
+            Self::PermanentDestination(_) => ExitStatus::PermanentDestination as u8,
+            Self::Undelivered(_) => ExitStatus::Undelivered as u8,
+            Self::Internal(_) => ExitStatus::Internal as u8,
+            Self::Signaled(signal) => signal.exit_code(),
         }
     }
 }
@@ -138,7 +142,7 @@ fn main() -> ExitCode {
         Ok(status) => ExitCode::from(status),
         Err(error) => {
             eprintln!("procmail-rs: {error}");
-            ExitCode::from(error.exit_status() as u8)
+            ExitCode::from(error.exit_code())
         }
     }
 }
@@ -245,6 +249,11 @@ fn run() -> Result<u8, OperationalError> {
             path.display()
         )));
     }
+    if command.action == Action::Filter {
+        signal_state::install().map_err(|error| {
+            OperationalError::Internal(format!("cannot install signal handlers: {error}"))
+        })?;
+    }
 
     // Runtime rc diagnostics belong to the completed attempt, including an
     // attempt that later fails delivery. Run the action inside a closure so
@@ -265,7 +274,8 @@ fn run() -> Result<u8, OperationalError> {
             let mut delivery_runtime =
                 DeliveryRuntime::new(staging_directory, durability, limits, identity.uid());
             let mut trace = NoTrace;
-            let mut stdin = io::stdin().lock();
+            let stdin = io::stdin().lock();
+            let mut stdin = InterruptibleReader::new(stdin);
             let mut head = Message::read_headers(&mut stdin, limits).map_err(|error| {
                 OperationalError::Input(format!("cannot read message headers from stdin: {error}"))
             })?;
@@ -319,6 +329,9 @@ fn run() -> Result<u8, OperationalError> {
             // handler may assign it using values produced while filtering.
             // A valid value deliberately replaces a delivery error, matching
             // procmail's final-status override behavior.
+            if let Some(signal) = signal_state::received() {
+                return Err(OperationalError::Signaled(signal));
+            }
             requested_status = parse_requested_exit_code(&runtime)?;
             if requested_status.is_some() {
                 Ok(())

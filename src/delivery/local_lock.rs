@@ -22,6 +22,7 @@ pub const DEFAULT_LOCK_SLEEP: Duration = Duration::from_secs(8);
 const LOCK_FILE_MODE: u32 = 0o600;
 const DOTLOCK_FILE_MODE: u32 = 0o444;
 const MAX_STALE_DOTLOCK_SIZE: u64 = 1024;
+const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LockMethod {
@@ -218,6 +219,7 @@ fn acquire_flock_fd_with(
     // production caller supplies the nonblocking exclusive flock operation.
     let started = Instant::now();
     loop {
+        crate::signal_state::check_io()?;
         match try_lock(file) {
             Ok(()) => return Ok(()),
             Err(rustix::io::Errno::INTR) => continue,
@@ -238,6 +240,7 @@ fn acquire_dotlock(
 ) -> io::Result<LocalLock> {
     let started = Instant::now();
     loop {
+        crate::signal_state::check_io()?;
         match openat(
             &parent,
             name.as_bytes(),
@@ -305,8 +308,17 @@ fn wait_for_retry(
     if remaining.is_zero() {
         return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
     }
-    thread::sleep(retry.min(remaining));
-    Ok(())
+    let delay = retry.min(remaining);
+    let retry_at = Instant::now()
+        .checked_add(delay)
+        .ok_or_else(|| io::Error::other("lock retry deadline overflows"))?;
+    loop {
+        crate::signal_state::check_io()?;
+        let Some(until_retry) = retry_at.checked_duration_since(Instant::now()) else {
+            return Ok(());
+        };
+        thread::sleep(SIGNAL_POLL_INTERVAL.min(until_retry));
+    }
 }
 
 impl Drop for LocalLock {

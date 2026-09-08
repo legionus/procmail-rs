@@ -265,6 +265,7 @@ impl ChildLifecycle {
         stdout: Stdio,
         stderr: Stdio,
     ) -> Result<Self, ExternalProcessError> {
+        crate::signal_state::check_io().map_err(|error| process_error(error.to_string()))?;
         let invocation = policy
             .authorize(environment)
             .map_err(|error| process_error(error.to_string()))?;
@@ -525,6 +526,7 @@ fn read_bounded_output_until(
     let mut output = BoundedBytes::with_capacity(limit, 64 * 1024);
     let mut buffer = [0u8; 8192];
     loop {
+        crate::signal_state::check_io()?;
         let read = match reader.read(&mut buffer) {
             Ok(read) => read,
             Err(error)
@@ -629,6 +631,9 @@ fn wait_for_process_group(
 ) -> Result<(std::process::ExitStatus, bool), ExternalProcessError> {
     let started = Instant::now();
     loop {
+        if crate::signal_state::received().is_some() {
+            return terminate_process_group(child).map(|status| (status, false));
+        }
         if let Some(status) = child
             .try_wait()
             .map_err(|error| process_error(format!("cannot wait for external command: {error}")))?
