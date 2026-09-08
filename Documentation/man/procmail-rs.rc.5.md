@@ -365,10 +365,14 @@ macros does not consume `LINEBUF`, but does consume the translated-pattern and
 compiled-size ceilings.
 
 Procmail chooses the leftmost shortest match except while selecting `MATCH`.
-The **procmail-rs** engine is leftmost-first, so ambiguous alternatives and
-repetitions can select different spans and numbered captures. Weighted scoring
-conditions and their `$=` result are rejected. See the compatibility document
-before migrating expressions that depend on ambiguous match selection.
+For a condition containing `\/`, it selects the leftmost shortest span before
+the reached marker and the leftmost longest suffix after it. The
+**procmail-rs** engine is leftmost-first, so ambiguous alternatives and
+repetitions can select different spans, marker paths, and numbered captures.
+Alternative order therefore matters in **procmail-rs** even where it did not
+affect original procmail. Weighted scoring conditions and their `$=` result are
+rejected. See the compatibility document before migrating expressions that
+depend on ambiguous match selection.
 
 ```
 :0

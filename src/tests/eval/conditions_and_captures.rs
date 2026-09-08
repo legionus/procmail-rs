@@ -500,6 +500,43 @@ fn successful_branch_without_a_marker_preserves_match() {
 }
 
 #[test]
+fn ambiguous_match_selection_follows_the_documented_rust_priority() {
+    // The corresponding original-procmail results are recorded separately in
+    // tests/fixtures/regex_match_selection/reference-behavior.md. Keeping the
+    // deliberate differences visible prevents an engine change from being
+    // mistaken for a harmless regex refactor.
+    for (pattern, subject, expected) in [
+        (r"\/(a|aa)", "aa", "a"),
+        (r"\/(aa|a)", "aa", "aa"),
+        (r"\/a*", "aaa", "aaa"),
+        (r"(a|aa)\/b*", "aabbb", ""),
+        (r"(aa|a)\/b*", "aabbb", "bbb"),
+        (r"(a|aa\/a)", "aaa", "before"),
+        (r"(aa\/a|a)", "aaa", "a"),
+    ] {
+        let plan = compile(&format!(
+            ":0\n* ^Subject: {pattern}\nmaildir:matched\n"
+        ));
+        let mut runtime = RuntimeVariables::default();
+        runtime.set("MATCH", "before");
+        let message = format!("Subject: {subject}\n\nbody");
+
+        let HeaderEvaluation::Decided(delivery) =
+            plan.evaluate_headers_with_runtime(&head(message.as_bytes()), &mut runtime)
+        else {
+            panic!("expected a header decision for {pattern:?}");
+        };
+
+        assert_eq!(
+            destinations(&delivery),
+            [Destination::Maildir("matched".into())],
+            "{pattern}"
+        );
+        assert_eq!(runtime.get("MATCH"), Some(expected), "{pattern}");
+    }
+}
+
+#[test]
 fn failed_capture_condition_clears_previous_values() {
     let plan = compile(":0\n* ^Subject: (wanted)$\nmaildir:matched\n");
     let mut runtime = RuntimeVariables::default();
