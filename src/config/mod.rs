@@ -16,11 +16,11 @@ pub(crate) use parser::{parse_reparsed_condition, parse_with_state};
 pub(crate) use variables::AssignmentPath;
 pub use variables::{
     AssignmentTarget, DEFAULT_LOCK_EXT, DEFAULT_UMASK, MAX_COMMAND_LINE_VARIABLES,
-    MAX_LOCK_TIMEOUT_SECONDS, MAX_PROCESS_TIMEOUT_SECONDS, MessageLimitVariable, RcLimitVariable,
-    SuppliedVariable, SuppliedVariableError, UNSUPPORTED_PROCMAIL_VARIABLES, VariablePolicy,
-    VariableSource, parse_lock_timeout_seconds, parse_process_timeout_seconds, parse_umask,
-    validate_lock_ext, validate_lock_method, validate_log_abstract, validate_trap_command,
-    variable_policy,
+    MAX_LOCK_SLEEP_SECONDS, MAX_LOCK_TIMEOUT_SECONDS, MAX_PROCESS_TIMEOUT_SECONDS,
+    MessageLimitVariable, RcLimitVariable, SuppliedVariable, SuppliedVariableError,
+    UNSUPPORTED_PROCMAIL_VARIABLES, VariablePolicy, VariableSource, parse_lock_sleep_seconds,
+    parse_lock_timeout_seconds, parse_process_timeout_seconds, parse_umask, validate_lock_ext,
+    validate_lock_method, validate_log_abstract, validate_trap_command, variable_policy,
 };
 
 pub const MAX_ASSIGNMENT_NAME_LEN: usize = 128;

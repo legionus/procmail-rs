@@ -46,7 +46,7 @@ a supported regex, assignment value, or destination.
 | External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
 | Logging | `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, and `LOGDETAIL=values`; metadata mode omits sensitive values by default |
 | Process settings | `SHELL`, `SHELLFLAGS`, `PATH`, `TIMEOUT`, `TRAP`, `EXITCODE`, and `UMASK` |
-| Delivery settings | `MAILDIR`, `DURABILITY`, `LOCKMETHOD`, `LOCKFILE`, `LOCKEXT`, and `LOCKTIMEOUT` |
+| Delivery settings | `MAILDIR`, `DURABILITY`, `LOCKMETHOD`, `LOCKFILE`, `LOCKEXT`, `LOCKSLEEP`, and `LOCKTIMEOUT` |
 
 ## Reference audit
 
@@ -80,8 +80,8 @@ a review source; installed procmail-rs tests do not depend on it.
 
 | Status | Variables | Notes |
 | --- | --- | --- |
-| Supported or intentionally narrowed | `HOME`, `LOGNAME`, `PATH`, `SHELL`, `SHELLFLAGS`, `MAILDIR`, `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, `LOCKFILE`, `LOCKEXT`, `LOCKTIMEOUT`, `TIMEOUT`, `HOST`, `UMASK`, `TRAP`, `EXITCODE`, `LASTFOLDER`, `MATCH`, `INCLUDERC`, `SWITCHRC`, `PROCMAIL_VERSION`, and `LINEBUF` | Exact restrictions are recorded in this document and in the limits documentation. `MATCH1`, `MATCH2`, and later numbered captures are procmail-rs additions. |
-| Explicitly rejected | `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, `SHIFT`, and `LIMIT_RC_SIZE` | These names cannot accidentally act as ordinary variables. Implementing `DROPPRIVS` is outside project scope; a bounded `LOCKSLEEP` could later control lock retry intervals. `LIMIT_RC_SIZE` cannot safely configure the read which has already consumed its own assignment. |
+| Supported or intentionally narrowed | `HOME`, `LOGNAME`, `PATH`, `SHELL`, `SHELLFLAGS`, `MAILDIR`, `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, `LOCKFILE`, `LOCKEXT`, `LOCKSLEEP`, `LOCKTIMEOUT`, `TIMEOUT`, `HOST`, `UMASK`, `TRAP`, `EXITCODE`, `LASTFOLDER`, `MATCH`, `INCLUDERC`, `SWITCHRC`, `PROCMAIL_VERSION`, and `LINEBUF` | Exact restrictions are recorded in this document and in the limits documentation. `MATCH1`, `MATCH2`, and later numbered captures are procmail-rs additions. |
+| Explicitly rejected | `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `DROPPRIVS`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, `SHIFT`, and `LIMIT_RC_SIZE` | These names cannot accidentally act as ordinary variables. Implementing `DROPPRIVS` is outside project scope. `LIMIT_RC_SIZE` cannot safely configure the read which has already consumed its own assignment. |
 | Original startup environment behavior | `IFS`, `ENV`, and `PWD` are cleared or preset, and other ambient variables are generally imported. | procmail-rs instead builds a bounded child environment from its runtime variable table. This is deliberate, but rc assignments with these names remain ordinary exported variables. |
 
 ### Coverage of `procmailex(5)` patterns
@@ -303,7 +303,7 @@ of the first matching field. Use a trusted pipe action when broader `formail`
 behavior is required.
 
 Reserved procmail variables `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`,
-`DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`,
+`DROPPRIVS`, `LOG`, `MSGPREFIX`, `NORESRETRY`,
 `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and
 `SHIFT`, as well as the project-reserved `LIMIT_RC_SIZE`, are rejected by name.
 Forward actions beginning with `!` are also rejected. This makes unsupported
@@ -322,7 +322,7 @@ behavior visible instead of silently assigning it another meaning.
 | Runtime rc files | Opens paths using the process filesystem permissions. | Requires trusted regular files owned by the current uid and rejects broadly writable files and symlinks. |
 | Initial variables | Imports a broad process environment. | Gets `HOME` and `LOGNAME` from the current uid and accepts other external values only through `--set`. |
 | `PROCMAIL_VERSION` | Contains the running procmail version number and cannot be changed. | Contains the bounded package version from `Cargo.toml` and cannot be changed. The value identifies procmail-rs and does not claim to be procmail 3.22. |
-| Unsupported reserved variables | Variables such as `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` retain their original special meanings. | Rejects these names and the project-reserved `LIMIT_RC_SIZE` explicitly in assignments, `--set`, and expansion references. Unknown names remain ordinary user variables. |
+| Unsupported reserved variables | Variables such as `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`, `DROPPRIVS`, `LOG`, `MSGPREFIX`, `NORESRETRY`, `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and `SHIFT` retain their original special meanings. | Rejects these names and the project-reserved `LIMIT_RC_SIZE` explicitly in assignments, `--set`, and expansion references. Unknown names remain ordinary user variables. |
 | `LOGABSTRACT` | Defaults to a final abstract containing `From`, `Subject`, destination, and message size; `no` suppresses it and `all` logs every successful delivery. | Accepts only the exact value `no`, including after bounded variable expansion. Abstract logging remains disabled because other modes could expose sensitive header values. A statically known unsupported value is rejected before message input; a runtime-derived value is rejected when its selected assignment executes. |
 | Pipe command parsing | Uses a hybrid direct-command and shell parser. | Runs every trusted pipe command through the configured, policy-checked shell. |
 | Captured NUL bytes | A NUL from a backquoted command terminates the assigned value. | Preserves NUL as variable data. A later external command cannot receive such a value because operating-system environment entries cannot contain NUL. |
@@ -335,8 +335,9 @@ behavior visible instead of silently assigning it another meaning.
 | Local recipe lockfiles | Creates and later removes a named dotlock, or derives its name from the destination. | Defaults to a persistent, ownership-checked file held with `flock`. `LOCKMETHOD=dotlock` selects compatible creation, stale removal, and cleanup with the original pathname-replacement risk. |
 | `LOCKEXT` | Defaults to `.lock` and is appended when deriving a local lockfile name. | Preserves the default and statement-order assignment. The suffix may be empty, is bounded to 4096 bytes, may not contain NUL or `/`, and the complete derived path remains bounded to 4096 bytes. |
 | Implicit pipe lockfile | Attempts to derive a name from redirection found in the command. | Rejected before message input; shell command text is not reinterpreted to guess a lock path. |
-| Lockfile on a recipe block | Documents that a lock on a non-forking block does not work as expected; procmail 3.22 was observed creating and removing the dotlock before the child sequence and logging `Extraneous locallockfile ignored`. | Requires an explicit lockfile name and holds the selected `flock` or dotlock across the complete child sequence. The path and active `LOCKMETHOD`, `LOCKTIMEOUT`, `UMASK`, variables, and `MAILDIR` are resolved when the block is selected. An implicit block lock is rejected because no single destination exists from which to derive it. |
+| Lockfile on a recipe block | Documents that a lock on a non-forking block does not work as expected; procmail 3.22 was observed creating and removing the dotlock before the child sequence and logging `Extraneous locallockfile ignored`. | Requires an explicit lockfile name and holds the selected `flock` or dotlock across the complete child sequence. The path and active `LOCKMETHOD`, `LOCKSLEEP`, `LOCKTIMEOUT`, `UMASK`, variables, and `MAILDIR` are resolved when the block is selected. An implicit block lock is rejected because no single destination exists from which to derive it. |
 | `LOCKFILE` | Replaces the preceding global dotlock and holds the new one until replacement or exit. | Preserves statement-order lifetime while using the active `LOCKMETHOD`; flock remains the default. |
+| `LOCKSLEEP=0` | Retries without a delay. | Rejected to prevent active retry loops. The compatible 8-second default and values from 1 through 86400 seconds control local, global, and mbox lock retry intervals. |
 | `LOCKTIMEOUT=0` | Waits indefinitely without stale-dotlock removal. | Rejected because all lock waits must remain finite. Values from 1 through 86400 seconds are accepted and also bound mbox flock waits. |
 | `LINEBUF` | Defaults to 2048, has a minimum of 128, and may be changed while an rc file executes. Overflow may truncate data and set `PROCMAIL_OVERFLOW`. | Rejects overflow instead of truncating it, has a 1048576-byte ceiling, and accepts only literal top-level assignments because the complete typed recipe tree is built before message filtering. Mail input and trace limits remain separate. |
 | `TIMEOUT=0` | Waits indefinitely for child termination. | Rejected because process waits must remain finite. The 960-second default and values from 1 through 86400 are supported. |

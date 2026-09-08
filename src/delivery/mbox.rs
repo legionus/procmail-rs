@@ -25,7 +25,6 @@ pub const MAX_POSTMARK_LEN: usize = 512;
 const MBOX_FILE_MODE: u32 = 0o600;
 #[cfg(test)]
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 pub struct MboxFile {
     file: OwnedFd,
@@ -155,11 +154,7 @@ impl MboxFile {
         })
     }
 
-    pub fn lock(self, timeout: Duration) -> io::Result<LockedMbox> {
-        self.lock_with_policy(timeout, LOCK_RETRY_INTERVAL)
-    }
-
-    fn lock_with_policy(self, timeout: Duration, retry: Duration) -> io::Result<LockedMbox> {
+    pub fn lock(self, timeout: Duration, retry: Duration) -> io::Result<LockedMbox> {
         acquire_flock_fd(
             &self.file,
             timeout,

@@ -12,6 +12,8 @@ use crate::config::OutputEnding;
 use super::{LOCK_TIMEOUT, MAX_POSTMARK_LEN, MboxFile, Postmark, PostmarkError, write_record};
 use crate::delivery::maildir::Durability;
 
+const LOCK_RETRY: Duration = Duration::from_millis(10);
+
 fn temporary_path(name: &str) -> std::path::PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -145,14 +147,11 @@ fn lock_timeout_is_finite() {
     let mailbox = directory.join("mailbox");
     let first = MboxFile::open(&mailbox, 0)
         .unwrap()
-        .lock(LOCK_TIMEOUT)
+        .lock(LOCK_TIMEOUT, LOCK_RETRY)
         .unwrap();
     let second = MboxFile::open(&mailbox, 0).unwrap();
 
-    let error = second
-        .lock_with_policy(Duration::ZERO, Duration::ZERO)
-        .err()
-        .unwrap();
+    let error = second.lock(Duration::ZERO, Duration::ZERO).err().unwrap();
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
 
     first.unlock().unwrap();
@@ -166,7 +165,7 @@ fn append_publishes_complete_record_and_reports_path() {
     let mailbox = directory.join("mailbox");
     let published = MboxFile::open(&mailbox, 0)
         .unwrap()
-        .lock(LOCK_TIMEOUT)
+        .lock(LOCK_TIMEOUT, LOCK_RETRY)
         .unwrap()
         .append(
             b"Subject: test\n\nFrom body",
@@ -190,7 +189,7 @@ fn append_failure_restores_original_length() {
     fs::write(&mailbox, b"existing").unwrap();
     let locked = MboxFile::open(&mailbox, 0)
         .unwrap()
-        .lock(LOCK_TIMEOUT)
+        .lock(LOCK_TIMEOUT, LOCK_RETRY)
         .unwrap();
 
     let error = locked
@@ -219,7 +218,7 @@ fn durability_failure_is_rolled_back_and_not_published() {
     fs::write(&mailbox, b"existing").unwrap();
     let locked = MboxFile::open(&mailbox, 0)
         .unwrap()
-        .lock(LOCK_TIMEOUT)
+        .lock(LOCK_TIMEOUT, LOCK_RETRY)
         .unwrap();
 
     let mut sync_calls = 0usize;
@@ -255,7 +254,7 @@ fn truncate_failure_reports_failed_rollback_and_preserves_partial_bytes() {
     fs::write(&mailbox, b"existing").unwrap();
     let locked = MboxFile::open(&mailbox, 0)
         .unwrap()
-        .lock(LOCK_TIMEOUT)
+        .lock(LOCK_TIMEOUT, LOCK_RETRY)
         .unwrap();
 
     let error = locked
@@ -293,7 +292,7 @@ fn concurrent_writers_append_intact_records() {
             barrier.wait();
             MboxFile::open(&mailbox, 0)
                 .unwrap()
-                .lock(LOCK_TIMEOUT)
+                .lock(LOCK_TIMEOUT, LOCK_RETRY)
                 .unwrap()
                 .append(
                     message.as_bytes(),
@@ -338,7 +337,7 @@ fn malformed_existing_bytes_are_not_parsed_or_rewritten() {
 
     MboxFile::open(&mailbox, 0)
         .unwrap()
-        .lock(LOCK_TIMEOUT)
+        .lock(LOCK_TIMEOUT, LOCK_RETRY)
         .unwrap()
         .append(
             b"Subject: appended\n\nbody",

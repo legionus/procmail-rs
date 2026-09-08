@@ -16,7 +16,9 @@ use std::process::ExitCode;
 
 use procmail_rs::config::{self, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
 use procmail_rs::delivery::DeliveryFailureClass;
-use procmail_rs::delivery::local_lock::{LockMethod, lock_timeout_from_config};
+use procmail_rs::delivery::local_lock::{
+    LockMethod, lock_sleep_from_config, lock_timeout_from_config,
+};
 use procmail_rs::delivery::maildir::Durability;
 use procmail_rs::eval::{
     ActionKindExplanation, ConditionKindExplanation, ExecutionPlan, HeaderEvaluation,
@@ -194,6 +196,8 @@ fn run() -> Result<u8, OperationalError> {
     let _lock_method = LockMethod::from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let _lock_timeout = lock_timeout_from_config(&config)
+        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
+    let _lock_sleep = lock_sleep_from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let _process_timeout = process_timeout_from_config(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;

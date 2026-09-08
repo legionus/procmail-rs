@@ -119,7 +119,8 @@ for other assignable variables. Literal and expanded fragments in a backquoted
 assignment share that same final-value budget. The implementation does not
 truncate command output or retain a partial assignment.
 
-`TIMEOUT` defaults to 960 seconds and `LOCKTIMEOUT` to 1024 seconds. Both
-accept decimal values from 1 through 86400; zero is rejected because waits
-must be finite. `UMASK` accepts octal `0000` through `0777` and defaults to
-`077`.
+`TIMEOUT` defaults to 960 seconds, `LOCKTIMEOUT` to 1024 seconds, and
+`LOCKSLEEP` to 8 seconds. All three accept decimal values from 1 through
+86400; zero is rejected because waits must be finite and lock retries must not
+form an active loop. `UMASK` accepts octal `0000` through `0777` and defaults
+to `077`.

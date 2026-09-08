@@ -335,7 +335,7 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
     }
 
     let config = crate::config::parse(
-        "MAILDIR=/mail\nLOCKMETHOD=flock\nLOCKTIMEOUT=7\nUMASK=077\nLOCKNAME=block.lock\n:0 : $LOCKNAME\n{\n:0\nmaildir:selected\n}\n",
+        "MAILDIR=/mail\nLOCKMETHOD=flock\nLOCKSLEEP=3\nLOCKTIMEOUT=7\nUMASK=077\nLOCKNAME=block.lock\n:0 : $LOCKNAME\n{\n:0\nmaildir:selected\n}\n",
     )
     .unwrap()
     .expand(&[])
@@ -375,6 +375,7 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
             .with_local_lock(&mut |path, runtime| {
                 assert_eq!(path, "/mail/block.lock");
                 assert_eq!(runtime.get("LOCKMETHOD"), Some("flock"));
+                assert_eq!(runtime.get("LOCKSLEEP"), Some("3"));
                 assert_eq!(runtime.get("LOCKTIMEOUT"), Some("7"));
                 assert_eq!(runtime.get("UMASK"), Some("077"));
                 assert!(!held.replace(true));
@@ -452,4 +453,3 @@ fn pipe_action_receives_only_its_selected_message_area() {
         assert!(outcome.original_delivered());
     }
 }
-

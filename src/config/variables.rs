@@ -6,6 +6,7 @@ use std::fmt;
 use super::{MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING_LEN};
 
 pub const MAX_COMMAND_LINE_VARIABLES: usize = 256;
+pub const MAX_LOCK_SLEEP_SECONDS: u64 = 86_400;
 pub const MAX_LOCK_TIMEOUT_SECONDS: u64 = 86_400;
 pub const MAX_PROCESS_TIMEOUT_SECONDS: u64 = 86_400;
 pub const DEFAULT_LOCK_EXT: &str = ".lock";
@@ -16,7 +17,6 @@ pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "COMSAT",
     "DELIVERED",
     "LOG",
-    "LOCKSLEEP",
     "DROPPRIVS",
     "MSGPREFIX",
     "NORESRETRY",
@@ -90,6 +90,18 @@ pub fn parse_lock_timeout_seconds(value: &str) -> Result<u64, String> {
     Ok(seconds)
 }
 
+pub fn parse_lock_sleep_seconds(value: &str) -> Result<u64, String> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| format!("LOCKSLEEP must be an integer from 1 to {MAX_LOCK_SLEEP_SECONDS}"))?;
+    if !(1..=MAX_LOCK_SLEEP_SECONDS).contains(&seconds) {
+        return Err(format!(
+            "LOCKSLEEP must be an integer from 1 to {MAX_LOCK_SLEEP_SECONDS}"
+        ));
+    }
+    Ok(seconds)
+}
+
 pub fn parse_process_timeout_seconds(value: &str) -> Result<u64, String> {
     let seconds = value.parse::<u64>().map_err(|_| {
         format!("TIMEOUT must be an integer from 1 to {MAX_PROCESS_TIMEOUT_SECONDS}")
@@ -133,6 +145,7 @@ pub enum AssignmentTarget {
     LockMethod,
     LockFile,
     LockExt,
+    LockSleep,
     LockTimeout,
     LineBuf,
     ProcessTimeout,
@@ -159,6 +172,7 @@ pub(crate) enum AssignmentPath {
 enum AssignmentValueValidator {
     None,
     LockMethod,
+    LockSleep,
     LockTimeout,
     ProcessTimeout,
     Umask,
@@ -172,6 +186,7 @@ impl AssignmentValueValidator {
         match self {
             Self::None => Ok(()),
             Self::LockMethod => validate_lock_method(value),
+            Self::LockSleep => parse_lock_sleep_seconds(value).map(drop),
             Self::LockTimeout => parse_lock_timeout_seconds(value).map(drop),
             Self::ProcessTimeout => parse_process_timeout_seconds(value).map(drop),
             Self::Umask => parse_umask(value).map(drop),
@@ -194,6 +209,7 @@ impl AssignmentTarget {
             | Self::Verbose
             | Self::Durability
             | Self::LockMethod
+            | Self::LockSleep
             | Self::LockTimeout
             | Self::LineBuf
             | Self::ProcessTimeout
@@ -210,6 +226,7 @@ impl AssignmentTarget {
     fn value_validator(self) -> AssignmentValueValidator {
         match self {
             Self::LockMethod => AssignmentValueValidator::LockMethod,
+            Self::LockSleep => AssignmentValueValidator::LockSleep,
             Self::LockTimeout => AssignmentValueValidator::LockTimeout,
             Self::ProcessTimeout => AssignmentValueValidator::ProcessTimeout,
             Self::Umask => AssignmentValueValidator::Umask,
@@ -236,7 +253,9 @@ impl AssignmentTarget {
 
     pub(crate) fn validate_known_value(self, value: &str) -> Result<(), String> {
         match self.value_validator() {
-            AssignmentValueValidator::LockMethod | AssignmentValueValidator::LockTimeout => Ok(()),
+            AssignmentValueValidator::LockMethod
+            | AssignmentValueValidator::LockSleep
+            | AssignmentValueValidator::LockTimeout => Ok(()),
             validator => validator.validate(value),
         }
     }
@@ -256,6 +275,7 @@ impl AssignmentTarget {
             | Self::Durability
             | Self::LockMethod
             | Self::LockExt
+            | Self::LockSleep
             | Self::LockTimeout
             | Self::LineBuf
             | Self::ProcessTimeout
@@ -284,6 +304,7 @@ impl AssignmentTarget {
             | Self::LockMethod
             | Self::LockFile
             | Self::LockExt
+            | Self::LockSleep
             | Self::LockTimeout
             | Self::LineBuf
             | Self::ProcessTimeout
@@ -311,6 +332,7 @@ impl AssignmentTarget {
             | Self::LockMethod
             | Self::LockFile
             | Self::LockExt
+            | Self::LockSleep
             | Self::LockTimeout
             | Self::ProcessTimeout
             | Self::Umask
@@ -335,6 +357,7 @@ impl AssignmentTarget {
             | Self::Host
             | Self::LockMethod
             | Self::LockFile
+            | Self::LockSleep
             | Self::LockTimeout
             | Self::LineBuf
             | Self::ProcessTimeout
@@ -362,6 +385,7 @@ impl AssignmentTarget {
             | Self::LockMethod
             | Self::LockFile
             | Self::LockExt
+            | Self::LockSleep
             | Self::LockTimeout
             | Self::LineBuf
             | Self::ProcessTimeout
@@ -553,6 +577,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "LOCKMETHOD" => VariablePolicy::RcOnly(AssignmentTarget::LockMethod),
         "LOCKFILE" => VariablePolicy::RcOnly(AssignmentTarget::LockFile),
         "LOCKEXT" => VariablePolicy::RcOnly(AssignmentTarget::LockExt),
+        "LOCKSLEEP" => VariablePolicy::RcOnly(AssignmentTarget::LockSleep),
         "LOCKTIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::LockTimeout),
         "LINEBUF" => VariablePolicy::RcOnly(AssignmentTarget::LineBuf),
         "TIMEOUT" => VariablePolicy::RcOnly(AssignmentTarget::ProcessTimeout),

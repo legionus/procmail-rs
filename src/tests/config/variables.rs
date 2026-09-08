@@ -101,6 +101,11 @@ fn assigns_explicit_sources_to_variable_classes() {
         Some(AssignmentTarget::LockExt)
     );
     assert!(!variable_policy("LOCKEXT").allows(VariableSource::CommandLine));
+    assert_eq!(
+        variable_policy("LOCKSLEEP").assignment_target(VariableSource::RcFile),
+        Some(AssignmentTarget::LockSleep)
+    );
+    assert!(!variable_policy("LOCKSLEEP").allows(VariableSource::CommandLine));
     assert_eq!(variable_policy("DEFAULT"), VariablePolicy::Unsupported);
     assert_eq!(
         variable_policy("USER_VALUE"),

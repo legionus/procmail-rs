@@ -80,6 +80,36 @@ fn parses_lock_timeout_at_supported_boundaries() {
 }
 
 #[test]
+fn parses_lock_sleep_at_supported_boundaries() {
+    assert_eq!(crate::config::parse_lock_sleep_seconds("1").unwrap(), 1);
+    assert_eq!(
+        crate::config::parse_lock_sleep_seconds(&crate::config::MAX_LOCK_SLEEP_SECONDS.to_string())
+            .unwrap(),
+        crate::config::MAX_LOCK_SLEEP_SECONDS
+    );
+    for value in ["", "0", "1s", "86401", "18446744073709551616"] {
+        assert!(
+            crate::config::parse_lock_sleep_seconds(value).is_err(),
+            "accepted {value:?}"
+        );
+    }
+
+    let default = crate::config::parse("").unwrap().expand(&[]).unwrap();
+    assert_eq!(
+        lock_sleep_from_config(&default).unwrap(),
+        DEFAULT_LOCK_SLEEP
+    );
+    let repeated = crate::config::parse("LOCKSLEEP=1\nLOCKSLEEP=2\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    assert_eq!(
+        lock_sleep_from_config(&repeated).unwrap(),
+        Duration::from_secs(2)
+    );
+}
+
+#[test]
 fn flock_file_persists_and_serializes_holders() {
     let directory = temporary_directory("flock");
     let path = directory.join("recipe.lock");
@@ -150,13 +180,30 @@ fn flock_rejects_symlinks_and_broad_permissions() {
     fs::write(&target, b"").unwrap();
     let link = directory.join("link");
     symlink(&target, &link).unwrap();
-    assert!(LocalLock::acquire(&link, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT, 0).is_err());
+    assert!(
+        LocalLock::acquire(
+            &link,
+            LockMethod::Flock,
+            uid,
+            DEFAULT_LOCK_TIMEOUT,
+            DEFAULT_LOCK_SLEEP,
+            0,
+        )
+        .is_err()
+    );
 
     let broad = directory.join("broad");
     fs::write(&broad, b"").unwrap();
     fs::set_permissions(&broad, fs::Permissions::from_mode(0o666)).unwrap();
-    let error =
-        LocalLock::acquire(&broad, LockMethod::Flock, uid, DEFAULT_LOCK_TIMEOUT, 0).unwrap_err();
+    let error = LocalLock::acquire(
+        &broad,
+        LockMethod::Flock,
+        uid,
+        DEFAULT_LOCK_TIMEOUT,
+        DEFAULT_LOCK_SLEEP,
+        0,
+    )
+    .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     fs::remove_dir_all(directory).unwrap();
 }
@@ -195,6 +242,42 @@ fn injected_flock_error_is_returned_without_retrying() {
 }
 
 #[test]
+fn flock_waits_for_the_selected_retry_interval() {
+    let directory = temporary_directory("flock-retry-interval");
+    let parent = open_directory_path(&directory).unwrap();
+    let file = openat(
+        &parent,
+        "lock",
+        OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC,
+        Mode::from_raw_mode(LOCK_FILE_MODE),
+    )
+    .unwrap();
+    let retry = Duration::from_millis(40);
+    let started = Instant::now();
+    let mut attempts = 0usize;
+
+    acquire_flock_fd_with(
+        &file,
+        Duration::from_secs(1),
+        retry,
+        "injected timeout",
+        |_| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(rustix::io::Errno::AGAIN)
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap();
+
+    assert_eq!(attempts, 2);
+    assert!(started.elapsed() >= retry);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn creation_mask_can_only_remove_lockfile_permissions() {
     let directory = temporary_directory("creation-mask");
     let uid = fs::metadata(&directory).unwrap().uid();
@@ -203,7 +286,15 @@ fn creation_mask_can_only_remove_lockfile_permissions() {
         (LockMethod::Dotlock, "dotlock"),
     ] {
         let path = directory.join(name);
-        let lock = LocalLock::acquire(&path, method, uid, DEFAULT_LOCK_TIMEOUT, 0o777).unwrap();
+        let lock = LocalLock::acquire(
+            &path,
+            method,
+            uid,
+            DEFAULT_LOCK_TIMEOUT,
+            DEFAULT_LOCK_SLEEP,
+            0o777,
+        )
+        .unwrap();
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0);
         drop(lock);
     }

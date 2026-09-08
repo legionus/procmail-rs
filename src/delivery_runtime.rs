@@ -442,10 +442,13 @@ fn acquire_configured_lock(
     let timeout = settings
         .lock_timeout()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
+    let retry = settings
+        .lock_sleep()
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
     let mask = settings
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
-    LocalLock::acquire(Path::new(path), method, uid, timeout, mask).map_err(|error| {
+    LocalLock::acquire(Path::new(path), method, uid, timeout, retry, mask).map_err(|error| {
         OperationalError::delivery(
             DeliveryFailureClass::from_io_error(&error),
             format!("cannot acquire local lockfile: {error}"),
@@ -705,12 +708,16 @@ fn deliver_file_destination(
         .lock_timeout()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
         .map_err(OrderedStepError::before_publication)?;
+    let lock_sleep = settings
+        .lock_sleep()
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
+        .map_err(OrderedStepError::before_publication)?;
     let mask = settings
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
         .map_err(OrderedStepError::before_publication)?;
     let locked = MboxFile::open(path, mask)
-        .and_then(|mbox| mbox.lock(lock_timeout))
+        .and_then(|mbox| mbox.lock(lock_timeout, lock_sleep))
         .map_err(|error| {
             let class = DeliveryFailureClass::from_io_error(&error);
             record_delivery(

@@ -45,7 +45,8 @@ reported as such; retrying can create a duplicate. The implementation makes no
 claim about filesystems that do not provide the Linux operations or persistence
 semantics used here.
 
-Mbox appends are serialized with `flock`, using `LOCKTIMEOUT`. The original
+Mbox appends are serialized with `flock`, using `LOCKTIMEOUT` and `LOCKSLEEP`.
+The original
 length is recorded while locked. A failed append or sync attempts to truncate
 back to that length before unlocking; failed rollback is an internal error.
 Normal delivery appends only enough LF bytes for the record to end with one

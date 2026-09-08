@@ -89,6 +89,15 @@ impl<'a> RuntimeSettings<'a> {
         }
     }
 
+    pub fn lock_sleep(self) -> Result<Duration, RuntimeSettingError> {
+        match self.variables.get("LOCKSLEEP") {
+            Some(value) => crate::config::parse_lock_sleep_seconds(value)
+                .map(Duration::from_secs)
+                .map_err(|message| self.error("LOCKSLEEP", message)),
+            None => Ok(crate::delivery::local_lock::DEFAULT_LOCK_SLEEP),
+        }
+    }
+
     pub fn lock_method(self) -> Result<LockMethod, RuntimeSettingError> {
         match self.variables.get("LOCKMETHOD") {
             Some(value) => {
@@ -164,6 +173,17 @@ mod tests {
             RuntimeSettings::new(&variables).process_timeout().unwrap(),
             Duration::from_secs(7)
         );
+
+        variables.set("LOCKSLEEP", "2");
+        assert_eq!(
+            RuntimeSettings::new(&variables).lock_sleep().unwrap(),
+            Duration::from_secs(2)
+        );
+        variables.set("LOCKSLEEP", "5");
+        assert_eq!(
+            RuntimeSettings::new(&variables).lock_sleep().unwrap(),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]
@@ -188,6 +208,7 @@ mod tests {
         let settings = RuntimeSettings::new(&variables);
 
         assert_eq!(settings.lock_method().unwrap(), LockMethod::Flock);
+        assert_eq!(settings.lock_sleep().unwrap(), Duration::from_secs(8));
         assert_eq!(settings.lock_timeout().unwrap(), Duration::from_secs(1024));
         assert_eq!(settings.umask().unwrap(), 0o077);
         assert_eq!(settings.linebuf().unwrap(), crate::config::DEFAULT_LINEBUF);
@@ -199,6 +220,7 @@ mod tests {
     fn validates_each_typed_setting_at_runtime() {
         let cases = [
             ("TIMEOUT", "0", "TIMEOUT"),
+            ("LOCKSLEEP", "0", "LOCKSLEEP"),
             ("LOCKTIMEOUT", "86401", "LOCKTIMEOUT"),
             ("LOCKMETHOD", "unknown", "LOCKMETHOD"),
             ("UMASK", "1000", "UMASK"),
@@ -211,6 +233,7 @@ mod tests {
             let settings = RuntimeSettings::new(&variables);
             let error = match name {
                 "TIMEOUT" => settings.process_timeout().unwrap_err(),
+                "LOCKSLEEP" => settings.lock_sleep().unwrap_err(),
                 "LOCKTIMEOUT" => settings.lock_timeout().unwrap_err(),
                 "LOCKMETHOD" => settings.lock_method().unwrap_err(),
                 "UMASK" => settings.umask().unwrap_err(),

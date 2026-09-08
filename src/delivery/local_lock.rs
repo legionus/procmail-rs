@@ -18,8 +18,7 @@ use rustix::fs::{
 use super::maildir::open_directory_path;
 
 pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(1024);
-const FLOCK_RETRY: Duration = Duration::from_millis(10);
-const DOTLOCK_RETRY: Duration = Duration::from_secs(8);
+pub const DEFAULT_LOCK_SLEEP: Duration = Duration::from_secs(8);
 const LOCK_FILE_MODE: u32 = 0o600;
 const DOTLOCK_FILE_MODE: u32 = 0o444;
 const MAX_STALE_DOTLOCK_SIZE: u64 = 1024;
@@ -62,18 +61,41 @@ pub fn parse_lock_timeout(value: &str) -> Result<Duration, String> {
 }
 
 pub fn lock_timeout_from_config(config: &crate::config::Config) -> Result<Duration, String> {
-    let mut timeout = DEFAULT_LOCK_TIMEOUT;
+    duration_from_config(
+        config,
+        crate::config::AssignmentTarget::LockTimeout,
+        DEFAULT_LOCK_TIMEOUT,
+        parse_lock_timeout,
+    )
+}
+
+pub fn lock_sleep_from_config(config: &crate::config::Config) -> Result<Duration, String> {
+    duration_from_config(
+        config,
+        crate::config::AssignmentTarget::LockSleep,
+        DEFAULT_LOCK_SLEEP,
+        |value| crate::config::parse_lock_sleep_seconds(value).map(Duration::from_secs),
+    )
+}
+
+fn duration_from_config(
+    config: &crate::config::Config,
+    target: crate::config::AssignmentTarget,
+    default: Duration,
+    parse: impl Fn(&str) -> Result<Duration, String>,
+) -> Result<Duration, String> {
+    let mut selected = default;
     for statement in &config.statements {
         let crate::config::Statement::Assignment(assignment) = statement else {
             continue;
         };
-        if assignment.target != crate::config::AssignmentTarget::LockTimeout {
+        if assignment.target != target {
             continue;
         }
-        timeout = parse_lock_timeout(&assignment.value)
+        selected = parse(&assignment.value)
             .map_err(|error| format!("line {}: {error}", assignment.line))?;
     }
-    Ok(timeout)
+    Ok(selected)
 }
 
 #[derive(Debug)]
@@ -93,12 +115,9 @@ impl LocalLock {
         method: LockMethod,
         expected_uid: u32,
         timeout: Duration,
+        retry: Duration,
         mask: u32,
     ) -> io::Result<Self> {
-        let retry = match method {
-            LockMethod::Flock => FLOCK_RETRY,
-            LockMethod::Dotlock => DOTLOCK_RETRY,
-        };
         Self::acquire_with_policy_and_mask(path, method, expected_uid, timeout, retry, mask)
     }
 

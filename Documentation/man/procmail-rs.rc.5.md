@@ -726,7 +726,8 @@ statement order.
 
 : Acquire a global lock at this statement. A later assignment releases the
   previous lock before acquiring its replacement; an empty value only releases
-  it. The active `LOCKMETHOD`, `LOCKTIMEOUT`, `UMASK`, and `MAILDIR` apply.
+  it. The active `LOCKMETHOD`, `LOCKSLEEP`, `LOCKTIMEOUT`, `UMASK`, and
+  `MAILDIR` apply.
 
 `LOCKEXT`
 
@@ -739,6 +740,12 @@ statement order.
 : Finite lock acquisition limit in seconds, default 1024. Decimal values 1
   through 86400 are accepted. Zero is rejected rather than meaning an
   unlimited wait.
+
+`LOCKSLEEP`
+
+: Retry interval in seconds for local, global, and mbox locks, default 8.
+  Decimal values 1 through 86400 are accepted. Zero is rejected to prevent an
+  active retry loop. Assignments affect only later lock attempts.
 
 ## External processes
 
@@ -830,7 +837,7 @@ statement order.
 ## Explicitly unsupported reserved names
 
 Assignments and references to `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`,
-`DROPPRIVS`, `LOCKSLEEP`, `LOG`, `MSGPREFIX`, `NORESRETRY`,
+`DROPPRIVS`, `LOG`, `MSGPREFIX`, `NORESRETRY`,
 `PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and
 `SHIFT` are rejected with an explicit unsupported-variable diagnostic.
 `LIMIT_RC_SIZE` is likewise reserved and rejected because an rc file cannot
@@ -863,6 +870,7 @@ explicit name is required for a pipe or block.
 
 ```
 LOCKMETHOD=flock
+LOCKSLEEP=2
 LOCKTIMEOUT=30
 
 :0 : archive.lock
@@ -1056,7 +1064,8 @@ ceiling, and all rc files loaded while processing one message have a fixed
 combined 4 MiB ceiling. See **Documentation/Limits.md** for the other fixed
 ceilings which have no rc variable.
 
-`TIMEOUT` and `LOCKTIMEOUT` accept 1 through 86400 seconds; zero is rejected.
+`TIMEOUT`, `LOCKSLEEP`, and `LOCKTIMEOUT` accept 1 through 86400 seconds; zero
+is rejected.
 `UMASK` accepts octal `0000` through `0777` but can only remove permissions
 from restrictive backend modes.
 
