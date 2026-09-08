@@ -13,6 +13,7 @@ enum TestError {
     Depth,
     Overflow,
     Length(BoundedBytesError),
+    Pattern(PatternError),
 }
 
 struct TestContext {
@@ -47,6 +48,10 @@ impl EvaluationContext for TestContext {
 
     fn required_parameter(&self, name: &str) -> Self::Error {
         TestError::Required(name.to_owned())
+    }
+
+    fn pattern_error(&self, error: PatternError) -> Self::Error {
+        TestError::Pattern(error)
     }
 
     fn unsupported_part(&self, part: UnsupportedPart) -> Self::Error {
@@ -236,4 +241,32 @@ fn required_parameter_does_not_evaluate_its_diagnostic_word() {
     let result = evaluate(&expression, 32, &mut context).unwrap();
     assert_eq!(result.bytes, b"present");
     assert!(result.assignments.is_empty());
+}
+
+#[test]
+fn length_and_pattern_removal_operate_on_bytes() {
+    let expression = ShellExpression {
+        parts: vec![
+            ShellPart::Variable {
+                name: "VALUE".to_owned(),
+                operation: ParameterOperation::Length,
+            },
+            ShellPart::Literal(":".to_owned()),
+            ShellPart::Variable {
+                name: "VALUE".to_owned(),
+                operation: ParameterOperation::RemoveSuffix {
+                    pattern: literal(".*"),
+                    longest: false,
+                },
+            },
+        ],
+    };
+    let mut context = TestContext {
+        values: BTreeMap::from([("VALUE".to_owned(), b"\xff.bin".to_vec())]),
+    };
+
+    assert_eq!(
+        evaluate(&expression, 32, &mut context).unwrap().bytes,
+        b"5:\xff"
+    );
 }

@@ -86,6 +86,43 @@ fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
 }
 
 #[test]
+fn pattern_command_output_respects_its_quote_mode() {
+    let config = config::parse(concat!(
+        "VALUE=*tail\n",
+        "ACTIVE=${VALUE##`pattern`}\n",
+        "QUOTED=${VALUE#\"`pattern`\"}\n",
+        ":0\nmaildir:selected\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    let raw = b"Subject: test\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+    let mut calls = 0;
+
+    plan.execute_ordered(
+        MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
+        &mut runtime,
+        ExecutionServices::new(
+            &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+            &mut NoTrace,
+        )
+        .with_capture(&mut |command, input, _, _, _, _, _| {
+            calls += 1;
+            assert_eq!(command, "pattern");
+            assert_eq!(input, raw);
+            Ok::<_, DeliveryAttemptError<&str>>(CapturedCommand::new(b"*\n".to_vec()))
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(calls, 2);
+    assert_eq!(runtime.get_bytes("ACTIVE"), Some(&b""[..]));
+    assert_eq!(runtime.get_bytes("QUOTED"), Some(&b"tail"[..]));
+}
+
+#[test]
 fn parameter_assignment_is_visible_in_the_expression_and_later_statements() {
     let config = config::parse(
         "VALUE=${SIDE:=selected}-$SIDE\nNEXT=$SIDE\n:0\nmaildir:selected\n",

@@ -688,6 +688,10 @@ where
         ExpansionError::new(self.line, format!("parameter {name} is unset or empty"))
     }
 
+    fn pattern_error(&self, error: super::shell_pattern::PatternError) -> Self::Error {
+        ExpansionError::new(self.line, error.to_string())
+    }
+
     fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
         ExpansionError::new(self.line, "expression is not valid in this context")
     }
@@ -1320,6 +1324,10 @@ impl EvaluationContext for ShellConditionEvaluation<'_> {
         ExpansionError::new(self.line, format!("parameter {name} is unset or empty"))
     }
 
+    fn pattern_error(&self, error: super::shell_pattern::PatternError) -> Self::Error {
+        ExpansionError::new(self.line, error.to_string())
+    }
+
     fn unsupported_part(&self, part: UnsupportedPart) -> Self::Error {
         let message = match part {
             UnsupportedPart::Command => "command substitution requires ordered evaluation",
@@ -1534,6 +1542,10 @@ impl EvaluationContext for ConfigEvaluation<'_> {
         ExpansionError::new(self.line, format!("parameter {name} is unset or empty"))
     }
 
+    fn pattern_error(&self, error: super::shell_pattern::PatternError) -> Self::Error {
+        ExpansionError::new(self.line, error.to_string())
+    }
+
     fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
         ExpansionError::new(self.line, "expression is not valid in this context")
     }
@@ -1594,9 +1606,9 @@ impl<'a> ExpressionAnalysis<'a> {
                         || dynamic.contains(name)
                         || policy == VariablePolicy::RuntimeOnly;
                     let word_may_run = match known_value {
-                        Some(_) => operation.selects_word(true, known_empty),
+                        Some(_) => operation.evaluates_word(true, known_empty),
                         None if available_at_runtime => operation.word().is_some(),
-                        None => operation.selects_word(false, false),
+                        None => operation.evaluates_word(false, false),
                     };
 
                     if !available_at_runtime && operation.requires_value() {
@@ -1685,6 +1697,23 @@ impl<'a> ExpressionAnalysis<'a> {
                     analysis.needs_runtime = true;
                     analysis.shell_condition_static = false;
                 }
+                ShellPart::PatternQuote(expression) => {
+                    let child = Self::new(expression, known, dynamic);
+                    merge_first_missing(&mut analysis.missing_runtime, child.missing_runtime, None);
+                    merge_first_missing(
+                        &mut analysis.missing_shell_condition,
+                        child.missing_shell_condition,
+                        None,
+                    );
+                    merge_first_missing(&mut analysis.missing_path, child.missing_path, None);
+                    analysis.references_dynamic |= child.references_dynamic;
+                    analysis.has_runtime_variable |= child.has_runtime_variable;
+                    analysis.has_command |= child.has_command;
+                    analysis.has_assignment |= child.has_assignment;
+                    analysis.has_regex_quoted_variable |= child.has_regex_quoted_variable;
+                    analysis.needs_runtime |= child.needs_runtime;
+                    analysis.shell_condition_static &= child.shell_condition_static;
+                }
             }
         }
         analysis
@@ -1744,6 +1773,17 @@ fn bind_static_expression(
     for part in &expression.parts {
         match part {
             ShellPart::Literal(text) => push_literal_part(&mut parts, text),
+            ShellPart::Variable { name, operation } if operation.is_value_transform() => {
+                let expression = ShellExpression {
+                    parts: vec![ShellPart::Variable {
+                        name: name.clone(),
+                        operation: operation.clone(),
+                    }],
+                };
+                let value =
+                    evaluate_with_linebuf(&expression, line, MAX_ASSIGNMENT_VALUE_LEN, lookup)?;
+                push_literal_part(&mut parts, &value.text);
+            }
             ShellPart::Variable { name, operation }
                 if variable_policy(name) == VariablePolicy::RuntimeOnly =>
             {
@@ -1787,6 +1827,14 @@ fn bind_static_expression(
                     "expression cannot be statically bound",
                 ));
             }
+            ShellPart::PatternQuote(expression) => {
+                parts.push(ShellPart::PatternQuote(Box::new(bind_static_expression(
+                    expression,
+                    line,
+                    lookup,
+                    nesting + 1,
+                )?)));
+            }
         }
     }
     Ok(ShellExpression { parts })
@@ -1820,6 +1868,19 @@ fn bind_parameter_operation(
         ),
         ParameterOperation::ErrorIfUnsetOrEmpty(word) => {
             Ok(ParameterOperation::ErrorIfUnsetOrEmpty(word.clone()))
+        }
+        ParameterOperation::Length => Ok(ParameterOperation::Length),
+        ParameterOperation::RemovePrefix { pattern, longest } => {
+            Ok(ParameterOperation::RemovePrefix {
+                pattern: bind(pattern, lookup)?,
+                longest: *longest,
+            })
+        }
+        ParameterOperation::RemoveSuffix { pattern, longest } => {
+            Ok(ParameterOperation::RemoveSuffix {
+                pattern: bind(pattern, lookup)?,
+                longest: *longest,
+            })
         }
     }
 }
@@ -1884,6 +1945,10 @@ where
         ExpansionError::new(self.line, format!("parameter {name} is unset or empty"))
     }
 
+    fn pattern_error(&self, error: super::shell_pattern::PatternError) -> Self::Error {
+        ExpansionError::new(self.line, error.to_string())
+    }
+
     fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
         ExpansionError::new(self.line, "expression cannot be evaluated here")
     }
@@ -1914,6 +1979,13 @@ fn push_literal_part(parts: &mut Vec<ShellPart>, text: &str) {
     } else {
         parts.push(ShellPart::Literal(text.to_owned()));
     }
+}
+
+fn push_expression_character(literal: &mut String, character: char, pattern_quoted: bool) {
+    if pattern_quoted && matches!(character, '*' | '?' | '[' | '\\') {
+        literal.push('\\');
+    }
+    literal.push(character);
 }
 
 fn check_expansion_depth(depth: usize, line: usize) -> Result<(), ExpansionError> {
@@ -2050,14 +2122,14 @@ impl<'a> ExpressionParser<'a> {
     }
 
     fn parse(mut self) -> Result<ShellExpression, ExpansionError> {
-        let expression = self.parse_until(0, false, false, QuoteMode::Unquoted)?;
+        let expression = self.parse_until(0, false, false, QuoteMode::Unquoted, false)?;
         debug_assert_eq!(self.index, self.bytes.len());
         Ok(expression)
     }
 
     fn parse_assignment_word(mut self) -> Result<ParsedAssignmentWord, ExpansionError> {
         let expression = self
-            .parse_until(0, false, true, QuoteMode::Unquoted)
+            .parse_until(0, false, true, QuoteMode::Unquoted, false)
             .map_err(|mut error| {
                 error.message = match error.message.as_str() {
                     "unterminated single-quoted expression" => {
@@ -2093,6 +2165,7 @@ impl<'a> ExpressionParser<'a> {
         stop_at_brace: bool,
         stop_at_word: bool,
         initial_quote: QuoteMode,
+        pattern_word: bool,
     ) -> Result<ShellExpression, ExpansionError> {
         // Build owned parts once so later delivery phases never reinterpret
         // bytes obtained from a variable as expression syntax. The explicit
@@ -2145,7 +2218,11 @@ impl<'a> ExpressionParser<'a> {
                 let character = self.input[self.index..].chars().next().ok_or_else(|| {
                     ExpansionError::new(self.line, self.syntax.invalid_utf8_message())
                 })?;
-                literal.push(character);
+                push_expression_character(
+                    &mut literal,
+                    character,
+                    pattern_word && quote != initial_quote,
+                );
                 word_started = true;
                 self.index += character.len_utf8();
                 continue;
@@ -2153,19 +2230,27 @@ impl<'a> ExpressionParser<'a> {
             if self.bytes[self.index] == b'\\' {
                 word_started = true;
                 let Some(next) = self.bytes.get(self.index + 1).copied() else {
-                    literal.push('\\');
+                    push_expression_character(
+                        &mut literal,
+                        '\\',
+                        pattern_word && quote != initial_quote,
+                    );
                     self.index += 1;
                     continue;
                 };
                 if !self.syntax.escapes(quote, next) {
-                    literal.push('\\');
+                    push_expression_character(
+                        &mut literal,
+                        '\\',
+                        pattern_word && quote != initial_quote,
+                    );
                     self.index += 1;
                     continue;
                 }
                 let character = self.input[self.index + 1..].chars().next().ok_or_else(|| {
                     ExpansionError::new(self.line, self.syntax.invalid_utf8_message())
                 })?;
-                literal.push(character);
+                push_expression_character(&mut literal, character, pattern_word);
                 self.index += 1 + character.len_utf8();
                 continue;
             }
@@ -2174,14 +2259,23 @@ impl<'a> ExpressionParser<'a> {
                 if !literal.is_empty() {
                     push_literal_part(&mut parts, &std::mem::take(&mut literal));
                 }
-                parts.push(self.parse_command()?);
+                let part = self.parse_command()?;
+                parts.push(if pattern_word && quote != initial_quote {
+                    ShellPart::PatternQuote(Box::new(ShellExpression { parts: vec![part] }))
+                } else {
+                    part
+                });
                 continue;
             }
             if self.bytes[self.index] != b'$' {
                 let character = self.input[self.index..].chars().next().ok_or_else(|| {
                     ExpansionError::new(self.line, self.syntax.invalid_utf8_message())
                 })?;
-                literal.push(character);
+                push_expression_character(
+                    &mut literal,
+                    character,
+                    pattern_word && quote != initial_quote,
+                );
                 word_started = true;
                 self.index += character.len_utf8();
                 continue;
@@ -2190,8 +2284,12 @@ impl<'a> ExpressionParser<'a> {
                 push_literal_part(&mut parts, &std::mem::take(&mut literal));
             }
             word_started = true;
-            if let Some(part) = self.parse_variable(nesting, quote, &mut literal)? {
-                parts.push(part);
+            if let Some(part) = self.parse_variable(nesting, quote, &mut literal, pattern_word)? {
+                parts.push(if pattern_word && quote != initial_quote {
+                    ShellPart::PatternQuote(Box::new(ShellExpression { parts: vec![part] }))
+                } else {
+                    part
+                });
             }
         }
         if !literal.is_empty() {
@@ -2246,6 +2344,7 @@ impl<'a> ExpressionParser<'a> {
         nesting: usize,
         quote: QuoteMode,
         literal: &mut String,
+        pattern_word: bool,
     ) -> Result<Option<ShellPart>, ExpansionError> {
         self.index += 1;
         let regex_escape = if matches!(self.syntax, ExpressionSyntax::ShellCondition)
@@ -2279,7 +2378,7 @@ impl<'a> ExpressionParser<'a> {
                     "regex-escaped condition variables use $\\NAME syntax",
                 ));
             }
-            self.parse_braced_variable(nesting, quote)?
+            self.parse_braced_variable(nesting, quote, pattern_word)?
         } else {
             if !is_name_start(first) {
                 if matches!(self.syntax, ExpressionSyntax::ShellCondition) {
@@ -2318,22 +2417,42 @@ impl<'a> ExpressionParser<'a> {
         &mut self,
         nesting: usize,
         quote: QuoteMode,
+        pattern_word: bool,
     ) -> Result<(String, ParameterOperation), ExpansionError> {
         self.index += 1;
+        if self.bytes.get(self.index) == Some(&b'#') {
+            self.index += 1;
+            let name = self.parse_name();
+            validate_reference_name(&name, self.line)?;
+            if self.bytes.get(self.index) != Some(&b'}') {
+                return Err(ExpansionError::new(
+                    self.line,
+                    "${#NAME} does not accept a trailing expression",
+                ));
+            }
+            self.index += 1;
+            return Ok((name, ParameterOperation::Length));
+        }
         let name = self.parse_name();
         validate_reference_name(&name, self.line)?;
         match self.bytes.get(self.index..self.index + 2) {
             Some(b":-") => Ok((
                 name,
-                ParameterOperation::DefaultIfUnsetOrEmpty(
-                    self.parse_parameter_word(nesting, quote, 2)?,
-                ),
+                ParameterOperation::DefaultIfUnsetOrEmpty(self.parse_parameter_word(
+                    nesting,
+                    quote,
+                    2,
+                    pattern_word,
+                )?),
             )),
             Some(b":+") => Ok((
                 name,
-                ParameterOperation::AlternateIfSetAndNotEmpty(
-                    self.parse_parameter_word(nesting, quote, 2)?,
-                ),
+                ParameterOperation::AlternateIfSetAndNotEmpty(self.parse_parameter_word(
+                    nesting,
+                    quote,
+                    2,
+                    pattern_word,
+                )?),
             )),
             Some(b":=") => {
                 if variable_policy(&name) != VariablePolicy::RcOrCommandLine(AssignmentTarget::User)
@@ -2345,24 +2464,68 @@ impl<'a> ExpressionParser<'a> {
                 }
                 Ok((
                     name,
-                    ParameterOperation::AssignIfUnsetOrEmpty(
-                        self.parse_parameter_word(nesting, quote, 2)?,
-                    ),
+                    ParameterOperation::AssignIfUnsetOrEmpty(self.parse_parameter_word(
+                        nesting,
+                        quote,
+                        2,
+                        pattern_word,
+                    )?),
                 ))
             }
             Some(b":?") => Ok((
                 name,
-                ParameterOperation::ErrorIfUnsetOrEmpty(
-                    self.parse_parameter_word(nesting, quote, 2)?,
-                ),
+                ParameterOperation::ErrorIfUnsetOrEmpty(self.parse_parameter_word(
+                    nesting,
+                    quote,
+                    2,
+                    pattern_word,
+                )?),
+            )),
+            Some(b"##") => Ok((
+                name,
+                ParameterOperation::RemovePrefix {
+                    pattern: self.parse_parameter_word(nesting, quote, 2, true)?,
+                    longest: true,
+                },
+            )),
+            Some(b"%%") => Ok((
+                name,
+                ParameterOperation::RemoveSuffix {
+                    pattern: self.parse_parameter_word(nesting, quote, 2, true)?,
+                    longest: true,
+                },
+            )),
+            _ if self.bytes.get(self.index) == Some(&b'#') => Ok((
+                name,
+                ParameterOperation::RemovePrefix {
+                    pattern: self.parse_parameter_word(nesting, quote, 1, true)?,
+                    longest: false,
+                },
+            )),
+            _ if self.bytes.get(self.index) == Some(&b'%') => Ok((
+                name,
+                ParameterOperation::RemoveSuffix {
+                    pattern: self.parse_parameter_word(nesting, quote, 1, true)?,
+                    longest: false,
+                },
             )),
             _ if self.bytes.get(self.index) == Some(&b'-') => Ok((
                 name,
-                ParameterOperation::DefaultIfUnset(self.parse_parameter_word(nesting, quote, 1)?),
+                ParameterOperation::DefaultIfUnset(self.parse_parameter_word(
+                    nesting,
+                    quote,
+                    1,
+                    pattern_word,
+                )?),
             )),
             _ if self.bytes.get(self.index) == Some(&b'+') => Ok((
                 name,
-                ParameterOperation::AlternateIfSet(self.parse_parameter_word(nesting, quote, 1)?),
+                ParameterOperation::AlternateIfSet(self.parse_parameter_word(
+                    nesting,
+                    quote,
+                    1,
+                    pattern_word,
+                )?),
             )),
             _ if self.bytes.get(self.index) == Some(&b'}') => {
                 self.index += 1;
@@ -2380,9 +2543,10 @@ impl<'a> ExpressionParser<'a> {
         nesting: usize,
         quote: QuoteMode,
         operator_width: usize,
+        pattern_word: bool,
     ) -> Result<ShellExpression, ExpansionError> {
         self.index += operator_width;
-        let word = self.parse_until(nesting + 1, true, false, quote)?;
+        let word = self.parse_until(nesting + 1, true, false, quote, pattern_word)?;
         if self.bytes.get(self.index) != Some(&b'}') {
             return Err(ExpansionError::new(
                 self.line,

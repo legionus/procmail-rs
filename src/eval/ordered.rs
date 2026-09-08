@@ -665,6 +665,13 @@ where
         }))
     }
 
+    fn pattern_error(&self, error: crate::config::shell_pattern::PatternError) -> Self::Error {
+        OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
+            line: self.line,
+            message: error.to_string(),
+        }))
+    }
+
     fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
         OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
             line: self.line,

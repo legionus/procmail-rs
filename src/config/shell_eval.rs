@@ -3,6 +3,7 @@
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
+use super::shell_pattern::{self, Edge, PatternError, Selection};
 use super::{MAX_EXPANSION_DEPTH, ParameterOperation, ShellExpression, ShellPart};
 
 #[cfg(test)]
@@ -43,6 +44,7 @@ pub(crate) trait EvaluationContext {
     fn regex_quoted(&mut self, name: &str, remaining: usize) -> Result<Vec<u8>, Self::Error>;
     fn missing_variable(&self, name: &str) -> Self::Error;
     fn required_parameter(&self, name: &str) -> Self::Error;
+    fn pattern_error(&self, error: PatternError) -> Self::Error;
     fn unsupported_part(&self, part: UnsupportedPart) -> Self::Error;
     fn depth_exceeded(&self) -> Self::Error;
     fn depth_overflow(&self) -> Self::Error;
@@ -97,6 +99,28 @@ fn evaluate_at<C: EvaluationContext>(
                 };
                 let is_set = found.is_some();
                 let is_empty = found.as_ref().is_some_and(|value| value.bytes.is_empty());
+                if matches!(operation, ParameterOperation::Length) {
+                    let value = found.ok_or_else(|| context.missing_variable(name))?;
+                    result_depth = result_depth.max(value.depth);
+                    append(
+                        &mut output,
+                        value.bytes.len().to_string().as_bytes(),
+                        limit,
+                        context,
+                    )?;
+                    continue;
+                }
+                if let Some((pattern, edge, selection)) = removal_operation(operation) {
+                    let value = found.ok_or_else(|| context.missing_variable(name))?;
+                    let pattern =
+                        evaluate_word(pattern, &output, limit, nesting, context, assignments)?;
+                    let selected =
+                        shell_pattern::remove(&value.bytes, &pattern.bytes, edge, selection)
+                            .map_err(|error| context.pattern_error(error))?;
+                    result_depth = result_depth.max(value.depth).max(pattern.depth);
+                    append(&mut output, &selected, limit, context)?;
+                    continue;
+                }
                 if matches!(operation, ParameterOperation::ErrorIfUnsetOrEmpty(_))
                     && (!is_set || is_empty)
                 {
@@ -159,6 +183,13 @@ fn evaluate_at<C: EvaluationContext>(
                 let value = context.regex_quoted(name, remaining)?;
                 append(&mut output, &value, limit, context)?;
             }
+            ShellPart::PatternQuote(expression) => {
+                let remaining = remaining(&output, limit, context)?;
+                let value = evaluate_at(expression, remaining, nesting, context, assignments)?;
+                let quoted = quote_pattern_bytes(&value.bytes, remaining, context)?;
+                append(&mut output, &quoted, limit, context)?;
+                result_depth = result_depth.max(value.depth);
+            }
         }
     }
     Ok(EvaluationResult {
@@ -166,6 +197,53 @@ fn evaluate_at<C: EvaluationContext>(
         depth: result_depth,
         assignments: Vec::new(),
     })
+}
+
+fn removal_operation(
+    operation: &ParameterOperation,
+) -> Option<(&ShellExpression, Edge, Selection)> {
+    match operation {
+        ParameterOperation::RemovePrefix { pattern, longest } => Some((
+            pattern,
+            Edge::Prefix,
+            if *longest {
+                Selection::Longest
+            } else {
+                Selection::Shortest
+            },
+        )),
+        ParameterOperation::RemoveSuffix { pattern, longest } => Some((
+            pattern,
+            Edge::Suffix,
+            if *longest {
+                Selection::Longest
+            } else {
+                Selection::Shortest
+            },
+        )),
+        _ => None,
+    }
+}
+
+fn quote_pattern_bytes<C: EvaluationContext>(
+    bytes: &[u8],
+    limit: usize,
+    context: &C,
+) -> Result<Vec<u8>, C::Error> {
+    let mut quoted = BoundedBytes::with_capacity(limit, 0);
+    for &byte in bytes {
+        if matches!(byte, b'*' | b'?' | b'[' | b'\\') {
+            let current = quoted.len();
+            quoted
+                .try_extend(b"\\")
+                .map_err(|error| context.length_error(error, current, limit))?;
+        }
+        let current = quoted.len();
+        quoted
+            .try_extend(&[byte])
+            .map_err(|error| context.length_error(error, current, limit))?;
+    }
+    Ok(quoted.into_vec())
 }
 
 fn evaluate_word<C: EvaluationContext>(

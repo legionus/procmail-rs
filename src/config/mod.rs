@@ -4,6 +4,7 @@
 pub(crate) mod expand;
 mod parser;
 pub(crate) mod shell_eval;
+pub(crate) mod shell_pattern;
 mod variables;
 
 use std::fmt;
@@ -444,6 +445,7 @@ impl ShellExpression {
     pub(crate) fn has_commands(&self) -> bool {
         self.parts.iter().any(|part| match part {
             ShellPart::Command(_) => true,
+            ShellPart::PatternQuote(expression) => expression.has_commands(),
             ShellPart::Variable { operation, .. } => {
                 operation.word().is_some_and(ShellExpression::has_commands)
             }
@@ -454,6 +456,7 @@ impl ShellExpression {
     pub(crate) fn has_assignments(&self) -> bool {
         self.parts.iter().any(|part| match part {
             ShellPart::Variable { operation, .. } => operation.has_assignments(),
+            ShellPart::PatternQuote(expression) => expression.has_assignments(),
             ShellPart::Literal(_) | ShellPart::RegexQuotedVariable(_) | ShellPart::Command(_) => {
                 false
             }
@@ -467,6 +470,9 @@ impl ShellExpression {
     pub(crate) fn for_each_assignment(&self, visit: &mut impl FnMut(&str)) {
         for part in &self.parts {
             let ShellPart::Variable { name, operation } = part else {
+                if let ShellPart::PatternQuote(expression) = part {
+                    expression.for_each_assignment(visit);
+                }
                 continue;
             };
             if matches!(operation, ParameterOperation::AssignIfUnsetOrEmpty(_)) {
@@ -499,6 +505,7 @@ pub(crate) enum ShellPart {
     },
     RegexQuotedVariable(String),
     Command(String),
+    PatternQuote(Box<ShellExpression>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,18 +517,30 @@ pub(crate) enum ParameterOperation {
     AlternateIfSetAndNotEmpty(ShellExpression),
     AssignIfUnsetOrEmpty(ShellExpression),
     ErrorIfUnsetOrEmpty(ShellExpression),
+    Length,
+    RemovePrefix {
+        pattern: ShellExpression,
+        longest: bool,
+    },
+    RemoveSuffix {
+        pattern: ShellExpression,
+        longest: bool,
+    },
 }
 
 impl ParameterOperation {
     pub(crate) fn word(&self) -> Option<&ShellExpression> {
         match self {
-            Self::Value => None,
+            Self::Value | Self::Length => None,
             Self::DefaultIfUnset(word)
             | Self::DefaultIfUnsetOrEmpty(word)
             | Self::AlternateIfSet(word)
             | Self::AlternateIfSetAndNotEmpty(word)
             | Self::AssignIfUnsetOrEmpty(word) => Some(word),
             Self::ErrorIfUnsetOrEmpty(_) => None,
+            Self::RemovePrefix { pattern, .. } | Self::RemoveSuffix { pattern, .. } => {
+                Some(pattern)
+            }
         }
     }
 
@@ -542,12 +561,32 @@ impl ParameterOperation {
             | Self::AlternateIfSet(_)
             | Self::AlternateIfSetAndNotEmpty(_)
             | Self::AssignIfUnsetOrEmpty(_)
-            | Self::ErrorIfUnsetOrEmpty(_) => None,
+            | Self::ErrorIfUnsetOrEmpty(_)
+            | Self::Length
+            | Self::RemovePrefix { .. }
+            | Self::RemoveSuffix { .. } => None,
         }
     }
 
     pub(crate) fn requires_value(&self) -> bool {
-        matches!(self, Self::Value)
+        matches!(
+            self,
+            Self::Value | Self::Length | Self::RemovePrefix { .. } | Self::RemoveSuffix { .. }
+        )
+    }
+
+    pub(crate) fn is_value_transform(&self) -> bool {
+        matches!(
+            self,
+            Self::Length | Self::RemovePrefix { .. } | Self::RemoveSuffix { .. }
+        )
+    }
+
+    pub(crate) fn evaluates_word(&self, is_set: bool, is_empty: bool) -> bool {
+        match self {
+            Self::RemovePrefix { .. } | Self::RemoveSuffix { .. } => is_set,
+            _ => self.selects_word(is_set, is_empty),
+        }
     }
 
     pub(crate) fn uses_value_when_word_is_not_selected(&self) -> bool {
@@ -557,6 +596,9 @@ impl ParameterOperation {
                 | Self::DefaultIfUnset(_)
                 | Self::DefaultIfUnsetOrEmpty(_)
                 | Self::ErrorIfUnsetOrEmpty(_)
+                | Self::Length
+                | Self::RemovePrefix { .. }
+                | Self::RemoveSuffix { .. }
         )
     }
 

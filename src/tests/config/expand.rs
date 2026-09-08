@@ -905,16 +905,110 @@ fn expands_destinations_inside_recipe_blocks() {
 
 #[test]
 fn rejects_unsupported_and_malformed_references() {
-    for source in [
-        "A=$$\n",
-        "A=${#NAME}\n",
-        "A=${NAME%pattern}\n",
-        "A=${NAME^pattern}\n",
-        "A=${NAME\n",
-        "A=$\n",
-    ] {
+    for source in ["A=$$\n", "A=${NAME^pattern}\n", "A=${NAME\n", "A=$\n"] {
         assert!(parse(source).is_err(), "{source:?}");
     }
+}
+
+#[test]
+fn expands_byte_lengths_and_shell_pattern_removals() {
+    let config = parse(concat!(
+        "VALUE=name.tar.gz\n",
+        "LENGTH=${#VALUE}\n",
+        "PREFIX=${VALUE#*.}\n",
+        "LONG_PREFIX=${VALUE##*.}\n",
+        "SUFFIX=${VALUE%.*}\n",
+        "LONG_SUFFIX=${VALUE%%.*}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let values = config
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Assignment(assignment) => {
+                Some((assignment.name.as_str(), assignment.value.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(values["LENGTH"], "11");
+    assert_eq!(values["PREFIX"], "tar.gz");
+    assert_eq!(values["LONG_PREFIX"], "gz");
+    assert_eq!(values["SUFFIX"], "name.tar");
+    assert_eq!(values["LONG_SUFFIX"], "name");
+}
+
+#[test]
+fn pattern_quotes_and_escapes_make_metacharacters_literal() {
+    for expression in [r"${VALUE#\*}", "${VALUE#'*'}", "${VALUE#\"*\"}"] {
+        let config = parse(&format!("VALUE=*tail\nRESULT={expression}\n"))
+            .unwrap()
+            .expand(&[])
+            .unwrap();
+        let Statement::Assignment(result) = &config.statements[1] else {
+            panic!("expected assignment");
+        };
+        assert_eq!(result.value, "tail", "{expression}");
+    }
+}
+
+#[test]
+fn quoted_pattern_expansions_do_not_activate_inserted_metacharacters() {
+    let config = parse(concat!(
+        "VALUE=*tail\n",
+        "PATTERN=*\n",
+        "QUOTED=${VALUE#\"$PATTERN\"}\n",
+        "ACTIVE=${VALUE##$PATTERN}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let Statement::Assignment(quoted) = &config.statements[2] else {
+        panic!("expected assignment");
+    };
+    let Statement::Assignment(active) = &config.statements[3] else {
+        panic!("expected assignment");
+    };
+
+    assert_eq!(quoted.value, "tail");
+    assert_eq!(active.value, "");
+}
+
+#[test]
+fn length_counts_bytes_instead_of_utf8_characters() {
+    let config = parse("VALUE=é\nRESULT=${#VALUE}\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    let Statement::Assignment(result) = &config.statements[1] else {
+        panic!("expected assignment");
+    };
+    assert_eq!(result.value, "2");
+}
+
+#[test]
+fn empty_and_nested_patterns_are_supported() {
+    let config = parse(concat!(
+        "VALUE=prefix-value\n",
+        "PATTERN=prefix-*\n",
+        "EMPTY=${VALUE#}\n",
+        "NESTED=${VALUE##${PATTERN:-missing}}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let Statement::Assignment(empty) = &config.statements[2] else {
+        panic!("expected assignment");
+    };
+    let Statement::Assignment(nested) = &config.statements[3] else {
+        panic!("expected assignment");
+    };
+
+    assert_eq!(empty.value, "prefix-value");
+    assert_eq!(nested.value, "");
 }
 
 #[test]

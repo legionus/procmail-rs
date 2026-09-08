@@ -75,6 +75,31 @@ unset or empty, evaluation reports only `parameter NAME is unset or empty`.
 The parser checks `word` syntax, but the evaluator neither expands nor executes
 it and never includes it in the diagnostic. `word` may be empty.
 
+`${#NAME}` produces the length of the value in bytes, not Unicode characters.
+`${NAME#pattern}` removes the shortest matching prefix and
+`${NAME##pattern}` removes the longest. `${NAME%pattern}` and
+`${NAME%%pattern}` apply the corresponding operations to a suffix. If no
+prefix or suffix matches, the value is unchanged.
+
+Patterns operate on bytes. `*` matches zero or more bytes, `?` matches one
+byte, and bracket expressions select bytes or inclusive byte ranges. A leading
+`!` or `^` negates a class. Backslash quotes the next pattern byte. An
+unterminated or empty bracket expression is treated as a literal `[`. Pattern
+words use the normal variable, command, quote, and nesting syntax. Metacharacters
+from an unquoted variable or command remain active; single quotes, double
+quotes, and backslash make their protected bytes literal.
+
+Pattern expansion shares the enclosing value limit. Matching is non-recursive
+and uses memory proportional to the bounded pattern. Work above 16777216
+state transitions is rejected before matching starts.
+
+```
+ARCHIVE=reports/2026/final.tar.gz
+NAME=${ARCHIVE##*/}
+STEM=${NAME%%.*}
+BYTES=${#STEM}
+```
+
 Inserted variable bytes are literal and are not scanned for another expansion.
 Outside quotes, backslash makes the next byte literal. Inside double quotes,
 it quotes only `$`, backquote, double quote, backslash, and newline; before
@@ -92,8 +117,8 @@ LABEL='literal $ACCOUNT'-"-$FOLDER"
 maildir:$MAILDIR/$FOLDER/
 ```
 
-Field splitting, globbing, tilde expansion, arithmetic substitution, special
-parameters, and other parameter operators are not rc expansion features.
+Field splitting, pathname expansion, tilde expansion, arithmetic substitution,
+special parameters, and other parameter operators are not rc expansion features.
 Shell command text is different: it is interpreted by the trusted shell
 selected by `SHELL` and `SHELLFLAGS`.
 
