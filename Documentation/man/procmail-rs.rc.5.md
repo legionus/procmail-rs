@@ -30,13 +30,18 @@ rejected instead of being ignored. A recipe header may also have a trailing
 comment. Do not append an rc comment to a condition or destination action:
 there it belongs to the regex, path, or shell text being parsed.
 
-Only a pipe command may span physical lines, and every continued physical line
-must retain its trailing backslash for the real shell. Continued conditions
-are rejected. Unquoted, single-quoted, and double-quoted assignment fragments
+Pipe commands and recipe conditions may span physical lines. Every continued
+pipe-command line retains its trailing backslash for the real shell. A
+condition's trailing backslash and physical newline are removed; leading space
+and tab on the following line are removed for ordinary conditions and retained
+for shell-expanded `$` conditions. Each physical line and the complete joined
+command or condition are bounded by `LINEBUF`. Unquoted, single-quoted, and
+double-quoted assignment fragments
 may be concatenated without whitespace, as in `NAME=pre-'literal-'"$VALUE"`.
 
-Physical rc lines, expanded values, and continued pipe commands are bounded by
-the active `LINEBUF`. The root rc file itself is bounded independently.
+Physical rc lines, expanded values, and continued conditions and pipe commands
+are bounded by the active `LINEBUF`. The root rc file itself is bounded
+independently.
 
 # VARIABLE EXPANSION
 

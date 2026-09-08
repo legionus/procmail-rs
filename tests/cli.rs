@@ -2288,10 +2288,6 @@ fn known_unsupported_constructs_fail_check_before_message_input() {
             "rules.rc:line 2: weighted recipe conditions are not supported".to_owned(),
         ),
         (
-            ":0\n* ^Subject: one\\\n two\nmaildir:unused\n".to_owned(),
-            "rules.rc:line 2: continued recipe conditions are not supported".to_owned(),
-        ),
-        (
             ":0\nfirst second/\n".to_owned(),
             "rules.rc:line 2: multiple unmarked mailbox destinations are not supported".to_owned(),
         ),

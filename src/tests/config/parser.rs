@@ -465,23 +465,65 @@ fn rejects_recipe_without_action() {
 }
 
 #[test]
-fn rejects_conditions_that_would_otherwise_change_meaning() {
-    for (source, message) in [
-        (
-            ":0\n* ! 20^1 ^From:\nmailbox\n",
-            "weighted recipe conditions are not supported",
-        ),
-        (
-            ":0\n* ^Subject: one\\\n  two\nmailbox\n",
-            "continued recipe conditions are not supported",
-        ),
-    ] {
-        let error = parse(source).unwrap_err();
-        assert_eq!(error.line, 2, "{source:?}");
-        assert_eq!(error.message, message, "{source:?}");
-    }
+fn rejects_weighted_conditions_that_would_otherwise_change_meaning() {
+    let source = ":0\n* ! 20^1 ^From:\nmailbox\n";
+    let error = parse(source).unwrap_err();
+    assert_eq!(error.line, 2);
+    assert_eq!(
+        error.message,
+        "weighted recipe conditions are not supported"
+    );
 
     assert!(parse(":0\n* 20^subject\nmailbox\n").is_ok());
+}
+
+#[test]
+fn joins_condition_continuations_with_kind_specific_whitespace() {
+    let config = parse(":0\n* ^Subject: one\\\n    two\\\n\tthree\nmailbox\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+        panic!("expected regex condition");
+    };
+    assert!(regex.compiled().is_match(b"Subject: onetwothree"));
+    assert!(!regex.compiled().is_match(b"Subject: one two three"));
+
+    let config = parse(":0\n* ! $^Subject: one\\\n    two\\\n\tthree\nmailbox\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let ConditionKind::ShellExpanded(condition) = &recipe.conditions[0].kind else {
+        panic!("expected shell-expanded condition");
+    };
+    assert!(recipe.conditions[0].negated);
+    assert_eq!(condition.source, "^Subject: one    two\tthree");
+}
+
+#[test]
+fn bounds_complete_continued_condition() {
+    for length in [MIN_LINEBUF - 1, MIN_LINEBUF, MIN_LINEBUF + 1] {
+        let first = "x".repeat(length / 2);
+        let second = "x".repeat(length - first.len());
+        let source = format!("LINEBUF={MIN_LINEBUF}\n:0\n*{first}\\\n{second}\nmailbox\n");
+        let result = parse(&source);
+        if length <= MIN_LINEBUF {
+            assert!(result.is_ok(), "length {length}: {result:?}");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.line, 3);
+            assert_eq!(
+                error.message,
+                format!(
+                    "continued recipe condition exceeds the active LINEBUF limit of {MIN_LINEBUF} bytes"
+                )
+            );
+        }
+    }
+
+    let error = parse(":0\n* ^Subject: value\\\n").unwrap_err();
+    assert_eq!(error.line, 2);
+    assert_eq!(error.message, "recipe condition continuation is incomplete");
 }
 
 #[test]

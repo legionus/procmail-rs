@@ -493,14 +493,15 @@ fn parse_recipe(
             index += 1;
             continue;
         }
-        if let Some(condition) = line.strip_prefix('*') {
+        if line.starts_with('*') {
             // Reject excess conditions before parsing can allocate their text
             // or compile a regular expression. The local and file-wide
             // budgets are separate because either shape can make later plan
             // construction disproportionately expensive.
             state.check_condition(conditions.len(), index + 1)?;
+            let (source, next) = parse_condition_continuation(lines, index, state.linebuf())?;
             let (condition, is_regex) = parse_condition(
-                condition,
+                &source,
                 index + 1,
                 options.case_mode == CaseMode::Sensitive,
                 regex_count,
@@ -510,7 +511,7 @@ fn parse_recipe(
             regex_count = regex_count
                 .checked_add(usize::from(is_regex))
                 .ok_or_else(|| ParseError::new(index + 1, "recipe regex count overflows"))?;
-            index += 1;
+            index = next;
             continue;
         }
         break;
@@ -1008,6 +1009,65 @@ fn parse_command_continuation(
     Ok((command, index + 1))
 }
 
+fn parse_condition_continuation(
+    lines: &[&str],
+    start: usize,
+    linebuf: usize,
+) -> Result<(String, usize), ParseError> {
+    let first = lines[start]
+        .trim_start()
+        .strip_prefix('*')
+        .ok_or_else(|| ParseError::new(start + 1, "recipe condition does not begin with '*'"))?;
+    let preserve_leading_whitespace = condition_is_shell_expanded(first);
+    let mut physical = first;
+    let mut condition = String::new();
+    let mut index = start;
+
+    // A continued condition is one logical expression, so bound the joined
+    // text before allocating each addition. Ordinary regex continuations drop
+    // indentation for readable rc files, while `$` conditions retain it for
+    // the later shell-like expansion pass as documented by procmail.
+    loop {
+        check_linebuf(lines[index], index + 1, linebuf)?;
+        let continued = physical.ends_with('\\');
+        let fragment = physical.strip_suffix('\\').unwrap_or(physical);
+        let new_len = condition
+            .len()
+            .checked_add(fragment.len())
+            .ok_or_else(|| ParseError::new(start + 1, "recipe condition size overflows"))?;
+        if new_len > linebuf {
+            return Err(ParseError::limit(
+                start + 1,
+                format!(
+                    "continued recipe condition exceeds the active LINEBUF limit of {linebuf} bytes"
+                ),
+            ));
+        }
+        condition.push_str(fragment);
+        if !continued {
+            break;
+        }
+        index = index
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(start + 1, "rc line index overflows"))?;
+        physical = lines.get(index).copied().ok_or_else(|| {
+            ParseError::new(start + 1, "recipe condition continuation is incomplete")
+        })?;
+        if !preserve_leading_whitespace {
+            physical = physical.trim_start();
+        }
+    }
+    Ok((condition, index + 1))
+}
+
+fn condition_is_shell_expanded(mut input: &str) -> bool {
+    input = input.trim_start();
+    while let Some(rest) = input.strip_prefix('!') {
+        input = rest.trim_start();
+    }
+    input.starts_with('$')
+}
+
 fn parse_recipe_header(
     rest: &str,
     line: usize,
@@ -1128,12 +1188,6 @@ fn parse_condition(
     budget: &ParseBudget,
 ) -> Result<(Condition, bool), ParseError> {
     let mut input = input.trim();
-    if input.ends_with('\\') {
-        return Err(ParseError::new(
-            line,
-            "continued recipe conditions are not supported",
-        ));
-    }
     let mut negated = false;
     while let Some(rest) = input.strip_prefix('!') {
         negated = !negated;

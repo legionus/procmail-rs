@@ -82,9 +82,10 @@ rejected. Runtime includes and switches retain their caller's accumulated
 counts and active settings.
 
 `LINEBUF` defaults to 2048 bytes and accepts a literal decimal value from 128
-through 1048576. It bounds following physical rc lines, a continued pipe
-command as a whole, and values produced by expansion. Generated reserved regex
-text is exempt from `LINEBUF` but remains bounded by the regex ceilings below.
+through 1048576. It bounds following physical rc lines, a continued condition
+or pipe command as a whole, and values produced by expansion. Generated
+reserved regex text is exempt from `LINEBUF` but remains bounded by the regex
+ceilings below.
 
 Fixed ceilings that cannot be raised by an rc file are:
 
