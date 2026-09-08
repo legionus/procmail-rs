@@ -90,7 +90,7 @@ impl CompiledInclude {
         enter_runtime_rc(
             &self.expression,
             &self.loaded,
-            "INCLUDERC",
+            RuntimeRcStatement::Include,
             runtime,
             context,
         )
@@ -120,7 +120,13 @@ impl CompiledSwitch {
         runtime: &RuntimeVariables,
         context: RcExecutionContext<'state>,
     ) -> Result<EnteredRuntimeRc<'_, 'state>, EvalError> {
-        enter_runtime_rc(&self.expression, &self.loaded, "SWITCHRC", runtime, context)
+        enter_runtime_rc(
+            &self.expression,
+            &self.loaded,
+            RuntimeRcStatement::Switch,
+            runtime,
+            context,
+        )
     }
 }
 
@@ -154,6 +160,21 @@ pub(super) enum LoadedRuntimeRc {
     Empty,
     Failed,
     Sequence(Box<CompiledSequence>),
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeRcStatement {
+    Include,
+    Switch,
+}
+
+impl RuntimeRcStatement {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Include => "INCLUDERC",
+            Self::Switch => "SWITCHRC",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -201,12 +222,26 @@ impl RcExecutionContext<'_> {
 fn load_runtime_rc(
     expression: &RcFileExpression,
     loaded_state: &RefCell<LoadedRuntimeRc>,
-    statement: &'static str,
+    statement: RuntimeRcStatement,
     runtime: &RuntimeVariables,
     context: RcExecutionContext<'_>,
 ) -> Result<(), EvalError> {
     context.record_transition()?;
     if !matches!(*loaded_state.borrow(), LoadedRuntimeRc::Unloaded) {
+        return Ok(());
+    }
+    let statement_name = statement.name();
+
+    // Original procmail uses SWITCHRC=/dev/null as a successful request to
+    // stop the current rc file. Account it as a transition before recognizing
+    // the exact resolved path, but never open the device or weaken the regular
+    // file checks used by INCLUDERC and other switch targets.
+    if matches!(statement, RuntimeRcStatement::Switch)
+        && expression
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .is_ok_and(|path| path == "/dev/null")
+    {
+        *loaded_state.borrow_mut() = LoadedRuntimeRc::Empty;
         return Ok(());
     }
     let child_context = context.descend()?;
@@ -217,21 +252,21 @@ fn load_runtime_rc(
         .as_mut()
         .ok_or(EvalError::RuntimeRcLoaderUnavailable {
             line: expression.line,
-            statement,
+            statement: statement_name,
         })?
         .load_config(expression, runtime, child_context.depth);
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(error) if error.is_resource_limit() => {
             return Err(EvalError::RuntimeRc(format!(
-                "line {}: {statement} resource limit: {}",
+                "line {}: {statement_name} resource limit: {}",
                 expression.line,
                 error.safe_message()
             )));
         }
         Err(error) => {
             let mut diagnostic = format!(
-                "line {}: {statement} failed: {}",
+                "line {}: {statement_name} failed: {}",
                 expression.line,
                 error.safe_message()
             );
@@ -271,7 +306,7 @@ fn load_runtime_rc(
 fn enter_runtime_rc<'loaded, 'state>(
     expression: &RcFileExpression,
     loaded_state: &'loaded RefCell<LoadedRuntimeRc>,
-    statement: &'static str,
+    statement: RuntimeRcStatement,
     runtime: &RuntimeVariables,
     context: RcExecutionContext<'state>,
 ) -> Result<EnteredRuntimeRc<'loaded, 'state>, EvalError> {

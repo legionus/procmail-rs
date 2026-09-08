@@ -298,12 +298,17 @@ impl RcFileLoader {
                     } else {
                         "SWITCHRC"
                     };
-                    if expression
+                    let resolved = match expression
                         .resolve_with(|name| runtime.get(name).map(str::to_owned))
-                        .is_err()
                     {
-                        warnings.dynamic_path(depth, expression.line, statement_name)?;
-                        continue;
+                        Ok(path) => path,
+                        Err(_) => {
+                            warnings.dynamic_path(depth, expression.line, statement_name)?;
+                            continue;
+                        }
+                    };
+                    if matches!(statement, Statement::Switch(_)) && resolved == "/dev/null" {
+                        break;
                     }
                     let child_depth = depth.checked_add(1).ok_or_else(|| {
                         RcFileError::limit(Path::new("<check>"), "rc check nesting depth overflows")

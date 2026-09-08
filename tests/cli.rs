@@ -1620,10 +1620,10 @@ fn include_and_switch_cycles_stop_at_the_rc_depth_limit() {
 }
 
 #[test]
-fn executed_empty_includes_stop_at_the_transition_limit() {
+fn empty_includes_and_null_switch_share_the_transition_limit() {
     let limit = procmail_rs::rc_file::MAX_RC_TRANSITIONS;
     let mut source = "INCLUDERC=\n".repeat(limit);
-    source.push_str("INCLUDERC=\n:0\nmaildir:unreachable\n");
+    source.push_str("SWITCHRC=/dev/null\n:0\nmaildir:unreachable\n");
     let path = config_file(&source);
     let input = b"Subject: transition limit\n\nbody";
     let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
@@ -1827,6 +1827,91 @@ fn empty_switch_ends_the_current_rc_file() {
     assert_eq!(output.status.code(), Some(79), "{:?}", output.stderr);
     assert!(!path.parent().unwrap().join("unreachable").exists());
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn null_switch_ends_the_current_runtime_rc_without_opening_the_device() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let fallback = mailbase.join("fallback");
+    let child = base.join("child.rc");
+    create_maildir(&mailbase);
+    create_maildir(&fallback);
+    fs::write(
+        &child,
+        "TARGET=/dev/null\nSWITCHRC=$TARGET\n:0\nunreachable/\n",
+    )
+    .unwrap();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nINCLUDERC={}\n:0\nmaildir:fallback\n",
+            mailbase.display(),
+            child.display()
+        ),
+    )
+    .unwrap();
+
+    let checked = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(checked.status.code(), Some(0), "{:?}", checked.stderr);
+
+    let input = b"Subject: null switch\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut process| {
+            process.stdin.take().unwrap().write_all(input)?;
+            process.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
+    assert!(!mailbase.join("unreachable").exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("SWITCHRC failed"));
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn null_include_remains_subject_to_regular_file_checks() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let fallback = base.join("fallback");
+    create_maildir(&fallback);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\nINCLUDERC=/dev/null\n:0\nmaildir:fallback\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    let input = b"Subject: null include\n\nbody";
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut process| {
+            process.stdin.take().unwrap().write_all(input)?;
+            process.wait_with_output()
+        })
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_messages(&fallback), [input.to_vec()]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("INCLUDERC failed"));
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

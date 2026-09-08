@@ -848,7 +848,10 @@ not treated as ordinary user variables.
 
 `INCLUDERC=EXPRESSION` evaluates another rc file and then returns to the caller.
 `SWITCHRC=EXPRESSION` evaluates another file and abandons the remainder of the
-current file; an empty value ends only the current file.
+current file; an empty value ends only the current file. A value resolving
+exactly to `/dev/null` also ends the current file, consumes one runtime rc
+transition, and does not open the device. This special case does not apply to
+`INCLUDERC`, which retains the regular-file checks.
 
 ```
 :0

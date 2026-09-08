@@ -106,6 +106,9 @@ Fixed ceilings that cannot be raised by an rc file are:
 | Regex captures / one captured value | 64 / 64 KiB |
 | `--set` entries | 256 |
 | Child environment | 512 entries and 256 KiB |
+
+An empty include and a `SWITCHRC` value resolving to `/dev/null` consume one
+transition even though neither reads another rc file.
 | Pending delivery sinks | 256 |
 | Trace | 16384 events and 1 MiB total |
 | One trace event / detailed value prefix | 1024 / 256 bytes |
