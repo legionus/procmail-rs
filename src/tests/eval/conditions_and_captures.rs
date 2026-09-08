@@ -537,6 +537,101 @@ fn ambiguous_match_selection_follows_the_documented_rust_priority() {
 }
 
 #[test]
+fn reserved_mail_address_macros_follow_the_reference_matrix() {
+    // These cases replace permissive reference scripts with direct decisions.
+    // In particular, original procmail matches numeric and plus-tag suffixes
+    // after ^TOmatchme; the macro requires a boundary before the word, not
+    // after it.
+    for (pattern, headers, expected) in [
+        ("^TOmatchme", "To: matchme@example.com\n", true),
+        ("^TOmatchme", "To: prefixmatchme@example.com\n", false),
+        ("^TOmatchme", "To: matchme2@example.com\n", true),
+        ("^TOmatchme", "To: matchme+tag@example.com\n", true),
+        ("^TOmatchme", "To: match-me@example.com\n", false),
+        ("^TOmatchme", "To: match.me@example.com\n", false),
+        ("^TOmatchme", "To: \"matchme\"@example.com\n", true),
+        (
+            "^TOmatchme",
+            "To: \"Doe (matchme)\" <other@example.com>\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "To: first@example.com, matchme@example.com\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "To: first@example.com,\n\tmatchme@example.com\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "Cc: matchme@example.com\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "Bcc: matchme@example.com\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "Original-To: matchme@example.com\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "Original-Cc: matchme@example.com\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "Resent-To: matchme@example.com\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "Resent-Cc: matchme@example.com\n",
+            true,
+        ),
+        (
+            "^TO_matchme@example\\.com",
+            "X-To: matchme@example.com\n",
+            false,
+        ),
+        (
+            "^FROM_DAEMON",
+            "From: MAILER-DAEMON@example.com\n",
+            true,
+        ),
+        ("^FROM_DAEMON", "From: user@example.com\n", false),
+        (
+            "^FROM_MAILER",
+            "From: postmaster@sendmail.example\n",
+            true,
+        ),
+        (
+            "^FROM_MAILER",
+            "From: regularuser@example.org\n",
+            false,
+        ),
+    ] {
+        let plan = compile(&format!(":0\n* {pattern}\nmaildir:matched\n"));
+        let message = format!("{headers}Subject: macro probe\n\nbody");
+        let HeaderEvaluation::Decided(delivery) = plan.evaluate_headers(&head(message.as_bytes()))
+        else {
+            panic!("expected a header decision for {pattern:?} and {headers:?}");
+        };
+        assert_eq!(
+            !delivery.deliveries().is_empty(),
+            expected,
+            "{pattern:?} against {headers:?}"
+        );
+    }
+}
+
+#[test]
 fn failed_capture_condition_clears_previous_values() {
     let plan = compile(":0\n* ^Subject: (wanted)$\nmaildir:matched\n");
     let mut runtime = RuntimeVariables::default();
