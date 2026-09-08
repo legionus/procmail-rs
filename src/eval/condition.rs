@@ -8,8 +8,7 @@ use super::{
     ConditionExplanation, ConditionKindExplanation, EvalError, InputRequirements, PlanProperties,
 };
 use crate::config::{
-    CaseMode, Condition, ConditionInput, ConditionKind, Recipe, RegexCondition,
-    ShellExpandedCondition,
+    CaseMode, Condition, ConditionInput, ConditionKind, Recipe, ShellExpandedCondition,
 };
 use crate::message::MessageHead;
 use crate::runtime::RuntimeVariables;
@@ -20,7 +19,7 @@ pub(super) struct CompiledCondition {
     pub(super) line: usize,
     negated: bool,
     kind: CompiledConditionKind,
-    match_capture: Option<usize>,
+    match_captures: Vec<usize>,
     capture_indexes: Vec<usize>,
 }
 
@@ -124,7 +123,9 @@ fn compile_condition(
         line: condition.line,
         negated: condition.negated,
         kind,
-        match_capture: regex_condition.and_then(RegexCondition::match_capture),
+        match_captures: regex_condition
+            .map(|regex| regex.match_captures().to_vec())
+            .unwrap_or_default(),
         capture_indexes: regex_condition
             .map(|regex| regex.capture_indexes().to_vec())
             .unwrap_or_default(),
@@ -439,23 +440,40 @@ impl CompiledCondition {
         input: &[u8],
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, EvalError> {
-        if self.match_capture.is_none() && self.capture_indexes.is_empty() {
+        if self.match_captures.is_empty() && self.capture_indexes.is_empty() {
             return Ok(regex.is_match(input));
         }
 
-        // Captures are runtime variables, so stale values must disappear even
-        // when this condition does not match. Validate the complete set before
-        // updating the table so no later recipe can observe partial results.
-        runtime.clear_match_values();
         let Some(captures) = regex.captures(input) else {
+            runtime.clear_match_values();
             return Ok(false);
         };
         if self.negated {
+            runtime.clear_match_values();
             return Ok(true);
         }
+
+        // Numbered captures describe this match and always replace their old
+        // values. MATCH is different: original procmail leaves it untouched
+        // when the successful alternative did not traverse a \/ marker.
+        runtime.clear_numbered_match_values();
         let mut values = Vec::with_capacity(self.capture_indexes.len() + 1);
-        if let Some(index) = self.match_capture {
-            values.push(("MATCH".to_owned(), capture_value(&captures, index)?));
+        if let Some(start) = selected_match_start(&captures, &self.match_captures) {
+            let end = captures
+                .get(0)
+                .ok_or_else(|| EvalError::RuntimeCondition {
+                    line: self.line,
+                    message: "compiled regular expression omitted its complete match".to_owned(),
+                })?
+                .end();
+            let bytes = input
+                .get(start..end)
+                .ok_or_else(|| EvalError::RuntimeCondition {
+                    line: self.line,
+                    message: "compiled regular expression returned an invalid MATCH range"
+                        .to_owned(),
+                })?;
+            values.push(("MATCH".to_owned(), match_value(bytes)?));
         }
         for (number, index) in self.capture_indexes.iter().copied().enumerate() {
             values.push((
@@ -483,9 +501,22 @@ fn capture_value(captures: &regex::bytes::Captures<'_>, index: usize) -> Result<
     let bytes = captures
         .get(index)
         .map_or(&[][..], |matched| matched.as_bytes());
+    match_value(bytes)
+}
+
+fn match_value(bytes: &[u8]) -> Result<String, EvalError> {
     std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map_err(|_| EvalError::MatchValueIsNotUtf8)
+}
+
+fn selected_match_start(captures: &regex::bytes::Captures<'_>, indexes: &[usize]) -> Option<usize> {
+    indexes
+        .iter()
+        .enumerate()
+        .filter_map(|(order, index)| captures.get(*index).map(|matched| (matched.end(), order)))
+        .max()
+        .map(|(end, _)| end)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

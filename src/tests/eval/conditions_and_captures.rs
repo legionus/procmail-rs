@@ -454,7 +454,7 @@ fn procmail_word_edges_consume_the_surrounding_bytes() {
         destinations(&delivery),
         [Destination::Maildir("matched".into())]
     );
-    assert_eq!(runtime.get("MATCH"), Some("?"));
+    assert_eq!(runtime.get("MATCH"), Some("?\n"));
 }
 
 #[test]
@@ -468,14 +468,35 @@ fn match_marker_and_numbered_groups_feed_later_expansion() {
         panic!("expected a header decision");
     };
 
-    assert_eq!(runtime.get("MATCH"), Some("beta"));
+    assert_eq!(runtime.get("MATCH"), Some("beta\n"));
     assert_eq!(runtime.get("MATCH1"), Some("alpha"));
     assert_eq!(runtime.get("MATCH2"), Some("beta"));
     let resolved = delivery.deliveries()[0]
         .destination()
         .resolve_with(|name| runtime.get(name).map(str::to_owned))
         .unwrap();
-    assert_eq!(resolved, Destination::Maildir("alpha-beta-beta".into()));
+    assert_eq!(resolved, Destination::Maildir("alpha-beta\n-beta".into()));
+}
+
+#[test]
+fn successful_branch_without_a_marker_preserves_match() {
+    // Debian-patched procmail 3.23pre leaves MATCH unchanged when the selected
+    // alternative never reaches the marker in another alternative.
+    let plan = compile(":0\n* ^Subject: (foo|bar\\/baz)qux$\nmaildir:matched\n");
+    let mut runtime = RuntimeVariables::default();
+    runtime.set("MATCH", "before");
+
+    let HeaderEvaluation::Decided(delivery) =
+        plan.evaluate_headers_with_runtime(&head(b"Subject: fooqux\n\nbody"), &mut runtime)
+    else {
+        panic!("expected a header decision");
+    };
+
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("matched".into())]
+    );
+    assert_eq!(runtime.get("MATCH"), Some("before"));
 }
 
 #[test]
@@ -644,4 +665,3 @@ fn supports_size_conditions() {
 
     assert_eq!(outcome, Outcome::Delivered { deliveries: 1 });
 }
-

@@ -50,6 +50,8 @@ pub const MAX_RECIPE_NESTING_DEPTH: usize = 64;
 pub const MAX_REGEX_COMPILED_SIZE: usize = 8 * 1024 * 1024;
 pub const MAX_REGEX_PATTERN_LEN: usize = 64 * 1024;
 pub const MAX_REGEX_CAPTURES: usize = 64;
+pub const MAX_REGEX_MATCH_MARKERS: usize = 64;
+pub const MAX_REGEX_AST_NESTING: u32 = 256;
 pub const MAX_MATCH_BYTES: usize = MAX_ASSIGNMENT_VALUE_LEN;
 pub const MAX_RC_REGEXES: usize = 256;
 pub const MAX_RC_SIZE: usize = 1024 * 1024;
@@ -60,7 +62,6 @@ pub const MAX_RC_CONDITIONS: usize = 4096;
 pub const MAX_RC_RECIPES: usize = 1024;
 pub const MAX_RC_STATEMENTS: usize = 4096;
 pub const MAX_RC_ASSIGNMENTS: usize = 4096;
-
 // These ceilings allow operational tuning without permitting an rc file to
 // turn a count setting into an effectively unbounded allocation request.
 pub const HARD_MAX_CONDITIONS_PER_RECIPE: usize = 4096;
@@ -477,7 +478,7 @@ pub(crate) enum ShellPart {
 pub struct RegexCondition {
     pattern: String,
     compiled: Regex,
-    match_capture: Option<usize>,
+    match_captures: Vec<usize>,
     capture_indexes: Vec<usize>,
 }
 
@@ -490,8 +491,8 @@ impl RegexCondition {
         &self.compiled
     }
 
-    pub(crate) fn match_capture(&self) -> Option<usize> {
-        self.match_capture
+    pub(crate) fn match_captures(&self) -> &[usize] {
+        &self.match_captures
     }
 
     pub(crate) fn capture_indexes(&self) -> &[usize] {

@@ -282,11 +282,9 @@ The ordinary operators are:
 
 : Match one byte other than LF.
 
-`[abc]`, `[^abc]`, `[a-z]`
+`[abc]`, `[^abc]`, `[a-z]`, `[[:digit:]]`
 
-: Match one listed, excluded, or ranged byte. POSIX-style ASCII classes such as
-  `[[:digit:]]` are accepted by the underlying byte-regex engine; this is a
-  known difference from procmail 3.22.
+: Match one listed, excluded, ranged, or named ASCII byte class.
 
 `a?`, `a*`, `a+`
 
@@ -294,9 +292,9 @@ The ordinary operators are:
 
 `a{m}`, `a{m,}`, `a{m,n}`
 
-: Counted repetition is accepted by **procmail-rs**, although procmail 3.22
-  treats `{` literally. Migration configurations should avoid this syntax when
-  the same file must work with both programs.
+: Counted repetition in the Rust regex dialect. Original procmail treats braces
+  as ordinary text; escape them as `\{` and `\}` when literal braces are
+  intended.
 
 `ab|cd`, `(expression)`
 
@@ -304,11 +302,11 @@ The ordinary operators are:
   variables after a successful condition. Noncapturing groups `(?:...)` are
   accepted. Named groups, look-around, and backreferences are rejected.
 
-The byte-regex engine also accepts ASCII `\d`, `\s`, `\w` classes and their
+The dialect also accepts ASCII `\d`, `\s`, `\w` classes and their
 uppercase negations, zero-width `\b` and `\B`, hexadecimal byte escapes, lazy
-repetition, and scoped flag groups such as `(?i:expression)`. These are
-**procmail-rs** regex syntax, not portable procmail 3.22 syntax. Unicode
-properties are unavailable.
+repetition, and scoped flag groups such as `(?i:expression)`. Some of these
+forms have no equivalent in original procmail. Unicode properties are
+unavailable because matching operates on bytes.
 
 The following anchors and macros have procmail-specific handling:
 
@@ -330,9 +328,12 @@ The following anchors and macros have procmail-specific handling:
 
 `\/`
 
-: Split the expression once. Bytes matched by everything to its right are
-  assigned to `MATCH`; a terminal `$` does not put its consumed LF in that
-  value. More than one `\/` marker is rejected.
+: Mark the start of the suffix assigned to `MATCH`. Up to 64 `\/` markers may
+  occur in one expression, including inside groups and alternatives. The last marker
+  reached by the successful path selects the value; a successful alternative
+  which does not reach any marker preserves the preceding `MATCH`. The value
+  extends to the end of the complete regex match, so it includes an LF consumed
+  by a terminal `$`.
 
 `^TO`, `^TO_`
 
@@ -347,8 +348,8 @@ The following anchors and macros have procmail-specific handling:
   `^FROM_DAEMON` forces case-insensitive matching.
 
 Text matched after `\/` is assigned to `MATCH`; ordinary capture groups are
-assigned to `MATCH1`, `MATCH2`, and so on, excluding the private group used to
-implement `MATCH`. An unmatched optional group becomes an empty value. At most
+assigned to `MATCH1`, `MATCH2`, and so on, excluding the private groups used to
+locate `MATCH` markers. An unmatched optional group becomes an empty value. At most
 64 ordinary capture groups are accepted and one captured value is bounded to
 64 KiB.
 
@@ -358,15 +359,22 @@ implement `MATCH`. An unmatched optional group becomes an empty value. At most
 maildir:lists/$MATCH2/$MATCH1/
 ```
 
-The complete user pattern is bounded to 64 KiB and its compiled form to 8 MiB.
-Generated text for the four fixed macros does not consume `LINEBUF`, but does
-consume those regex ceilings.
+The complete user pattern is bounded to 64 KiB, the parsed regex tree to 256
+levels, and its compiled form to 8 MiB. Generated text for the four fixed
+macros does not consume `LINEBUF`, but does consume the translated-pattern and
+compiled-size ceilings.
 
 Procmail chooses the leftmost shortest match except while selecting `MATCH`.
 The **procmail-rs** engine is leftmost-first, so ambiguous alternatives and
 repetitions can select different spans and numbered captures. Weighted scoring
 conditions and their `$=` result are rejected. See the compatibility document
 before migrating expressions that depend on ambiguous match selection.
+
+```
+:0
+* ^Subject: [[:digit:]]{3}$
+numbered-subject/
+```
 
 ## Size conditions
 

@@ -1984,7 +1984,7 @@ fn filter_resolves_include_inside_selected_block_from_match() {
     fs::write(
         &path,
         format!(
-            "MAILDIR={}\n:0\n* ^X-Rules: \\/(.*)$\n{{\nINCLUDERC=$MATCH\n}}\n:0\nmaildir:fallback\n",
+            "MAILDIR={}\n:0\n* ^X-Rules: \\/(.*)\n{{\nINCLUDERC=$MATCH\n}}\n:0\nmaildir:fallback\n",
             mailbase.display()
         ),
     )
@@ -2702,7 +2702,7 @@ fn recipe_block_resolves_its_lockfile_from_match_at_selection_time() {
     fs::write(
         &config,
         format!(
-            "MAILDIR={}\nLOCKMETHOD=dotlock\n:0 : $MATCH\n* ^X-Lock: \\/(selected\\.lock)$\n{{\n:0 w\n| test -f \"$MAILDIR/selected.lock\"\n}}\n",
+            "MAILDIR={}\nLOCKMETHOD=dotlock\n:0 : $MATCH\n* ^X-Lock: \\/(selected\\.lock)\n{{\n:0 w\n| test -f \"$MAILDIR/selected.lock\"\n}}\n",
             base.display()
         ),
     )
@@ -3904,7 +3904,7 @@ fn filter_expands_match_captures_in_destination() {
     fs::write(
         &path,
         format!(
-            "MAILDIR={}\n:0\n* ^Subject: ([a-z]+)-\\/([a-z]+)$\nmaildir:$MATCH1-$MATCH-$MATCH2\n",
+            "MAILDIR={}\n:0\n* ^Subject: ([a-z]+)-\\/([a-z]+)\nmaildir:$MATCH1-$MATCH-$MATCH2\n",
             base.display()
         ),
     )

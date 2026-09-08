@@ -2,6 +2,8 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use regex::bytes::RegexBuilder;
+use regex_syntax::ast;
+use regex_syntax::ast::parse::ParserBuilder as AstParserBuilder;
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
@@ -10,11 +12,11 @@ use super::{
     ChildStatusMode, CommandAssignment, Condition, ConditionInput, ConditionKind, Config,
     ContinuationMode, ControlFlow, Destination, HeaderAction, HeaderOperation, HeaderValue,
     MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION,
-    MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_CAPTURES,
-    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_PATTERN_LEN, OutputEnding, ParseBudget, ParseError,
-    PathExpression, PipeAction, RcFileExpression, RcLimits, RcParseCounts, Recipe, RecipeAction,
-    RecipeOptions, RegexCondition, ShellExpression, Statement, VariablePolicy, VariableSource,
-    WriteErrorMode, variable_policy,
+    MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_AST_NESTING,
+    MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS, MAX_REGEX_PATTERN_LEN,
+    OutputEnding, ParseBudget, ParseError, PathExpression, PipeAction, RcFileExpression, RcLimits,
+    RcParseCounts, Recipe, RecipeAction, RecipeOptions, RegexCondition, ShellExpression, Statement,
+    VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
 };
 
 #[cfg(test)]
@@ -1179,23 +1181,28 @@ fn parse_condition(
         // LINEBUF has already bounded the rc source line. Macro text belongs
         // to this implementation rather than to the user, so constrain its
         // generated size only with the regex expansion and compilation limits.
-        let (expanded_pattern, force_case_insensitive) =
-            expand_reserved_procmail_regex_forms(pattern, line)?;
-        let (compiled_pattern, marker_name) = prepare_capture_pattern(&expanded_pattern, line)?;
+        let (compiled_pattern, marker_count, force_case_insensitive) =
+            prepare_condition_regex(pattern, line)?;
         let compiled = build_regex(&compiled_pattern, case_sensitive && !force_case_insensitive)
             .map_err(|error| {
                 ParseError::new(line, format!("invalid regular expression: {error}"))
             })?;
-        let match_capture = marker_name.as_deref().and_then(|wanted| {
-            compiled
-                .capture_names()
-                .enumerate()
-                .find_map(|(index, name)| (name == Some(wanted)).then_some(index))
-        });
+        let match_captures = (0..marker_count)
+            .map(|marker| {
+                let wanted = match_marker_name(marker);
+                compiled
+                    .capture_names()
+                    .enumerate()
+                    .find_map(|(index, name)| (name == Some(wanted.as_str())).then_some(index))
+                    .ok_or_else(|| {
+                        ParseError::new(line, "internal MATCH marker capture is missing")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if compiled
             .capture_names()
-            .flatten()
-            .any(|name| Some(name) != marker_name.as_deref())
+            .enumerate()
+            .any(|(index, name)| name.is_some() && !match_captures.contains(&index))
         {
             return Err(ParseError::new(
                 line,
@@ -1203,7 +1210,7 @@ fn parse_condition(
             ));
         }
         let capture_indexes = (1..compiled.captures_len())
-            .filter(|index| Some(*index) != match_capture)
+            .filter(|index| !match_captures.contains(index))
             .collect::<Vec<_>>();
         if capture_indexes.len() > MAX_REGEX_CAPTURES {
             return Err(ParseError::new(
@@ -1216,7 +1223,7 @@ fn parse_condition(
         let regex = RegexCondition {
             pattern: pattern.to_owned(),
             compiled,
-            match_capture,
+            match_captures,
             capture_indexes,
         };
         match target {
@@ -1245,8 +1252,8 @@ pub(crate) fn parse_reparsed_condition(
     line: usize,
     case_sensitive: bool,
 ) -> Result<Condition, ParseError> {
-    parse_condition(input, line, case_sensitive, 0, &ParseBudget::default())
-        .map(|(condition, _)| condition)
+    let budget = ParseBudget::default();
+    parse_condition(input, line, case_sensitive, 0, &budget).map(|(condition, _)| condition)
 }
 
 fn has_scoring_prefix(input: &str) -> bool {
@@ -1274,49 +1281,283 @@ fn is_scoring_number(input: &str) -> bool {
     has_digit
 }
 
-fn expand_reserved_procmail_regex_forms(
+fn prepare_condition_regex(
     pattern: &str,
     line: usize,
-) -> Result<(String, bool), ParseError> {
+) -> Result<(String, usize, bool), ParseError> {
     const TO_ADDRESS: &str = "(?:^(?:(?:Original-)?(?:Resent-)?(?:To|Cc|Bcc)|(?:X-Envelope|Apparently(?:-Resent)?)-To):(?:.*[^-a-zA-Z0-9_.])?)";
     const TO_WORD: &str = "(?:^(?:(?:Original-)?(?:Resent-)?(?:To|Cc|Bcc)|(?:X-Envelope|Apparently(?:-Resent)?)-To):(?:.*[^a-zA-Z])?)";
     const FROM_DAEMON: &str = r"(?:^(?:Mailing-List:|Precedence:.*(?:junk|bulk|list)|To: Multiple recipients of |(?:(?:(?:Resent-)?(?:From|Sender)|X-Envelope-From):|>?From )(?:[^>]*[^(.%@a-z0-9])?(?:Post(?:ma?(?:st(?:e?r)?|n)|office)|(?:send)?Mail(?:er)?|daemon|m(?:mdf|ajordomo)|n?uucp|LIST(?:SERV|proc)|NETSERV|o(?:wner|ps)|r(?:e(?:quest|sponse)|oot)|b(?:ounce|bs\.smtp)|echo|mirror|s(?:erv(?:ices?|er)|mtp(?:error)?|ystem)|A(?:dmin(?:istrator)?|MMGR|utoanswer))(?:(?:[^).!:a-z0-9][-_a-z0-9]*)?[%@>	 ][^<)]*(?:\(.*\).*)?)?$(?:[^>]|$)))";
     const FROM_MAILER: &str = r"(?:^(?:(?:(?:Resent-)?(?:From|Sender)|X-Envelope-From):|>?From )(?:[^>]*[^(.%@a-z0-9])?(?:Post(?:ma(?:st(?:er)?|n)|office)|(?:send)?Mail(?:er)?|daemon|mmdf|n?uucp|ops|r(?:esponse|oot)|(?:bbs\.)?smtp(?:error)?|s(?:erv(?:ices?|er)|ystem)|A(?:dmin(?:istrator)?|MMGR))(?:(?:[^).!:a-z0-9][-_a-z0-9]*)?[%@>	 ][^<)]*(?:\(.*\).*)?)?$(?:[^>]|$))";
-    const FORMS: [(&str, &str, bool); 4] = [
-        ("^FROM_DAEMON", FROM_DAEMON, true),
-        ("^TO_", TO_ADDRESS, false),
-        ("^TO", TO_WORD, false),
-        ("^FROM_MAILER", FROM_MAILER, false),
-    ];
-    let bytes = pattern.as_bytes();
-    let mut expanded = Vec::with_capacity(pattern.len());
-    let mut force_case_insensitive = false;
-    let mut index = 0usize;
+    let ast = parse_regex_ast(pattern, line)?;
+    let collector =
+        RegexEditCollector::new(pattern, line, TO_ADDRESS, TO_WORD, FROM_DAEMON, FROM_MAILER);
+    let edits = ast::visit(&ast, collector)?;
+    let output = edits.render(pattern, line)?;
+    validate_regex_ast(&output, line)?;
+    Ok((
+        output,
+        edits.match_marker_count,
+        edits.force_case_insensitive,
+    ))
+}
 
-    // Expand the reference implementation's fixed byte patterns before the
-    // regular procmail-to-Rust translation. Bound every append because many
-    // short keywords can otherwise amplify an accepted source pattern beyond
-    // the compiled-regex resource policy.
-    while index < bytes.len() {
-        let replacement = (index == 0 || bytes[index - 1] != b'\\')
-            .then(|| {
-                FORMS
-                    .iter()
-                    .find(|(name, _, _)| bytes[index..].starts_with(name.as_bytes()))
-            })
-            .flatten();
-        if let Some((name, value, insensitive)) = replacement {
-            push_regex_bytes(&mut expanded, value.as_bytes(), line)?;
-            force_case_insensitive |= *insensitive;
-            index += name.len();
-        } else {
-            push_regex_bytes(&mut expanded, &bytes[index..index + 1], line)?;
-            index += 1;
+const MATCH_MARKER_PREFIX: &str = "__procmail_rs_match_";
+
+fn match_marker_name(index: usize) -> String {
+    format!("{MATCH_MARKER_PREFIX}{index}")
+}
+
+fn parse_regex_ast(pattern: &str, line: usize) -> Result<ast::Ast, ParseError> {
+    AstParserBuilder::new()
+        .nest_limit(MAX_REGEX_AST_NESTING)
+        .octal(false)
+        .ignore_whitespace(false)
+        .build()
+        .parse(pattern)
+        .map_err(|error| ParseError::new(line, format!("invalid regular expression: {error}")))
+}
+
+fn validate_regex_ast(pattern: &str, line: usize) -> Result<(), ParseError> {
+    parse_regex_ast(pattern, line).map(drop)
+}
+
+#[derive(Clone, Copy)]
+struct RegexEdit {
+    start: usize,
+    end: usize,
+    replacement: RegexReplacement,
+}
+
+#[derive(Clone, Copy)]
+enum RegexReplacement {
+    Static(&'static str),
+    MatchMarker(usize),
+}
+
+struct RegexEdits {
+    edits: Vec<RegexEdit>,
+    match_marker_count: usize,
+    force_case_insensitive: bool,
+}
+
+impl RegexEdits {
+    fn render(&self, pattern: &str, line: usize) -> Result<String, ParseError> {
+        let mut output = Vec::with_capacity(pattern.len());
+        let mut cursor = 0usize;
+
+        // Edits come from a parser-owned tree and are applied in source order.
+        // Checking their ranges here keeps a future AST transformation from
+        // silently duplicating or dropping hostile source text.
+        for edit in &self.edits {
+            if edit.start < cursor || edit.end < edit.start || edit.end > pattern.len() {
+                return Err(ParseError::new(
+                    line,
+                    "internal regular expression edit ranges overlap",
+                ));
+            }
+            let source = pattern.get(cursor..edit.start).ok_or_else(|| {
+                ParseError::new(line, "internal regular expression edit splits UTF-8 text")
+            })?;
+            push_regex_bytes(&mut output, source.as_bytes(), line)?;
+            match edit.replacement {
+                RegexReplacement::Static(replacement) => {
+                    push_regex_bytes(&mut output, replacement.as_bytes(), line)?;
+                }
+                RegexReplacement::MatchMarker(index) => {
+                    let marker = match_marker_name(index);
+                    push_regex_bytes(&mut output, format!("(?P<{marker}>)").as_bytes(), line)?;
+                }
+            }
+            cursor = edit.end;
+        }
+        let source = pattern.get(cursor..).ok_or_else(|| {
+            ParseError::new(line, "internal regular expression edit splits UTF-8 text")
+        })?;
+        push_regex_bytes(&mut output, source.as_bytes(), line)?;
+        String::from_utf8(output)
+            .map_err(|_| ParseError::new(line, "translated regular expression is not valid UTF-8"))
+    }
+}
+
+struct RegexEditCollector<'a> {
+    pattern: &'a str,
+    line: usize,
+    to_address: &'static str,
+    to_word: &'static str,
+    from_daemon: &'static str,
+    from_mailer: &'static str,
+    edits: RegexEdits,
+}
+
+impl<'a> RegexEditCollector<'a> {
+    fn new(
+        pattern: &'a str,
+        line: usize,
+        to_address: &'static str,
+        to_word: &'static str,
+        from_daemon: &'static str,
+        from_mailer: &'static str,
+    ) -> Self {
+        Self {
+            pattern,
+            line,
+            to_address,
+            to_word,
+            from_daemon,
+            from_mailer,
+            edits: RegexEdits {
+                edits: Vec::new(),
+                match_marker_count: 0,
+                force_case_insensitive: false,
+            },
         }
     }
-    let expanded = String::from_utf8(expanded)
-        .map_err(|_| ParseError::new(line, "expanded regular expression is not valid UTF-8"))?;
-    Ok((expanded, force_case_insensitive))
+
+    fn source(&self, span: &ast::Span) -> Option<&str> {
+        self.pattern.get(span.start.offset..span.end.offset)
+    }
+
+    fn covered(&self, offset: usize) -> bool {
+        self.edits
+            .edits
+            .last()
+            .is_some_and(|edit| offset < edit.end)
+    }
+
+    fn push(
+        &mut self,
+        start: usize,
+        end: usize,
+        replacement: RegexReplacement,
+    ) -> Result<(), ParseError> {
+        if self.edits.edits.len() == MAX_REGEX_PATTERN_LEN {
+            return Err(ParseError::new(
+                self.line,
+                format!(
+                    "regular expression edits exceed the hard limit of {MAX_REGEX_PATTERN_LEN}"
+                ),
+            ));
+        }
+        self.edits.edits.push(RegexEdit {
+            start,
+            end,
+            replacement,
+        });
+        Ok(())
+    }
+
+    fn visit_assertion(&mut self, assertion: &ast::Assertion) -> Result<(), ParseError> {
+        use ast::AssertionKind;
+
+        let start = assertion.span.start.offset;
+        if self.covered(start) {
+            return Ok(());
+        }
+        match assertion.kind {
+            AssertionKind::StartLine => {
+                let tail = self.pattern.as_bytes().get(start..).ok_or_else(|| {
+                    ParseError::new(self.line, "internal regular expression span is invalid")
+                })?;
+                if tail.starts_with(b"^^") {
+                    let end = start + 2;
+                    let replacement = if start == 0 {
+                        r"\A"
+                    } else if end == self.pattern.len() {
+                        r"\z"
+                    } else {
+                        return Err(ParseError::new(
+                            self.line,
+                            "'^^' is supported only at the start or end of a regular expression",
+                        ));
+                    };
+                    self.push(start, end, RegexReplacement::Static(replacement))?;
+                } else if tail.starts_with(b"^FROM_DAEMON") {
+                    self.push(
+                        start,
+                        start + 12,
+                        RegexReplacement::Static(self.from_daemon),
+                    )?;
+                    self.edits.force_case_insensitive = true;
+                } else if tail.starts_with(b"^FROM_MAILER") {
+                    self.push(
+                        start,
+                        start + 12,
+                        RegexReplacement::Static(self.from_mailer),
+                    )?;
+                } else if tail.starts_with(b"^TO_") {
+                    self.push(start, start + 4, RegexReplacement::Static(self.to_address))?;
+                } else if tail.starts_with(b"^TO") {
+                    self.push(start, start + 3, RegexReplacement::Static(self.to_word))?;
+                } else {
+                    self.push(
+                        start,
+                        assertion.span.end.offset,
+                        RegexReplacement::Static(r"(?:\A|\n)"),
+                    )?;
+                }
+            }
+            AssertionKind::EndLine => {
+                self.push(
+                    start,
+                    assertion.span.end.offset,
+                    RegexReplacement::Static(r"(?:\n|\z)"),
+                )?;
+            }
+            AssertionKind::WordBoundaryStartAngle | AssertionKind::WordBoundaryEndAngle => {
+                self.push(
+                    start,
+                    assertion.span.end.offset,
+                    RegexReplacement::Static("[^a-zA-Z0-9_]"),
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn visit_literal(&mut self, literal: &ast::Literal) -> Result<(), ParseError> {
+        if literal.kind != ast::LiteralKind::Superfluous
+            || literal.c != '/'
+            || self.source(&literal.span) != Some(r"\/")
+        {
+            return Ok(());
+        }
+        if self.edits.match_marker_count == MAX_REGEX_MATCH_MARKERS {
+            return Err(ParseError::new(
+                self.line,
+                format!(
+                    "regular expression MATCH marker count exceeds the hard limit of {MAX_REGEX_MATCH_MARKERS}"
+                ),
+            ));
+        }
+        let index = self.edits.match_marker_count;
+        self.edits.match_marker_count += 1;
+        self.push(
+            literal.span.start.offset,
+            literal.span.end.offset,
+            RegexReplacement::MatchMarker(index),
+        )
+    }
+}
+
+impl ast::Visitor for RegexEditCollector<'_> {
+    type Output = RegexEdits;
+    type Err = ParseError;
+
+    fn finish(self) -> Result<Self::Output, Self::Err> {
+        let mut edits = self.edits;
+        edits.edits.sort_by_key(|edit| edit.start);
+        Ok(edits)
+    }
+
+    fn visit_pre(&mut self, ast: &ast::Ast) -> Result<(), Self::Err> {
+        match ast {
+            ast::Ast::Assertion(assertion) => self.visit_assertion(assertion),
+            ast::Ast::Literal(literal) => self.visit_literal(literal),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn push_regex_bytes(output: &mut Vec<u8>, value: &[u8], line: usize) -> Result<(), ParseError> {
@@ -1331,107 +1572,6 @@ fn push_regex_bytes(output: &mut Vec<u8>, value: &[u8], line: usize) -> Result<(
             ),
         ),
     })
-}
-
-fn prepare_capture_pattern(
-    pattern: &str,
-    line: usize,
-) -> Result<(String, Option<String>), ParseError> {
-    const MARKER: &str = "__procmail_rs_match";
-    let bytes = pattern.as_bytes();
-    let mut marker_output = None;
-    let mut terminal_line_end_output = None;
-    let mut in_class = false;
-    let mut translated = String::with_capacity(pattern.len() + MARKER.len() + 8);
-    let mut literal_start = 0usize;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'[' && !escaped(bytes, index) {
-            in_class = true;
-        } else if byte == b']' && !escaped(bytes, index) {
-            in_class = false;
-        } else if !in_class
-            && byte == b'^'
-            && bytes.get(index + 1) == Some(&b'^')
-            && !escaped(bytes, index)
-        {
-            translated.push_str(&pattern[literal_start..index]);
-            if index == 0 {
-                translated.push_str("\\A");
-            } else if index + 2 == bytes.len() {
-                translated.push_str("\\z");
-            } else {
-                return Err(ParseError::new(
-                    line,
-                    "'^^' is supported only at the start or end of a regular expression",
-                ));
-            }
-            index += 2;
-            literal_start = index;
-            continue;
-        } else if !in_class && matches!(byte, b'^' | b'$') && !escaped(bytes, index) {
-            // Procmail's single line anchors consume the separating newline
-            // during a multiline match, while still matching the outer edge
-            // of the selected area. Express both cases explicitly so HB
-            // patterns can advance from headers into the body.
-            translated.push_str(&pattern[literal_start..index]);
-            if byte == b'^' {
-                translated.push_str("(?:\\A|\\n)");
-            } else {
-                if index + 1 == bytes.len() {
-                    terminal_line_end_output = Some(translated.len());
-                }
-                translated.push_str("(?:\\n|\\z)");
-            }
-            index += 1;
-            literal_start = index;
-            continue;
-        } else if !in_class && matches!(byte, b'/' | b'<' | b'>') && escaped(bytes, index) {
-            let escape = index - 1;
-            translated.push_str(&pattern[literal_start..escape]);
-            if byte == b'/' {
-                if marker_output.replace(translated.len()).is_some() {
-                    return Err(ParseError::new(
-                        line,
-                        "regular expression contains more than one '\\/' capture marker",
-                    ));
-                }
-            } else {
-                translated.push_str("[^a-zA-Z0-9_]");
-            }
-            index += 1;
-            literal_start = index;
-            continue;
-        }
-        index += 1;
-    }
-    translated.push_str(&pattern[literal_start..]);
-
-    let Some(index) = marker_output else {
-        return Ok((translated, None));
-    };
-    let capture_start = format!("(?P<{MARKER}>");
-    translated.insert_str(index, &capture_start);
-    if let Some(capture_end) = terminal_line_end_output {
-        // `$` consumes a newline in procmail, but that separator is not part
-        // of MATCH. Close the helper capture before the translated terminal
-        // anchor while leaving it inside the condition's complete match.
-        translated.insert(capture_end + capture_start.len(), ')');
-    } else {
-        translated.push(')');
-    }
-    Ok((translated, Some(MARKER.to_owned())))
-}
-
-fn escaped(bytes: &[u8], index: usize) -> bool {
-    bytes[..index]
-        .iter()
-        .rev()
-        .take_while(|byte| **byte == b'\\')
-        .count()
-        % 2
-        == 1
 }
 
 enum ConditionRegexTarget {
@@ -1493,6 +1633,7 @@ pub(crate) fn build_regex(
         .case_insensitive(!case_sensitive)
         .multi_line(true)
         .unicode(false)
+        .nest_limit(MAX_REGEX_AST_NESTING)
         .size_limit(MAX_REGEX_COMPILED_SIZE)
         .build()
 }

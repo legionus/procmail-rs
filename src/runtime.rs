@@ -184,17 +184,20 @@ impl RuntimeVariables {
     }
 
     pub(crate) fn clear_match_values(&mut self) {
+        self.remove("MATCH");
+        self.clear_numbered_match_values();
+    }
+
+    pub(crate) fn clear_numbered_match_values(&mut self) {
         self.values.retain(|name, _| {
-            name != "MATCH"
-                && !name.strip_prefix("MATCH").is_some_and(|suffix| {
-                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-                })
+            !name.strip_prefix("MATCH").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            })
         });
         self.byte_values.retain(|name, _| {
-            name != "MATCH"
-                && !name.strip_prefix("MATCH").is_some_and(|suffix| {
-                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-                })
+            !name.strip_prefix("MATCH").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            })
         });
     }
 

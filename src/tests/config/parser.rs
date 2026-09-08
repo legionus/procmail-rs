@@ -50,7 +50,7 @@ fn parses_assignment_and_recipe() {
                 kind: ConditionKind::Regex(RegexCondition {
                     pattern: "^Subject: spam".into(),
                     compiled: build_regex("^Subject: spam", false).unwrap(),
-                    match_capture: None,
+                    match_captures: Vec::new(),
                     capture_indexes: Vec::new(),
                 }),
             }],
@@ -924,6 +924,89 @@ fn rejects_invalid_regex_at_condition_line() {
 }
 
 #[test]
+fn supports_counted_repetition_and_named_character_classes() {
+    let config = parse(":0\n* a{2}[[:digit:]]\nmaildir:matched\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+        panic!("expected regex");
+    };
+    assert_eq!(regex.compiled().as_str(), "a{2}[[:digit:]]");
+    assert!(regex.compiled().is_match(b"aa7"));
+    assert!(!regex.compiled().is_match(b"a7"));
+
+    let literal = parse(":0\n* a\\{2\\}\nmaildir:matched\n").unwrap();
+    let Statement::Recipe(recipe) = &literal.statements[0] else {
+        panic!("expected literal-brace recipe");
+    };
+    let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+        panic!("expected literal-brace regex");
+    };
+    assert!(regex.compiled().is_match(b"a{2}"));
+    assert!(!regex.compiled().is_match(b"aa"));
+}
+
+#[test]
+fn bounds_regex_ast_nesting() {
+    for depth in [
+        MAX_REGEX_AST_NESTING as usize - 1,
+        MAX_REGEX_AST_NESTING as usize,
+        MAX_REGEX_AST_NESTING as usize + 1,
+    ] {
+        let pattern = format!("{}a{}", "(?:".repeat(depth), ")".repeat(depth));
+        let result = parse(&format!(":0\n* {pattern}\nmaildir:matched\n"));
+        if depth <= MAX_REGEX_AST_NESTING as usize {
+            assert!(result.is_ok(), "depth {depth}: {result:?}");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.line, 2);
+            assert!(
+                error
+                    .message
+                    .contains("maximum number of nested parentheses/brackets"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn upstream_regex_parser_rejects_malformed_nested_structure() {
+    for pattern in ["(outer|(inner)", "[outer", "((a)|b))"] {
+        let error = parse(&format!(":0\n* {pattern}\nmaildir:matched\n")).unwrap_err();
+        assert_eq!(error.line, 2);
+        assert!(
+            error.message.starts_with("invalid regular expression:"),
+            "{pattern:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn nested_classes_do_not_expose_their_contents_to_procmail_tokens() {
+    let config = parse(":0\n* [[^TO]&&[A-Z]]\nmaildir:matched\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+        panic!("expected regex");
+    };
+    assert_eq!(regex.compiled().as_str(), "[[^TO]&&[A-Z]]");
+
+    let escaped_slash = parse(":0\n* [\\/]\nmaildir:matched\n").unwrap();
+    let Statement::Recipe(recipe) = &escaped_slash.statements[0] else {
+        panic!("expected recipe");
+    };
+    let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+        panic!("expected regex");
+    };
+    assert_eq!(regex.compiled().as_str(), "[\\/]");
+    assert!(regex.match_captures().is_empty());
+    assert!(regex.compiled().is_match(b"/"));
+}
+
+#[test]
 fn parses_variable_regex_condition() {
     let config = parse(":0\n* CATEGORY ?? ^alerts$\nmaildir:matched\n").unwrap();
     let [Statement::Recipe(recipe)] = config.statements.as_slice() else {
@@ -947,8 +1030,101 @@ fn parses_match_marker_without_exposing_its_helper_group() {
         panic!("expected regex");
     };
 
-    assert!(regex.match_capture().is_some());
+    assert_eq!(regex.match_captures().len(), 1);
     assert_eq!(regex.capture_indexes().len(), 2);
+}
+
+fn captured_match(pattern: &str, input: &[u8]) -> Result<Vec<u8>, ParseError> {
+    let config = parse(&format!(":0\n* {pattern}\nmaildir:matched\n"))?;
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let ConditionKind::Regex(regex) = &recipe.conditions[0].kind else {
+        panic!("expected regex");
+    };
+    let captures = regex
+        .compiled()
+        .captures(input)
+        .ok_or_else(|| ParseError::new(2, "compiled reference condition did not match"))?;
+    let start = regex
+        .match_captures()
+        .iter()
+        .enumerate()
+        .filter_map(|(order, index)| captures.get(*index).map(|matched| (matched.end(), order)))
+        .max()
+        .map(|(end, _)| end)
+        .ok_or_else(|| ParseError::new(2, "compiled reference condition did not reach a marker"))?;
+    let end = captures
+        .get(0)
+        .ok_or_else(|| ParseError::new(2, "compiled reference condition has no complete match"))?
+        .end();
+    Ok(input[start..end].to_vec())
+}
+
+#[test]
+fn matches_the_complete_successful_suffix_after_a_nested_marker() {
+    // These exact bytes were recorded with Debian-patched procmail 3.23pre.
+    for (pattern, input, expected) in [
+        (
+            r"^X: (foo\/bar)baz$",
+            b"X: foobarbaz\n".as_slice(),
+            b"barbaz\n".as_slice(),
+        ),
+        (
+            r"^X: (foo|bar\/baz)qux$",
+            b"X: barbazqux\n".as_slice(),
+            b"bazqux\n".as_slice(),
+        ),
+        (
+            r"^(X: foo\/bar|X: baz\/qux)$",
+            b"X: foobar\n".as_slice(),
+            b"bar\n".as_slice(),
+        ),
+        (
+            r"^(X: foo\/bar|X: baz\/qux)$",
+            b"X: bazqux\n".as_slice(),
+            b"qux\n".as_slice(),
+        ),
+    ] {
+        assert_eq!(
+            captured_match(pattern, input).unwrap(),
+            expected,
+            "{pattern}"
+        );
+    }
+}
+
+#[test]
+fn uses_the_last_reached_match_marker() {
+    // The original matcher accepts multiple markers and moves the beginning
+    // of MATCH whenever the successful automaton path reaches another one.
+    assert_eq!(
+        captured_match(r"^X: foo\/bar\/baz$", b"X: foobarbaz\n").unwrap(),
+        b"baz\n"
+    );
+}
+
+#[test]
+fn bounds_match_markers() {
+    for count in [
+        MAX_REGEX_MATCH_MARKERS - 1,
+        MAX_REGEX_MATCH_MARKERS,
+        MAX_REGEX_MATCH_MARKERS + 1,
+    ] {
+        let pattern = r"\/".repeat(count);
+        let result = parse(&format!(":0\n* {pattern}\nmaildir:matched\n"));
+        if count <= MAX_REGEX_MATCH_MARKERS {
+            assert!(result.is_ok(), "{count}: {result:?}");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.message,
+                format!(
+                    "regular expression MATCH marker count exceeds the hard limit of {MAX_REGEX_MATCH_MARKERS}"
+                )
+            );
+        }
+    }
 }
 
 #[test]
@@ -969,9 +1145,6 @@ fn bounds_and_validates_capture_syntax() {
             .message
             .contains("capture count exceeds")
     );
-
-    let duplicate = parse(":0\n* left\\/middle\\/right\nmaildir:matched\n").unwrap_err();
-    assert!(duplicate.message.contains("more than one '\\/'"));
 
     let named = parse(":0\n* (?P<name>value)\nmaildir:matched\n").unwrap_err();
     assert_eq!(
