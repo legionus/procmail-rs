@@ -366,14 +366,14 @@ impl Destination {
         self.expression()
             .expansion
             .as_ref()
-            .filter(|expression| expression.has_commands())
+            .filter(|expression| expression.requires_ordered_evaluation())
     }
 
     pub fn line(&self) -> usize {
         self.expression().line
     }
 
-    pub(crate) fn resolve_command_output(
+    pub(crate) fn resolve_ordered_output(
         &self,
         source: String,
         runtime_maildir: Option<&str>,
@@ -382,11 +382,11 @@ impl Destination {
         if !expression
             .expansion
             .as_ref()
-            .is_some_and(ShellExpression::has_commands)
+            .is_some_and(ShellExpression::requires_ordered_evaluation)
         {
             return Err(ExpansionError::new(
                 expression.line,
-                "destination has no command substitution",
+                "destination has no ordered expression",
             ));
         }
         let base = if expression.runtime_base {
@@ -407,11 +407,11 @@ impl Destination {
         if expression
             .expansion
             .as_ref()
-            .is_some_and(ShellExpression::has_commands)
+            .is_some_and(ShellExpression::requires_ordered_evaluation)
         {
             return Err(ExpansionError::new(
                 expression.line,
-                "destination command substitution has not executed",
+                "destination ordered expression has not executed",
             ));
         }
         let parsed;
@@ -643,7 +643,14 @@ pub(crate) fn expand_runtime_bytes<'a>(
         line,
         lookup: &mut owned_lookup,
     };
-    shell_eval::evaluate(&expression, limit, &mut context).map(|value| value.bytes)
+    let evaluated = shell_eval::evaluate(&expression, limit, &mut context)?;
+    if !evaluated.assignments.is_empty() {
+        return Err(ExpansionError::new(
+            line,
+            "parameter assignment is not valid in this expression context",
+        ));
+    }
+    Ok(evaluated.bytes)
 }
 
 struct RuntimeBytesEvaluation<'a, L> {
@@ -675,6 +682,10 @@ where
 
     fn missing_variable(&self, name: &str) -> Self::Error {
         ExpansionError::new(self.line, format!("variable {name} is not defined"))
+    }
+
+    fn required_parameter(&self, name: &str) -> Self::Error {
+        ExpansionError::new(self.line, format!("parameter {name} is unset or empty"))
     }
 
     fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
@@ -760,8 +771,19 @@ impl ConfigPreparer {
         match statement {
             Statement::Assignment(assignment) => self.prepare_assignment(assignment),
             Statement::CommandAssignment(assignment) => {
-                let analysis =
-                    ExpressionAnalysis::new(&assignment.expression, &self.known, &self.dynamic);
+                // Targets assigned by an earlier part are available to later
+                // parts of the same expression. Include every possible target
+                // during validation; execution still preserves source order
+                // and reports a read that precedes its conditional assignment.
+                let mut expression_dynamic = self.dynamic.clone();
+                assignment.expression.for_each_assignment(&mut |name| {
+                    expression_dynamic.insert(name.to_owned());
+                });
+                let analysis = ExpressionAnalysis::new(
+                    &assignment.expression,
+                    &self.known,
+                    &expression_dynamic,
+                );
                 analysis.validate_runtime_references(assignment.line)?;
                 if self.phase == PreparationPhase::Eager
                     && !analysis.has_runtime_part()
@@ -789,6 +811,9 @@ impl ConfigPreparer {
                         )),
                     };
                 }
+                assignment.expression.for_each_assignment(&mut |name| {
+                    self.dynamic.insert(name.to_owned());
+                });
                 self.dynamic.insert(assignment.name.clone());
                 Ok(())
             }
@@ -804,6 +829,13 @@ impl ConfigPreparer {
             }
             Statement::Include(expression) | Statement::Switch(expression) => {
                 let parsed = parse_expression(&expression.value, expression.line)?;
+                reject_parameter_assignments(&parsed, expression.line, "runtime rc path")?;
+                if parsed.has_commands() {
+                    return Err(ExpansionError::new(
+                        expression.line,
+                        "command substitution is not supported in runtime rc path",
+                    ));
+                }
                 validate_runtime_references(&parsed, expression.line, &self.known, &self.dynamic)?;
                 expression.expansion = Some(parsed);
                 Ok(())
@@ -993,9 +1025,13 @@ impl ConfigPreparer {
         if let Some(command_expression) = expression
             .expansion
             .as_ref()
-            .filter(|expression| expression.has_commands())
+            .filter(|expression| expression.requires_ordered_evaluation())
         {
-            validate_shell_expression(command_expression, line, &self.known, &self.dynamic)?;
+            let mut expression_dynamic = self.dynamic.clone();
+            command_expression.for_each_assignment(&mut |name| {
+                expression_dynamic.insert(name.to_owned());
+            });
+            validate_shell_expression(command_expression, line, &self.known, &expression_dynamic)?;
             expression.runtime_dependent = true;
             expression.runtime_base = self.dynamic.contains("MAILDIR");
             return Ok(());
@@ -1037,6 +1073,20 @@ fn validate_shell_expression(
     validate_runtime_references(expression, line, known, dynamic)
 }
 
+fn reject_parameter_assignments(
+    expression: &ShellExpression,
+    line: usize,
+    context: &str,
+) -> Result<(), ExpansionError> {
+    if expression.has_assignments() {
+        return Err(ExpansionError::new(
+            line,
+            format!("parameter assignment is not supported in {context}"),
+        ));
+    }
+    Ok(())
+}
+
 fn record_recipe_dynamic_names(recipe: &Recipe, dynamic: &mut BTreeSet<String>) {
     match &recipe.action {
         RecipeAction::Capture(action) => {
@@ -1056,7 +1106,14 @@ fn record_recipe_dynamic_names(recipe: &Recipe, dynamic: &mut BTreeSet<String>) 
                 }
             }
         }
-        RecipeAction::Deliver(_) | RecipeAction::Pipe(_) | RecipeAction::Headers(_) => {}
+        RecipeAction::Deliver(destination) => {
+            if let Some(expression) = destination.command_expression() {
+                expression.for_each_assignment(&mut |name| {
+                    dynamic.insert(name.to_owned());
+                });
+            }
+        }
+        RecipeAction::Pipe(_) | RecipeAction::Headers(_) => {}
     }
 }
 
@@ -1073,6 +1130,7 @@ fn prepare_header_action(
             | HeaderOperation::Prepend { line, value, .. } => (*line, value),
         };
         let expression = parse_expression(&value.source, line)?;
+        reject_parameter_assignments(&expression, line, "native header value")?;
         let analysis = ExpressionAnalysis::new(&expression, known, dynamic);
         analysis.validate_runtime_references(line)?;
         let needs_runtime = analysis.needs_runtime || analysis.references_dynamic;
@@ -1111,6 +1169,7 @@ fn prepare_lock_expression(
     maildir: Option<&str>,
 ) -> Result<(), ExpansionError> {
     let parsed = parse_expression(&expression.source, line)?;
+    reject_parameter_assignments(&parsed, line, "lockfile path")?;
     let analysis = ExpressionAnalysis::new(&parsed, known, dynamic);
     analysis.validate_runtime_references(line)?;
     expression.base = maildir.map(str::to_owned);
@@ -1152,6 +1211,7 @@ fn prepare_shell_conditions(
                 break;
             };
             let expression = parse_shell_condition_expression(&shell.source, condition.line)?;
+            reject_parameter_assignments(&expression, condition.line, "shell-expanded condition")?;
             let analysis = ExpressionAnalysis::new(&expression, known, dynamic);
             analysis.validate_shell_condition_references(condition.line)?;
             if !analysis.shell_condition_static {
@@ -1202,9 +1262,15 @@ pub(crate) fn expand_shell_condition(
         .linebuf()
         .map_err(|error| ExpansionError::new(line, error.message().to_owned()))?;
     let mut context = ShellConditionEvaluation { line, runtime };
-    let bytes = shell_eval::evaluate(expression, linebuf, &mut context)
-        .map(|value| value.bytes)
+    let evaluated = shell_eval::evaluate(expression, linebuf, &mut context)
         .map_err(|error| relabel_linebuf_error(error, linebuf, usize::MAX))?;
+    if !evaluated.assignments.is_empty() {
+        return Err(ExpansionError::new(
+            line,
+            "parameter assignment requires ordered evaluation",
+        ));
+    }
+    let bytes = evaluated.bytes;
     String::from_utf8(bytes).map_err(|_| {
         ExpansionError::new(
             line,
@@ -1248,6 +1314,10 @@ impl EvaluationContext for ShellConditionEvaluation<'_> {
 
     fn missing_variable(&self, name: &str) -> Self::Error {
         ExpansionError::new(self.line, format!("variable {name} is not defined"))
+    }
+
+    fn required_parameter(&self, name: &str) -> Self::Error {
+        ExpansionError::new(self.line, format!("parameter {name} is unset or empty"))
     }
 
     fn unsupported_part(&self, part: UnsupportedPart) -> Self::Error {
@@ -1409,6 +1479,12 @@ fn evaluate_config_expression(
 ) -> Result<ExpandedValue, ExpansionError> {
     let mut context = ConfigEvaluation { line, variables };
     let evaluated = shell_eval::evaluate(expression, limit, &mut context)?;
+    if !evaluated.assignments.is_empty() {
+        return Err(ExpansionError::new(
+            line,
+            "parameter assignment is not valid in this expression context",
+        ));
+    }
     let text = String::from_utf8(evaluated.bytes)
         .map_err(|_| ExpansionError::new(line, "expanded value is not valid UTF-8"))?;
     Ok(ExpandedValue {
@@ -1454,6 +1530,10 @@ impl EvaluationContext for ConfigEvaluation<'_> {
         }
     }
 
+    fn required_parameter(&self, name: &str) -> Self::Error {
+        ExpansionError::new(self.line, format!("parameter {name} is unset or empty"))
+    }
+
     fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
         ExpansionError::new(self.line, "expression is not valid in this context")
     }
@@ -1480,6 +1560,7 @@ struct ExpressionAnalysis<'a> {
     references_dynamic: bool,
     has_runtime_variable: bool,
     has_command: bool,
+    has_assignment: bool,
     has_regex_quoted_variable: bool,
     shell_condition_static: bool,
 }
@@ -1561,6 +1642,10 @@ impl<'a> ExpressionAnalysis<'a> {
                                 .is_some_and(|value| value.has_runtime_variable));
                     analysis.has_command |=
                         word_may_run && child.as_ref().is_some_and(|value| value.has_command);
+                    analysis.has_assignment |=
+                        matches!(operation, ParameterOperation::AssignIfUnsetOrEmpty(_))
+                            || (word_may_run
+                                && child.as_ref().is_some_and(|value| value.has_assignment));
                     analysis.has_regex_quoted_variable |= word_may_run
                         && child
                             .as_ref()
@@ -1628,7 +1713,10 @@ impl<'a> ExpressionAnalysis<'a> {
     }
 
     fn has_runtime_part(&self) -> bool {
-        self.has_runtime_variable || self.has_command || self.has_regex_quoted_variable
+        self.has_runtime_variable
+            || self.has_command
+            || self.has_assignment
+            || self.has_regex_quoted_variable
     }
 }
 
@@ -1677,23 +1765,17 @@ fn bind_static_expression(
                             other => parts.push(other),
                         }
                     }
-                } else if operation.requires_value() {
+                } else if operation.uses_value_when_word_is_not_selected() {
                     let Some(value) = value else {
+                        if matches!(operation, ParameterOperation::ErrorIfUnsetOrEmpty(_)) {
+                            return Err(ExpansionError::new(
+                                line,
+                                format!("parameter {name} is unset or empty"),
+                            ));
+                        }
                         return Err(ExpansionError::new(
                             line,
                             format!("variable {name} is not set"),
-                        ));
-                    };
-                    push_literal_part(&mut parts, &value);
-                } else if matches!(
-                    operation,
-                    ParameterOperation::DefaultIfUnset(_)
-                        | ParameterOperation::DefaultIfUnsetOrEmpty(_)
-                ) {
-                    let Some(value) = value else {
-                        return Err(ExpansionError::new(
-                            line,
-                            "parameter default selection failed",
                         ));
                     };
                     push_literal_part(&mut parts, &value);
@@ -1733,6 +1815,12 @@ fn bind_parameter_operation(
         ParameterOperation::AlternateIfSetAndNotEmpty(word) => Ok(
             ParameterOperation::AlternateIfSetAndNotEmpty(bind(word, lookup)?),
         ),
+        ParameterOperation::AssignIfUnsetOrEmpty(word) => Ok(
+            ParameterOperation::AssignIfUnsetOrEmpty(bind(word, lookup)?),
+        ),
+        ParameterOperation::ErrorIfUnsetOrEmpty(word) => {
+            Ok(ParameterOperation::ErrorIfUnsetOrEmpty(word.clone()))
+        }
     }
 }
 
@@ -1744,6 +1832,12 @@ fn evaluate_expression(
 ) -> Result<ExpandedValue, ExpansionError> {
     let mut context = RuntimeStringEvaluation { line, lookup };
     let evaluated = shell_eval::evaluate(expression, limit, &mut context)?;
+    if !evaluated.assignments.is_empty() {
+        return Err(ExpansionError::new(
+            line,
+            "parameter assignment requires ordered evaluation",
+        ));
+    }
     let text = String::from_utf8(evaluated.bytes)
         .map_err(|_| ExpansionError::new(line, "expanded value is not valid UTF-8"))?;
     Ok(ExpandedValue {
@@ -1784,6 +1878,10 @@ where
 
     fn missing_variable(&self, name: &str) -> Self::Error {
         ExpansionError::new(self.line, format!("runtime variable {name} is not set"))
+    }
+
+    fn required_parameter(&self, name: &str) -> Self::Error {
+        ExpansionError::new(self.line, format!("parameter {name} is unset or empty"))
     }
 
     fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
@@ -1880,7 +1978,9 @@ pub(crate) fn parse_command_expression(
         allow_commands: true,
     };
     let expression = ExpressionParser::new(input, line, syntax).parse()?;
-    Ok(expression.has_commands().then_some(expression))
+    Ok(expression
+        .requires_ordered_evaluation()
+        .then_some(expression))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2235,6 +2335,27 @@ impl<'a> ExpressionParser<'a> {
                     self.parse_parameter_word(nesting, quote, 2)?,
                 ),
             )),
+            Some(b":=") => {
+                if variable_policy(&name) != VariablePolicy::RcOrCommandLine(AssignmentTarget::User)
+                {
+                    return Err(ExpansionError::new(
+                        self.line,
+                        format!("parameter assignment cannot modify protected variable {name}"),
+                    ));
+                }
+                Ok((
+                    name,
+                    ParameterOperation::AssignIfUnsetOrEmpty(
+                        self.parse_parameter_word(nesting, quote, 2)?,
+                    ),
+                ))
+            }
+            Some(b":?") => Ok((
+                name,
+                ParameterOperation::ErrorIfUnsetOrEmpty(
+                    self.parse_parameter_word(nesting, quote, 2)?,
+                ),
+            )),
             _ if self.bytes.get(self.index) == Some(&b'-') => Ok((
                 name,
                 ParameterOperation::DefaultIfUnset(self.parse_parameter_word(nesting, quote, 1)?),
@@ -2249,7 +2370,7 @@ impl<'a> ExpressionParser<'a> {
             }
             _ => Err(ExpansionError::new(
                 self.line,
-                "unsupported parameter expansion; use ${NAME}, ${NAME-word}, ${NAME:-word}, ${NAME+word}, or ${NAME:+word}",
+                "unsupported parameter expansion operator",
             )),
         }
     }

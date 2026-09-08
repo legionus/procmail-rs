@@ -86,6 +86,61 @@ fn ordered_backquoted_assignment_preserves_bytes_and_strips_all_trailing_lf() {
 }
 
 #[test]
+fn parameter_assignment_is_visible_in_the_expression_and_later_statements() {
+    let config = config::parse(
+        "VALUE=${SIDE:=selected}-$SIDE\nNEXT=$SIDE\n:0\nmaildir:selected\n",
+    )
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    let raw = b"Subject: test\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+
+    plan.execute_ordered(
+        MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
+        &mut runtime,
+        ExecutionServices::new(
+            &mut |_, _, _, _, _, _| Ok::<_, DeliveryAttemptError<&str>>(()),
+            &mut NoTrace,
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(runtime.get_bytes("SIDE"), Some(&b"selected"[..]));
+    assert_eq!(runtime.get_bytes("VALUE"), Some(&b"selected-selected"[..]));
+    assert_eq!(runtime.get_bytes("NEXT"), Some(&b"selected"[..]));
+}
+
+#[test]
+fn destination_parameter_assignment_is_visible_to_later_path_parts() {
+    let config = config::parse(":0\nmbox:${SIDE:=selected}-$SIDE\n")
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    let raw = b"Subject: test\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+    let mut destinations = Vec::new();
+
+    plan.execute_ordered(
+        MappedMessageInput::new(raw, b"Subject: test\n\n".len(), None),
+        &mut runtime,
+        ExecutionServices::new(
+            &mut |destination, _, _, _, _, _| {
+                destinations.push(destination.path().to_owned());
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            &mut NoTrace,
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(destinations, ["selected-selected"]);
+    assert_eq!(runtime.get_bytes("SIDE"), Some(&b"selected"[..]));
+}
+
+#[test]
 fn destination_command_substitution_uses_complete_message_and_runtime_values() {
     let config = config::parse("MAILDIR=/mail\nBOX=archive\n:0\nmbox:`choose`-$BOX\n")
         .unwrap()

@@ -269,10 +269,22 @@ fn parse_statements(
                     ),
                 ));
             }
-            let statement = if assignment
+            let statement = if assignment.name == "INCLUDERC" {
+                Statement::Include(RcFileExpression {
+                    line: assignment.line,
+                    value: assignment.value,
+                    expansion: assignment.expansion,
+                })
+            } else if assignment.name == "SWITCHRC" {
+                Statement::Switch(RcFileExpression {
+                    line: assignment.line,
+                    value: assignment.value,
+                    expansion: assignment.expansion,
+                })
+            } else if assignment
                 .expansion
                 .as_ref()
-                .is_some_and(ShellExpression::has_commands)
+                .is_some_and(ShellExpression::requires_ordered_evaluation)
             {
                 let mut assignment = assignment;
                 let expression = assignment.expansion.take().ok_or_else(|| {
@@ -295,19 +307,7 @@ fn parse_statements(
                     expression,
                 })
             } else {
-                match assignment.name.as_str() {
-                    "INCLUDERC" => Statement::Include(RcFileExpression {
-                        line: assignment.line,
-                        value: assignment.value,
-                        expansion: assignment.expansion,
-                    }),
-                    "SWITCHRC" => Statement::Switch(RcFileExpression {
-                        line: assignment.line,
-                        value: assignment.value,
-                        expansion: assignment.expansion,
-                    }),
-                    _ => Statement::Assignment(assignment),
-                }
+                Statement::Assignment(assignment)
             };
             if let Statement::Assignment(assignment) = &statement {
                 state.apply_assignment(assignment)?;

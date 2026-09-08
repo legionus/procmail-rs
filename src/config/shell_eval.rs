@@ -31,6 +31,7 @@ pub(crate) struct VariableValue {
 pub(crate) struct EvaluationResult {
     pub(crate) bytes: Vec<u8>,
     pub(crate) depth: usize,
+    pub(crate) assignments: Vec<(String, Vec<u8>)>,
 }
 
 pub(crate) trait EvaluationContext {
@@ -41,6 +42,7 @@ pub(crate) trait EvaluationContext {
     fn command(&mut self, command: &str, remaining: usize) -> Result<Vec<u8>, Self::Error>;
     fn regex_quoted(&mut self, name: &str, remaining: usize) -> Result<Vec<u8>, Self::Error>;
     fn missing_variable(&self, name: &str) -> Self::Error;
+    fn required_parameter(&self, name: &str) -> Self::Error;
     fn unsupported_part(&self, part: UnsupportedPart) -> Self::Error;
     fn depth_exceeded(&self) -> Self::Error;
     fn depth_overflow(&self) -> Self::Error;
@@ -52,7 +54,10 @@ pub(crate) fn evaluate<C: EvaluationContext>(
     limit: usize,
     context: &mut C,
 ) -> Result<EvaluationResult, C::Error> {
-    evaluate_at(expression, limit, 0, context)
+    let mut assignments = Vec::new();
+    let mut result = evaluate_at(expression, limit, 0, context, &mut assignments)?;
+    result.assignments = assignments;
+    Ok(result)
 }
 
 fn evaluate_at<C: EvaluationContext>(
@@ -60,6 +65,7 @@ fn evaluate_at<C: EvaluationContext>(
     limit: usize,
     nesting: usize,
     context: &mut C,
+    assignments: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<EvaluationResult, C::Error> {
     if nesting > MAX_EXPANSION_DEPTH {
         return Err(context.depth_exceeded());
@@ -77,23 +83,33 @@ fn evaluate_at<C: EvaluationContext>(
         match part {
             ShellPart::Literal(text) => append(&mut output, text.as_bytes(), limit, context)?,
             ShellPart::Variable { name, operation } => {
-                let found = context.variable(name)?;
+                let assigned = assignments
+                    .iter()
+                    .rev()
+                    .find(|(assigned, _)| assigned == name)
+                    .map(|(_, bytes)| VariableValue {
+                        bytes: bytes.clone(),
+                        depth: 0,
+                    });
+                let found = match assigned {
+                    Some(value) => Some(value),
+                    None => context.variable(name)?,
+                };
                 let is_set = found.is_some();
                 let is_empty = found.as_ref().is_some_and(|value| value.bytes.is_empty());
+                if matches!(operation, ParameterOperation::ErrorIfUnsetOrEmpty(_))
+                    && (!is_set || is_empty)
+                {
+                    return Err(context.required_parameter(name));
+                }
                 let (selected, used_word, empty_value) =
                     if let Some(word) = operation.selected_word(is_set, is_empty) {
                         (
-                            evaluate_word(word, &output, limit, nesting, context)?,
+                            evaluate_word(word, &output, limit, nesting, context, assignments)?,
                             true,
                             false,
                         )
-                    } else if operation.requires_value()
-                        || matches!(
-                            operation,
-                            ParameterOperation::DefaultIfUnset(_)
-                                | ParameterOperation::DefaultIfUnsetOrEmpty(_)
-                        )
-                    {
+                    } else if operation.uses_value_when_word_is_not_selected() {
                         match found {
                             Some(value) => {
                                 let empty = value.bytes.is_empty();
@@ -111,6 +127,18 @@ fn evaluate_at<C: EvaluationContext>(
                             true,
                         )
                     };
+                if matches!(operation, ParameterOperation::AssignIfUnsetOrEmpty(_))
+                    && (!is_set || is_empty)
+                {
+                    if let Some((_, value)) = assignments
+                        .iter_mut()
+                        .find(|(assigned, _)| assigned == name)
+                    {
+                        *value = selected.bytes.clone();
+                    } else {
+                        assignments.push((name.clone(), selected.bytes.clone()));
+                    }
+                }
                 result_depth = result_depth.max(selected_depth(
                     context.depth_mode(),
                     selected.depth,
@@ -136,6 +164,7 @@ fn evaluate_at<C: EvaluationContext>(
     Ok(EvaluationResult {
         bytes: output.into_vec(),
         depth: result_depth,
+        assignments: Vec::new(),
     })
 }
 
@@ -145,12 +174,13 @@ fn evaluate_word<C: EvaluationContext>(
     limit: usize,
     nesting: usize,
     context: &mut C,
+    assignments: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<VariableValue, C::Error> {
     let remaining = remaining(output, limit, context)?;
     let nested = nesting
         .checked_add(1)
         .ok_or_else(|| context.depth_overflow())?;
-    let value = evaluate_at(word, remaining, nested, context)?;
+    let value = evaluate_at(word, remaining, nested, context, assignments)?;
     Ok(VariableValue {
         bytes: value.bytes,
         depth: value.depth,

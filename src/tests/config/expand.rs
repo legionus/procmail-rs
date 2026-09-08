@@ -907,8 +907,6 @@ fn expands_destinations_inside_recipe_blocks() {
 fn rejects_unsupported_and_malformed_references() {
     for source in [
         "A=$$\n",
-        "A=${NAME:=value}\n",
-        "A=${NAME:?value}\n",
         "A=${#NAME}\n",
         "A=${NAME%pattern}\n",
         "A=${NAME^pattern}\n",
@@ -916,6 +914,80 @@ fn rejects_unsupported_and_malformed_references() {
         "A=$\n",
     ] {
         assert!(parse(source).is_err(), "{source:?}");
+    }
+}
+
+#[test]
+fn parameter_assignment_makes_its_target_visible_to_following_statements() {
+    let config = parse("VALUE=${SIDE:=first}-$SIDE\nNEXT=$SIDE\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+
+    assert!(matches!(
+        config.statements[0],
+        Statement::CommandAssignment(_)
+    ));
+    let Statement::Assignment(next) = &config.statements[1] else {
+        panic!("expected deferred assignment");
+    };
+    assert!(next.expansion.is_some());
+}
+
+#[test]
+fn destination_parameter_assignment_is_visible_to_later_path_parts() {
+    parse(":0\nmbox:${SIDE:=selected}-$SIDE\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+}
+
+#[test]
+fn parameter_assignment_rejects_protected_targets() {
+    for name in ["MAILDIR", "LASTFOLDER", "PROCMAIL_VERSION"] {
+        let error = parse(&format!("VALUE=${{{name}:=changed}}\n")).unwrap_err();
+        assert!(error.message.contains("protected variable"), "{name}");
+        assert!(error.message.contains(name), "{name}");
+    }
+}
+
+#[test]
+fn required_parameter_uses_a_generic_diagnostic_without_evaluating_word() {
+    let error = parse("VALUE=${MISSING:?`must-not-run` private-text}\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap_err();
+
+    assert_eq!(error.message, "parameter MISSING is unset or empty");
+    assert!(!error.message.contains("must-not-run"));
+    assert!(!error.message.contains("private-text"));
+
+    let config = parse("MISSING=present\nVALUE=${MISSING:?ignored}\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    let Statement::Assignment(value) = &config.statements[1] else {
+        panic!("expected assignment");
+    };
+    assert_eq!(value.value, "present");
+}
+
+#[test]
+fn parameter_assignment_is_rejected_where_ordered_evaluation_is_unavailable() {
+    for source in [
+        "INCLUDERC=${FILE:=child.rc}\n",
+        ":0:${LOCK:=mail.lock}\nmbox:mail\n",
+        ":0\n* $^Subject: ${VALUE:=text}\nmbox:mail\n",
+        ":0\nheaders {\nset X-Test: ${VALUE:=text}\n}\n",
+    ] {
+        let error = parse(source).unwrap().expand(&[]).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("parameter assignment is not supported"),
+            "{source}: {}",
+            error.message
+        );
     }
 }
 

@@ -8,6 +8,7 @@ use super::*;
 #[derive(Debug, PartialEq, Eq)]
 enum TestError {
     Missing(String),
+    Required(String),
     Unsupported(UnsupportedPart),
     Depth,
     Overflow,
@@ -42,6 +43,10 @@ impl EvaluationContext for TestContext {
 
     fn missing_variable(&self, name: &str) -> Self::Error {
         TestError::Missing(name.to_owned())
+    }
+
+    fn required_parameter(&self, name: &str) -> Self::Error {
+        TestError::Required(name.to_owned())
     }
 
     fn unsupported_part(&self, part: UnsupportedPart) -> Self::Error {
@@ -144,4 +149,91 @@ fn rejects_parts_disabled_by_the_context() {
         evaluate(&quoted, 32, &mut context),
         Err(TestError::Unsupported(UnsupportedPart::RegexQuotedVariable))
     );
+}
+
+#[test]
+fn stages_assignment_for_later_parts_of_the_same_expression() {
+    let expression = ShellExpression {
+        parts: vec![
+            ShellPart::Variable {
+                name: "VALUE".to_owned(),
+                operation: ParameterOperation::AssignIfUnsetOrEmpty(literal("assigned")),
+            },
+            ShellPart::Literal("/".to_owned()),
+            ShellPart::Variable {
+                name: "VALUE".to_owned(),
+                operation: ParameterOperation::Value,
+            },
+        ],
+    };
+    let mut context = TestContext {
+        values: BTreeMap::new(),
+    };
+
+    let result = evaluate(&expression, 32, &mut context).unwrap();
+
+    assert_eq!(result.bytes, b"assigned/assigned");
+    assert_eq!(
+        result.assignments,
+        [("VALUE".to_owned(), b"assigned".to_vec())]
+    );
+    assert!(!context.values.contains_key("VALUE"));
+}
+
+#[test]
+fn discards_staged_assignments_when_later_evaluation_fails() {
+    let expression = ShellExpression {
+        parts: vec![
+            ShellPart::Variable {
+                name: "VALUE".to_owned(),
+                operation: ParameterOperation::AssignIfUnsetOrEmpty(literal("assigned")),
+            },
+            ShellPart::Variable {
+                name: "MISSING".to_owned(),
+                operation: ParameterOperation::Value,
+            },
+        ],
+    };
+    let mut context = TestContext {
+        values: BTreeMap::new(),
+    };
+
+    assert_eq!(
+        evaluate(&expression, 32, &mut context),
+        Err(TestError::Missing("MISSING".to_owned()))
+    );
+    assert!(!context.values.contains_key("VALUE"));
+}
+
+#[test]
+fn required_parameter_does_not_evaluate_its_diagnostic_word() {
+    let expression = ShellExpression {
+        parts: vec![ShellPart::Variable {
+            name: "VALUE".to_owned(),
+            operation: ParameterOperation::ErrorIfUnsetOrEmpty(ShellExpression {
+                parts: vec![ShellPart::Command("must not run".to_owned())],
+            }),
+        }],
+    };
+    let mut context = TestContext {
+        values: BTreeMap::new(),
+    };
+
+    assert_eq!(
+        evaluate(&expression, 32, &mut context),
+        Err(TestError::Required("VALUE".to_owned()))
+    );
+
+    context.values.insert("VALUE".to_owned(), Vec::new());
+    assert_eq!(
+        evaluate(&expression, 32, &mut context),
+        Err(TestError::Required("VALUE".to_owned()))
+    );
+
+    context
+        .values
+        .insert("VALUE".to_owned(), b"present".to_vec());
+    let result = evaluate(&expression, 32, &mut context).unwrap();
+    assert_eq!(result.bytes, b"present");
+    assert!(result.assignments.is_empty());
 }

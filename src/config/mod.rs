@@ -451,6 +451,33 @@ impl ShellExpression {
         })
     }
 
+    pub(crate) fn has_assignments(&self) -> bool {
+        self.parts.iter().any(|part| match part {
+            ShellPart::Variable { operation, .. } => operation.has_assignments(),
+            ShellPart::Literal(_) | ShellPart::RegexQuotedVariable(_) | ShellPart::Command(_) => {
+                false
+            }
+        })
+    }
+
+    pub(crate) fn requires_ordered_evaluation(&self) -> bool {
+        self.has_commands() || self.has_assignments()
+    }
+
+    pub(crate) fn for_each_assignment(&self, visit: &mut impl FnMut(&str)) {
+        for part in &self.parts {
+            let ShellPart::Variable { name, operation } = part else {
+                continue;
+            };
+            if matches!(operation, ParameterOperation::AssignIfUnsetOrEmpty(_)) {
+                visit(name);
+            }
+            if let Some(word) = operation.word() {
+                word.for_each_assignment(visit);
+            }
+        }
+    }
+
     pub(crate) fn literal_text(&self) -> Option<String> {
         let mut value = String::new();
         for part in &self.parts {
@@ -481,6 +508,8 @@ pub(crate) enum ParameterOperation {
     DefaultIfUnsetOrEmpty(ShellExpression),
     AlternateIfSet(ShellExpression),
     AlternateIfSetAndNotEmpty(ShellExpression),
+    AssignIfUnsetOrEmpty(ShellExpression),
+    ErrorIfUnsetOrEmpty(ShellExpression),
 }
 
 impl ParameterOperation {
@@ -490,7 +519,9 @@ impl ParameterOperation {
             Self::DefaultIfUnset(word)
             | Self::DefaultIfUnsetOrEmpty(word)
             | Self::AlternateIfSet(word)
-            | Self::AlternateIfSetAndNotEmpty(word) => Some(word),
+            | Self::AlternateIfSetAndNotEmpty(word)
+            | Self::AssignIfUnsetOrEmpty(word) => Some(word),
+            Self::ErrorIfUnsetOrEmpty(_) => None,
         }
     }
 
@@ -504,16 +535,34 @@ impl ParameterOperation {
             Self::DefaultIfUnsetOrEmpty(word) if !is_set || is_empty => Some(word),
             Self::AlternateIfSet(word) if is_set => Some(word),
             Self::AlternateIfSetAndNotEmpty(word) if is_set && !is_empty => Some(word),
+            Self::AssignIfUnsetOrEmpty(word) if !is_set || is_empty => Some(word),
             Self::Value
             | Self::DefaultIfUnset(_)
             | Self::DefaultIfUnsetOrEmpty(_)
             | Self::AlternateIfSet(_)
-            | Self::AlternateIfSetAndNotEmpty(_) => None,
+            | Self::AlternateIfSetAndNotEmpty(_)
+            | Self::AssignIfUnsetOrEmpty(_)
+            | Self::ErrorIfUnsetOrEmpty(_) => None,
         }
     }
 
     pub(crate) fn requires_value(&self) -> bool {
         matches!(self, Self::Value)
+    }
+
+    pub(crate) fn uses_value_when_word_is_not_selected(&self) -> bool {
+        matches!(
+            self,
+            Self::Value
+                | Self::DefaultIfUnset(_)
+                | Self::DefaultIfUnsetOrEmpty(_)
+                | Self::ErrorIfUnsetOrEmpty(_)
+        )
+    }
+
+    fn has_assignments(&self) -> bool {
+        matches!(self, Self::AssignIfUnsetOrEmpty(_))
+            || self.word().is_some_and(ShellExpression::has_assignments)
     }
 }
 

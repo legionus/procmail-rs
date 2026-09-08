@@ -374,7 +374,7 @@ impl CompiledNode {
                         })
                         .map_err(OrderedExecutionError::Evaluation)?;
                     destination
-                        .resolve_command_output(
+                        .resolve_ordered_output(
                             source,
                             RuntimeSettings::new(context.runtime).maildir(),
                         )
@@ -577,7 +577,17 @@ where
         runtime,
         host,
     };
-    shell_eval::evaluate(input.expression, input.limit, &mut context).map(|value| value.bytes)
+    let evaluated = shell_eval::evaluate(input.expression, input.limit, &mut context)?;
+    for (name, value) in evaluated.assignments {
+        context.runtime.set_bytes_with_trace(
+            name,
+            value,
+            Some(input.line),
+            TraceVariableSource::RcFile,
+            context.host.trace(),
+        );
+    }
+    Ok(evaluated.bytes)
 }
 
 struct OrderedExpressionEvaluation<'context, 'input, E, T> {
@@ -645,6 +655,13 @@ where
         OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
             line: self.line,
             message: format!("variable {name} is not defined"),
+        }))
+    }
+
+    fn required_parameter(&self, name: &str) -> Self::Error {
+        OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
+            line: self.line,
+            message: format!("parameter {name} is unset or empty"),
         }))
     }
 

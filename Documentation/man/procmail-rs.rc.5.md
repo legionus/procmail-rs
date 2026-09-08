@@ -46,8 +46,9 @@ independently.
 # VARIABLE EXPANSION
 
 The supported forms are `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`,
-`${NAME+word}`, and `${NAME:+word}`. A name begins with an ASCII letter or
-underscore and continues with ASCII letters, digits, or underscores. The `-`
+`${NAME+word}`, `${NAME:+word}`, `${NAME:=word}`, and `${NAME:?word}`. A name
+begins with an ASCII letter or underscore and continues with ASCII letters,
+digits, or underscores. The `-`
 form uses `word` when the name is unset; `:-` also treats an empty value as
 unset. The `+` form uses `word` when the name is set; `:+` additionally
 requires a non-empty value. An unselected word is not evaluated, and `word`
@@ -59,6 +60,20 @@ may be empty.
 | `${NAME:-word}` | `word` | `word` | value |
 | `${NAME+word}` | empty | `word` | `word` |
 | `${NAME:+word}` | empty | empty | `word` |
+| `${NAME:=word}` | assign and use `word` | assign and use `word` | value |
+| `${NAME:?word}` | error | error | value |
+
+`${NAME:=word}` is a procmail-rs extension accepted in assignment values and
+destination expressions. `NAME` must be an ordinary user variable; settings,
+runtime-produced names, and read-only names cannot be changed this way. Changes
+are held until the complete expression succeeds, but later parts of that same
+expression see them. An error in any later part discards all such changes.
+Other expression contexts reject `:=` while preparing the rc file.
+
+`${NAME:?word}` is a privacy-preserving procmail-rs extension. If `NAME` is
+unset or empty, evaluation reports only `parameter NAME is unset or empty`.
+The parser checks `word` syntax, but the evaluator neither expands nor executes
+it and never includes it in the diagnostic. `word` may be empty.
 
 Inserted variable bytes are literal and are not scanned for another expansion.
 Outside quotes, backslash makes the next byte literal. Inside double quotes,
@@ -70,6 +85,7 @@ commands are not run, and backslash has no special meaning.
 ```
 MAILDIR=/srv/mail
 FOLDER=${ACCOUNT:-personal}
+TAG=${OPTIONAL_TAG:=inbox}
 LABEL='literal $ACCOUNT'-"-$FOLDER"
 
 :0
