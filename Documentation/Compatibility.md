@@ -35,7 +35,7 @@ a supported regex, assignment value, or destination.
 | Syntax area | Supported forms |
 | --- | --- |
 | Statements | `NAME=value`, assignments containing backquoted commands, `INCLUDERC=expression`, `SWITCHRC=expression`, recipes, and nested recipe blocks |
-| Variable references | `$NAME`, `${NAME}`, and `${NAME:-expression}` with bounded nesting; assignment values may concatenate unquoted, single-quoted literal, and double-quoted fragments into one word |
+| Variable references | `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`, `${NAME+word}`, and `${NAME:+word}` with bounded nesting and lazy selection; assignment values may concatenate unquoted, single-quoted literal, and double-quoted fragments into one word |
 | Recipe header | `:0` followed by flags and an optional `: lockfile` |
 | Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
@@ -131,7 +131,7 @@ shell-like rules and reparses the bounded result as a condition:
 maildir:addressed/
 ```
 
-The forms `$NAME`, `${NAME}`, and `${NAME:-expression}` use the runtime values
+The supported parameter forms use the runtime values
 active when the condition is reached. Procmail's `$\NAME` form inserts the
 value as a literal regex fragment, including a leading empty noncapturing group
 that prevents the value from becoming `!`, `$`, `?`, a size test, scoring text,
@@ -275,8 +275,9 @@ follows:
 | `prepend NAME: VALUE` | Inserts a new field before every current field. A later `prepend` therefore appears before an earlier one. |
 
 `NAME` must be non-empty printable ASCII without `:`. `VALUE` uses the bounded
-rc expansion forms `$NAME`, `${NAME}`, and `${NAME:-expression}` when the
-action executes. NUL, CR, LF, and requested folded continuations are rejected.
+rc expansion forms `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`,
+`${NAME+word}`, and `${NAME:+word}` when the action executes. NUL, CR, LF, and
+requested folded continuations are rejected.
 Inserted values are not reparsed as shell text. Existing fields and the body
 remain byte-for-byte unchanged. New fields use the first physical header
 line's LF or CRLF ending, or the separator's ending when the header is empty.

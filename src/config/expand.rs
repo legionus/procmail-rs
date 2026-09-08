@@ -11,8 +11,8 @@ use super::shell_eval::{self, EvaluationContext, EvaluationDepth, UnsupportedPar
 use super::{
     Assignment, AssignmentPath, AssignmentTarget, Config, Destination, HeaderAction,
     HeaderOperation, HeaderValue, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
-    MAX_PATH_EXPRESSION_LEN, PathExpression, RcFileExpression, Recipe, RecipeAction,
-    ShellExpandedCondition, ShellExpression, ShellPart, Statement, SuppliedVariable,
+    MAX_PATH_EXPRESSION_LEN, ParameterOperation, PathExpression, RcFileExpression, Recipe,
+    RecipeAction, ShellExpandedCondition, ShellExpression, ShellPart, Statement, SuppliedVariable,
     VariablePolicy, VariableSource, variable_policy,
 };
 
@@ -760,7 +760,35 @@ impl ConfigPreparer {
         match statement {
             Statement::Assignment(assignment) => self.prepare_assignment(assignment),
             Statement::CommandAssignment(assignment) => {
-                prepare_command_assignment(assignment, &self.known, &self.dynamic)?;
+                let analysis =
+                    ExpressionAnalysis::new(&assignment.expression, &self.known, &self.dynamic);
+                analysis.validate_runtime_references(assignment.line)?;
+                if self.phase == PreparationPhase::Eager
+                    && !analysis.has_runtime_part()
+                    && !analysis.references_dynamic
+                {
+                    let line = assignment.line;
+                    let expansion = bind_static_expression(
+                        &assignment.expression,
+                        assignment.line,
+                        &mut |name| self.known.get(name).map(|value| value.text.clone()),
+                        0,
+                    )?;
+                    *statement = Statement::Assignment(Assignment {
+                        line: assignment.line,
+                        name: assignment.name.clone(),
+                        value: assignment.source.clone(),
+                        target: assignment.target,
+                        expansion: Some(expansion),
+                    });
+                    return match statement {
+                        Statement::Assignment(assignment) => self.prepare_assignment(assignment),
+                        _ => Err(ExpansionError::new(
+                            line,
+                            "prepared assignment has an unexpected statement type",
+                        )),
+                    };
+                }
                 self.dynamic.insert(assignment.name.clone());
                 Ok(())
             }
@@ -998,14 +1026,6 @@ fn assignment_path(path: AssignmentPath) -> (PathPurpose, &'static str) {
         AssignmentPath::LogFile => (PathPurpose::Logfile, "LOGFILE"),
         AssignmentPath::LockFile => (PathPurpose::Lockfile, "LOCKFILE"),
     }
-}
-
-fn prepare_command_assignment(
-    assignment: &super::CommandAssignment,
-    known: &BTreeMap<String, ExpandedValue>,
-    dynamic: &BTreeSet<String>,
-) -> Result<(), ExpansionError> {
-    validate_shell_expression(&assignment.expression, assignment.line, known, dynamic)
 }
 
 fn validate_shell_expression(
@@ -1482,70 +1502,83 @@ impl<'a> ExpressionAnalysis<'a> {
         for part in &expression.parts {
             match part {
                 ShellPart::Literal(_) => {}
-                ShellPart::Variable { name, default } => {
-                    let child = default
-                        .as_ref()
+                ShellPart::Variable { name, operation } => {
+                    let child = operation
+                        .word()
                         .map(|value| Self::new(value, known, dynamic));
                     let policy = variable_policy(name);
                     let known_value = known.get(name);
-                    let known_nonempty = known_value.is_some_and(|value| !value.text.is_empty());
+                    let known_empty = known_value.is_some_and(|value| value.text.is_empty());
                     let available_at_runtime = known_value.is_some()
                         || dynamic.contains(name)
                         || policy == VariablePolicy::RuntimeOnly;
+                    let word_may_run = match known_value {
+                        Some(_) => operation.selects_word(true, known_empty),
+                        None if available_at_runtime => operation.word().is_some(),
+                        None => operation.selects_word(false, false),
+                    };
 
-                    if !available_at_runtime {
+                    if !available_at_runtime && operation.requires_value() {
+                        merge_first_missing(&mut analysis.missing_runtime, None, Some(name));
+                        merge_first_missing(
+                            &mut analysis.missing_shell_condition,
+                            None,
+                            Some(name),
+                        );
+                    }
+                    if word_may_run {
                         merge_first_missing(
                             &mut analysis.missing_runtime,
                             child.as_ref().and_then(|value| value.missing_runtime),
-                            default.is_none().then_some(name),
+                            None,
                         );
                         merge_first_missing(
                             &mut analysis.missing_shell_condition,
                             child
                                 .as_ref()
                                 .and_then(|value| value.missing_shell_condition),
-                            default.is_none().then_some(name),
+                            None,
                         );
                     }
 
-                    if !known_nonempty && policy != VariablePolicy::RuntimeOnly {
+                    if policy != VariablePolicy::RuntimeOnly {
                         merge_first_missing(
                             &mut analysis.missing_path,
-                            child.as_ref().and_then(|value| value.missing_path),
-                            (default.is_none() && known_value.is_none()).then_some(name),
+                            word_may_run
+                                .then(|| child.as_ref().and_then(|value| value.missing_path))
+                                .flatten(),
+                            (known_value.is_none() && operation.requires_value()).then_some(name),
                         );
                     }
 
                     analysis.references_dynamic |= dynamic.contains(name)
-                        || child.as_ref().is_some_and(|value| value.references_dynamic);
+                        || (word_may_run
+                            && child.as_ref().is_some_and(|value| value.references_dynamic));
                     analysis.has_runtime_variable |= policy == VariablePolicy::RuntimeOnly
-                        || child
+                        || (word_may_run
+                            && child
+                                .as_ref()
+                                .is_some_and(|value| value.has_runtime_variable));
+                    analysis.has_command |=
+                        word_may_run && child.as_ref().is_some_and(|value| value.has_command);
+                    analysis.has_regex_quoted_variable |= word_may_run
+                        && child
                             .as_ref()
-                            .is_some_and(|value| value.has_runtime_variable);
-                    analysis.has_command |= child.as_ref().is_some_and(|value| value.has_command);
-                    analysis.has_regex_quoted_variable |= child
-                        .as_ref()
-                        .is_some_and(|value| value.has_regex_quoted_variable);
+                            .is_some_and(|value| value.has_regex_quoted_variable);
                     analysis.needs_runtime |= if policy == VariablePolicy::RuntimeOnly {
                         true
-                    } else if known_nonempty {
-                        false
                     } else {
-                        child.as_ref().is_some_and(|value| value.needs_runtime)
+                        word_may_run && child.as_ref().is_some_and(|value| value.needs_runtime)
                     };
                     analysis.shell_condition_static &=
                         if dynamic.contains(name) || policy == VariablePolicy::RuntimeOnly {
                             false
-                        } else if known_nonempty {
-                            true
-                        } else if known_value.is_some() {
+                        } else if word_may_run {
                             child
                                 .as_ref()
                                 .is_none_or(|value| value.shell_condition_static)
                         } else {
-                            child
-                                .as_ref()
-                                .is_some_and(|value| value.shell_condition_static)
+                            available_at_runtime || !operation.requires_value()
                         };
                 }
                 ShellPart::RegexQuotedVariable(name) => {
@@ -1623,37 +1656,49 @@ fn bind_static_expression(
     for part in &expression.parts {
         match part {
             ShellPart::Literal(text) => push_literal_part(&mut parts, text),
-            ShellPart::Variable { name, default }
+            ShellPart::Variable { name, operation }
                 if variable_policy(name) == VariablePolicy::RuntimeOnly =>
             {
-                let default = default
-                    .as_ref()
-                    .map(|value| bind_static_expression(value, line, lookup, nesting + 1))
-                    .transpose()?;
+                let operation = bind_parameter_operation(operation, line, lookup, nesting + 1)?;
                 parts.push(ShellPart::Variable {
                     name: name.clone(),
-                    default,
+                    operation,
                 });
             }
-            ShellPart::Variable { name, default } => match (lookup(name), default) {
-                (Some(value), _) if !value.is_empty() => push_literal_part(&mut parts, &value),
-                (_, Some(default)) => {
-                    let bound = bind_static_expression(default, line, lookup, nesting + 1)?;
+            ShellPart::Variable { name, operation } => {
+                let value = lookup(name);
+                let is_set = value.is_some();
+                let is_empty = value.as_ref().is_some_and(String::is_empty);
+                if let Some(word) = operation.selected_word(is_set, is_empty) {
+                    let bound = bind_static_expression(word, line, lookup, nesting + 1)?;
                     for part in bound.parts {
                         match part {
                             ShellPart::Literal(text) => push_literal_part(&mut parts, &text),
                             other => parts.push(other),
                         }
                     }
+                } else if operation.requires_value() {
+                    let Some(value) = value else {
+                        return Err(ExpansionError::new(
+                            line,
+                            format!("variable {name} is not set"),
+                        ));
+                    };
+                    push_literal_part(&mut parts, &value);
+                } else if matches!(
+                    operation,
+                    ParameterOperation::DefaultIfUnset(_)
+                        | ParameterOperation::DefaultIfUnsetOrEmpty(_)
+                ) {
+                    let Some(value) = value else {
+                        return Err(ExpansionError::new(
+                            line,
+                            "parameter default selection failed",
+                        ));
+                    };
+                    push_literal_part(&mut parts, &value);
                 }
-                (Some(_), None) => {}
-                (None, None) => {
-                    return Err(ExpansionError::new(
-                        line,
-                        format!("variable {name} is not set"),
-                    ));
-                }
-            },
+            }
             ShellPart::RegexQuotedVariable(_) | ShellPart::Command(_) => {
                 return Err(ExpansionError::new(
                     line,
@@ -1663,6 +1708,32 @@ fn bind_static_expression(
         }
     }
     Ok(ShellExpression { parts })
+}
+
+fn bind_parameter_operation(
+    operation: &ParameterOperation,
+    line: usize,
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    nesting: usize,
+) -> Result<ParameterOperation, ExpansionError> {
+    let bind = |word: &ShellExpression, lookup: &mut _| {
+        bind_static_expression(word, line, lookup, nesting)
+    };
+    match operation {
+        ParameterOperation::Value => Ok(ParameterOperation::Value),
+        ParameterOperation::DefaultIfUnset(word) => {
+            Ok(ParameterOperation::DefaultIfUnset(bind(word, lookup)?))
+        }
+        ParameterOperation::DefaultIfUnsetOrEmpty(word) => Ok(
+            ParameterOperation::DefaultIfUnsetOrEmpty(bind(word, lookup)?),
+        ),
+        ParameterOperation::AlternateIfSet(word) => {
+            Ok(ParameterOperation::AlternateIfSet(bind(word, lookup)?))
+        }
+        ParameterOperation::AlternateIfSetAndNotEmpty(word) => Ok(
+            ParameterOperation::AlternateIfSetAndNotEmpty(bind(word, lookup)?),
+        ),
+    }
 }
 
 fn evaluate_expression(
@@ -2101,7 +2172,7 @@ impl<'a> ExpressionParser<'a> {
                 "'$' must be followed by NAME or {NAME}",
             ));
         };
-        let (name, default) = if first == b'{' {
+        let (name, operation) = if first == b'{' {
             if regex_escape {
                 return Err(ExpansionError::new(
                     self.line,
@@ -2128,7 +2199,7 @@ impl<'a> ExpressionParser<'a> {
                     "unsupported '$' expansion; use $NAME or ${NAME}",
                 ));
             }
-            (self.parse_name(), None)
+            (self.parse_name(), ParameterOperation::Value)
         };
         if variable_policy(&name) == VariablePolicy::Unsupported {
             return Err(ExpansionError::new(
@@ -2139,7 +2210,7 @@ impl<'a> ExpressionParser<'a> {
         if regex_escape {
             Ok(Some(ShellPart::RegexQuotedVariable(name)))
         } else {
-            Ok(Some(ShellPart::Variable { name, default }))
+            Ok(Some(ShellPart::Variable { name, operation }))
         }
     }
 
@@ -2147,32 +2218,58 @@ impl<'a> ExpressionParser<'a> {
         &mut self,
         nesting: usize,
         quote: QuoteMode,
-    ) -> Result<(String, Option<ShellExpression>), ExpansionError> {
+    ) -> Result<(String, ParameterOperation), ExpansionError> {
         self.index += 1;
         let name = self.parse_name();
         validate_reference_name(&name, self.line)?;
         match self.bytes.get(self.index..self.index + 2) {
-            Some(b":-") => {
-                self.index += 2;
-                let default = self.parse_until(nesting + 1, true, false, quote)?;
-                if self.bytes.get(self.index) != Some(&b'}') {
-                    return Err(ExpansionError::new(
-                        self.line,
-                        "variable reference is missing '}'",
-                    ));
-                }
-                self.index += 1;
-                Ok((name, Some(default)))
-            }
+            Some(b":-") => Ok((
+                name,
+                ParameterOperation::DefaultIfUnsetOrEmpty(
+                    self.parse_parameter_word(nesting, quote, 2)?,
+                ),
+            )),
+            Some(b":+") => Ok((
+                name,
+                ParameterOperation::AlternateIfSetAndNotEmpty(
+                    self.parse_parameter_word(nesting, quote, 2)?,
+                ),
+            )),
+            _ if self.bytes.get(self.index) == Some(&b'-') => Ok((
+                name,
+                ParameterOperation::DefaultIfUnset(self.parse_parameter_word(nesting, quote, 1)?),
+            )),
+            _ if self.bytes.get(self.index) == Some(&b'+') => Ok((
+                name,
+                ParameterOperation::AlternateIfSet(self.parse_parameter_word(nesting, quote, 1)?),
+            )),
             _ if self.bytes.get(self.index) == Some(&b'}') => {
                 self.index += 1;
-                Ok((name, None))
+                Ok((name, ParameterOperation::Value))
             }
             _ => Err(ExpansionError::new(
                 self.line,
-                "unsupported parameter expansion; use ${NAME} or ${NAME:-expression}",
+                "unsupported parameter expansion; use ${NAME}, ${NAME-word}, ${NAME:-word}, ${NAME+word}, or ${NAME:+word}",
             )),
         }
+    }
+
+    fn parse_parameter_word(
+        &mut self,
+        nesting: usize,
+        quote: QuoteMode,
+        operator_width: usize,
+    ) -> Result<ShellExpression, ExpansionError> {
+        self.index += operator_width;
+        let word = self.parse_until(nesting + 1, true, false, quote)?;
+        if self.bytes.get(self.index) != Some(&b'}') {
+            return Err(ExpansionError::new(
+                self.line,
+                "variable reference is missing '}'",
+            ));
+        }
+        self.index += 1;
+        Ok(word)
     }
 
     fn parse_name(&mut self) -> String {

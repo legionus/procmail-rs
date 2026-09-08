@@ -2,6 +2,7 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use super::*;
+use crate::config::ParameterOperation;
 
 fn parse_wide(input: &str) -> Result<Config, ParseError> {
     let mut state = ParseBudget::default();
@@ -580,7 +581,7 @@ fn parses_destination_command_substitution_and_stdout_delivery() {
                 ShellPart::Literal("-".into()),
                 ShellPart::Variable {
                     name: "BOX".into(),
-                    default: None,
+                    operation: ParameterOperation::Value,
                 },
             ],
         })
@@ -826,7 +827,7 @@ fn parses_command_substitution_inside_a_default_branch() {
     };
     let ShellPart::Variable {
         name,
-        default: Some(default),
+        operation: ParameterOperation::DefaultIfUnsetOrEmpty(default),
     } = &assignment.expression.parts[0]
     else {
         panic!("expected variable with a default expression");

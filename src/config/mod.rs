@@ -444,8 +444,8 @@ impl ShellExpression {
     pub(crate) fn has_commands(&self) -> bool {
         self.parts.iter().any(|part| match part {
             ShellPart::Command(_) => true,
-            ShellPart::Variable { default, .. } => {
-                default.as_ref().is_some_and(ShellExpression::has_commands)
+            ShellPart::Variable { operation, .. } => {
+                operation.word().is_some_and(ShellExpression::has_commands)
             }
             ShellPart::Literal(_) | ShellPart::RegexQuotedVariable(_) => false,
         })
@@ -468,10 +468,53 @@ pub(crate) enum ShellPart {
     Literal(String),
     Variable {
         name: String,
-        default: Option<ShellExpression>,
+        operation: ParameterOperation,
     },
     RegexQuotedVariable(String),
     Command(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParameterOperation {
+    Value,
+    DefaultIfUnset(ShellExpression),
+    DefaultIfUnsetOrEmpty(ShellExpression),
+    AlternateIfSet(ShellExpression),
+    AlternateIfSetAndNotEmpty(ShellExpression),
+}
+
+impl ParameterOperation {
+    pub(crate) fn word(&self) -> Option<&ShellExpression> {
+        match self {
+            Self::Value => None,
+            Self::DefaultIfUnset(word)
+            | Self::DefaultIfUnsetOrEmpty(word)
+            | Self::AlternateIfSet(word)
+            | Self::AlternateIfSetAndNotEmpty(word) => Some(word),
+        }
+    }
+
+    pub(crate) fn selects_word(&self, is_set: bool, is_empty: bool) -> bool {
+        self.selected_word(is_set, is_empty).is_some()
+    }
+
+    pub(crate) fn selected_word(&self, is_set: bool, is_empty: bool) -> Option<&ShellExpression> {
+        match self {
+            Self::DefaultIfUnset(word) if !is_set => Some(word),
+            Self::DefaultIfUnsetOrEmpty(word) if !is_set || is_empty => Some(word),
+            Self::AlternateIfSet(word) if is_set => Some(word),
+            Self::AlternateIfSetAndNotEmpty(word) if is_set && !is_empty => Some(word),
+            Self::Value
+            | Self::DefaultIfUnset(_)
+            | Self::DefaultIfUnsetOrEmpty(_)
+            | Self::AlternateIfSet(_)
+            | Self::AlternateIfSetAndNotEmpty(_) => None,
+        }
+    }
+
+    pub(crate) fn requires_value(&self) -> bool {
+        matches!(self, Self::Value)
+    }
 }
 
 #[derive(Debug, Clone)]

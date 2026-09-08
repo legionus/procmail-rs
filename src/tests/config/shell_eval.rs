@@ -73,15 +73,15 @@ fn selects_defaults_only_for_missing_or_empty_values() {
         parts: vec![
             ShellPart::Variable {
                 name: "SET".to_owned(),
-                default: Some(literal("wrong")),
+                operation: ParameterOperation::DefaultIfUnsetOrEmpty(literal("wrong")),
             },
             ShellPart::Variable {
                 name: "EMPTY".to_owned(),
-                default: Some(literal("empty-default")),
+                operation: ParameterOperation::DefaultIfUnsetOrEmpty(literal("empty-default")),
             },
             ShellPart::Variable {
                 name: "MISSING".to_owned(),
-                default: Some(literal("missing-default")),
+                operation: ParameterOperation::DefaultIfUnsetOrEmpty(literal("missing-default")),
             },
         ],
     };
@@ -104,7 +104,7 @@ fn accounts_for_literal_prefix_before_evaluating_a_default() {
             ShellPart::Literal("ab".to_owned()),
             ShellPart::Variable {
                 name: "MISSING".to_owned(),
-                default: Some(literal("cde")),
+                operation: ParameterOperation::DefaultIfUnsetOrEmpty(literal("cde")),
             },
         ],
     };

@@ -139,7 +139,7 @@ fn single_quotes_are_literal_and_can_be_concatenated_with_other_quote_modes() {
             ShellPart::Literal("pre$NAME `printf hidden` \\ raw-".to_owned()),
             ShellPart::Variable {
                 name: "NAME".to_owned(),
-                default: None,
+                operation: ParameterOperation::Value,
             },
             ShellPart::Literal("-post".to_owned()),
         ]
@@ -218,6 +218,34 @@ fn runtime_byte_expansion_preserves_binary_values_and_defaults() {
         .unwrap();
 
     assert_eq!(expanded, b"pre-a\xffz-a\xffz-post");
+}
+
+#[test]
+fn runtime_byte_expansion_applies_every_parameter_alternative() {
+    let set = b"value";
+    let empty = b"";
+    for (source, expected) in [
+        ("${MISSING-default}", &b"default"[..]),
+        ("${EMPTY-default}", &b""[..]),
+        ("${SET-default}", &b"value"[..]),
+        ("${MISSING:-default}", &b"default"[..]),
+        ("${EMPTY:-default}", &b"default"[..]),
+        ("${SET:-default}", &b"value"[..]),
+        ("${MISSING+alternate}", &b""[..]),
+        ("${EMPTY+alternate}", &b"alternate"[..]),
+        ("${SET+alternate}", &b"alternate"[..]),
+        ("${MISSING:+alternate}", &b""[..]),
+        ("${EMPTY:+alternate}", &b""[..]),
+        ("${SET:+alternate}", &b"alternate"[..]),
+    ] {
+        let expanded = expand_runtime_bytes(source, 7, 64, |name| match name {
+            "SET" => Some(&set[..]),
+            "EMPTY" => Some(&empty[..]),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(expanded, expected, "expression {source}");
+    }
 }
 
 #[test]
@@ -877,7 +905,16 @@ fn expands_destinations_inside_recipe_blocks() {
 
 #[test]
 fn rejects_unsupported_and_malformed_references() {
-    for source in ["A=$$\n", "A=${NAME:=value}\n", "A=${NAME\n", "A=$\n"] {
+    for source in [
+        "A=$$\n",
+        "A=${NAME:=value}\n",
+        "A=${NAME:?value}\n",
+        "A=${#NAME}\n",
+        "A=${NAME%pattern}\n",
+        "A=${NAME^pattern}\n",
+        "A=${NAME\n",
+        "A=$\n",
+    ] {
         assert!(parse(source).is_err(), "{source:?}");
     }
 }
@@ -969,15 +1006,116 @@ T1="\`printf\`"
 #[test]
 fn expands_shell_like_defaults_lazily() {
     let config = parse(
-            "EMPTY=\nROOT=/mail\nA=${MISSING:-$ROOT/inbox}\nB=${EMPTY:-${MISSING:-fallback}}\nC=${ROOT:-$UNDEFINED}\n",
+            "EMPTY=\nROOT=/mail\nA=${MISSING:-$ROOT/inbox}\nB=${EMPTY:-${MISSING:-fallback}}\nC=${ROOT:-$UNDEFINED}\nD=${ROOT-$UNDEFINED}\nE=${MISSING+$UNDEFINED}\nF=${EMPTY:+$UNDEFINED}\n",
         )
         .unwrap()
         .expand(&[])
         .unwrap();
 
-    for (index, expected) in [(2, "/mail/inbox"), (3, "fallback"), (4, "/mail")] {
+    for (index, expected) in [
+        (2, "/mail/inbox"),
+        (3, "fallback"),
+        (4, "/mail"),
+        (5, "/mail"),
+        (6, ""),
+        (7, ""),
+    ] {
         let Statement::Assignment(assignment) = &config.statements[index] else {
             panic!("expected assignment");
+        };
+        assert_eq!(assignment.value, expected);
+    }
+}
+
+#[test]
+fn parameter_alternatives_distinguish_unset_empty_and_nonempty_values() {
+    let config = parse(concat!(
+        "EMPTY=\n",
+        "SET=value\n",
+        "A=${MISSING-default}\n",
+        "B=${EMPTY-default}\n",
+        "C=${SET-default}\n",
+        "D=${MISSING:-default}\n",
+        "E=${EMPTY:-default}\n",
+        "F=${SET:-default}\n",
+        "G=${MISSING+alternate}\n",
+        "H=${EMPTY+alternate}\n",
+        "I=${SET+alternate}\n",
+        "J=${MISSING:+alternate}\n",
+        "K=${EMPTY:+alternate}\n",
+        "L=${SET:+alternate}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+
+    let values = config
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Assignment(assignment) => {
+                Some((assignment.name.as_str(), assignment.value.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (name, expected) in [
+        ("A", "default"),
+        ("B", ""),
+        ("C", "value"),
+        ("D", "default"),
+        ("E", "default"),
+        ("F", "value"),
+        ("G", ""),
+        ("H", "alternate"),
+        ("I", "alternate"),
+        ("J", ""),
+        ("K", ""),
+        ("L", "alternate"),
+    ] {
+        assert_eq!(values.get(name), Some(&expected), "assignment {name}");
+    }
+}
+
+#[test]
+fn parameter_alternatives_allow_empty_and_nested_words() {
+    let config = parse(concat!(
+        "EMPTY=\n",
+        "SET=value\n",
+        "A=${MISSING-}\n",
+        "B=${EMPTY:-}\n",
+        "C=${MISSING+}\n",
+        "D=${SET:+}\n",
+        "E=${MISSING-${EMPTY:+bad}${EMPTY+${SET:+nested}}}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+
+    for (index, expected) in [(2, ""), (3, ""), (4, ""), (5, ""), (6, "nested")] {
+        let Statement::Assignment(assignment) = &config.statements[index] else {
+            panic!("expected assignment");
+        };
+        assert_eq!(assignment.value, expected);
+    }
+}
+
+#[test]
+fn unselected_parameter_words_do_not_execute_commands_or_resolve_variables() {
+    let config = parse(concat!(
+        "SET=value\n",
+        "A=${SET:-`exit 1`$UNDEFINED}\n",
+        "B=${SET-`exit 1`$UNDEFINED}\n",
+        "C=${MISSING+`exit 1`$UNDEFINED}\n",
+        "D=${MISSING:+`exit 1`$UNDEFINED}\n",
+    ))
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+
+    for (index, expected) in [(1, "value"), (2, "value"), (3, ""), (4, "")] {
+        let Statement::Assignment(assignment) = &config.statements[index] else {
+            panic!("expected statically selected assignment");
         };
         assert_eq!(assignment.value, expected);
     }

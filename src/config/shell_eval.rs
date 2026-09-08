@@ -3,7 +3,7 @@
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
-use super::{MAX_EXPANSION_DEPTH, ShellExpression, ShellPart};
+use super::{MAX_EXPANSION_DEPTH, ParameterOperation, ShellExpression, ShellPart};
 
 #[cfg(test)]
 #[path = "../tests/config/shell_eval.rs"]
@@ -76,33 +76,46 @@ fn evaluate_at<C: EvaluationContext>(
     for part in &expression.parts {
         match part {
             ShellPart::Literal(text) => append(&mut output, text.as_bytes(), limit, context)?,
-            ShellPart::Variable { name, default } => {
+            ShellPart::Variable { name, operation } => {
                 let found = context.variable(name)?;
-                let (selected, used_default, empty_value) = match (found, default) {
-                    (Some(value), _) if !value.bytes.is_empty() => (value, false, false),
-                    (_, Some(default)) => {
-                        let remaining = remaining(&output, limit, context)?;
-                        let nested = nesting
-                            .checked_add(1)
-                            .ok_or_else(|| context.depth_overflow())?;
-                        let value = evaluate_at(default, remaining, nested, context)?;
+                let is_set = found.is_some();
+                let is_empty = found.as_ref().is_some_and(|value| value.bytes.is_empty());
+                let (selected, used_word, empty_value) =
+                    if let Some(word) = operation.selected_word(is_set, is_empty) {
                         (
-                            VariableValue {
-                                bytes: value.bytes,
-                                depth: value.depth,
-                            },
+                            evaluate_word(word, &output, limit, nesting, context)?,
                             true,
                             false,
                         )
-                    }
-                    (Some(value), None) => (value, false, true),
-                    (None, None) => return Err(context.missing_variable(name)),
-                };
+                    } else if operation.requires_value()
+                        || matches!(
+                            operation,
+                            ParameterOperation::DefaultIfUnset(_)
+                                | ParameterOperation::DefaultIfUnsetOrEmpty(_)
+                        )
+                    {
+                        match found {
+                            Some(value) => {
+                                let empty = value.bytes.is_empty();
+                                (value, false, empty)
+                            }
+                            None => return Err(context.missing_variable(name)),
+                        }
+                    } else {
+                        (
+                            VariableValue {
+                                bytes: Vec::new(),
+                                depth: 0,
+                            },
+                            false,
+                            true,
+                        )
+                    };
                 result_depth = result_depth.max(selected_depth(
                     context.depth_mode(),
                     selected.depth,
                     nesting,
-                    used_default,
+                    used_word,
                     empty_value,
                     context,
                 )?);
@@ -126,11 +139,29 @@ fn evaluate_at<C: EvaluationContext>(
     })
 }
 
+fn evaluate_word<C: EvaluationContext>(
+    word: &ShellExpression,
+    output: &BoundedBytes,
+    limit: usize,
+    nesting: usize,
+    context: &mut C,
+) -> Result<VariableValue, C::Error> {
+    let remaining = remaining(output, limit, context)?;
+    let nested = nesting
+        .checked_add(1)
+        .ok_or_else(|| context.depth_overflow())?;
+    let value = evaluate_at(word, remaining, nested, context)?;
+    Ok(VariableValue {
+        bytes: value.bytes,
+        depth: value.depth,
+    })
+}
+
 fn selected_depth<C: EvaluationContext>(
     mode: EvaluationDepth,
     value_depth: usize,
     nesting: usize,
-    used_default: bool,
+    used_word: bool,
     empty_value: bool,
     context: &C,
 ) -> Result<usize, C::Error> {
@@ -139,7 +170,7 @@ fn selected_depth<C: EvaluationContext>(
         EvaluationDepth::ExpansionChain => value_depth
             .checked_add(1)
             .ok_or_else(|| context.depth_overflow())?,
-        EvaluationDepth::SyntaxNesting if used_default => value_depth,
+        EvaluationDepth::SyntaxNesting if used_word => value_depth,
         EvaluationDepth::SyntaxNesting if empty_value => nesting,
         EvaluationDepth::SyntaxNesting => nesting
             .checked_add(1)

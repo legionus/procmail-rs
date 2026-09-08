@@ -45,10 +45,20 @@ independently.
 
 # VARIABLE EXPANSION
 
-The supported forms are `$NAME`, `${NAME}`, and
-`${NAME:-expression}`. A name begins with an ASCII letter or underscore and
-continues with ASCII letters, digits, or underscores. The `:-` expression is
-used only when the named value is absent or empty.
+The supported forms are `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`,
+`${NAME+word}`, and `${NAME:+word}`. A name begins with an ASCII letter or
+underscore and continues with ASCII letters, digits, or underscores. The `-`
+form uses `word` when the name is unset; `:-` also treats an empty value as
+unset. The `+` form uses `word` when the name is set; `:+` additionally
+requires a non-empty value. An unselected word is not evaluated, and `word`
+may be empty.
+
+| Form | Result when unset | Result when empty | Result when non-empty |
+| --- | --- | --- | --- |
+| `${NAME-word}` | `word` | empty value | value |
+| `${NAME:-word}` | `word` | `word` | value |
+| `${NAME+word}` | empty | `word` | `word` |
+| `${NAME:+word}` | empty | empty | `word` |
 
 Inserted variable bytes are literal and are not scanned for another expansion.
 Outside quotes, backslash makes the next byte literal. Inside double quotes,
@@ -593,8 +603,8 @@ header/body separator selects CRLF or LF; LF is the final fallback. Existing
 unmodified fields, their original endings, malformed binary fields, the
 separator, and the body retain their bytes.
 
-`VALUE` supports `$NAME`, `${NAME}`, `${NAME:-expression}`, and the ordinary
-backslash rules described under VARIABLE EXPANSION. Expansion occurs when the
+`VALUE` supports all parameter forms described under VARIABLE EXPANSION and
+the ordinary backslash rules described there. Expansion occurs when the
 selected recipe executes, so `MATCH`, numbered captures, `LASTFOLDER`, and
 earlier assignments may be used:
 
