@@ -47,7 +47,7 @@ fn unwaited_pipes_overlap_and_are_reaped_before_completion() {
         let marker = base.join("parent-ran");
         let log = base.join("commands.log");
         format!(
-            "MAILDIR={}\nTIMEOUT=3\nLOGFILE={}\n:0 c\n| while test ! -e {}; do sleep 0.01; done; printf first >&2\n:0\n| : > {}; printf second >&2\n",
+            "MAILDIR={}\nTIMEOUT=3\nLOGFILE={}\n:0 c\n| while test ! -e {}; do sleep 0.01; done; printf first >&2\n:0\n| cat >/dev/null; : > {}; printf second >&2\n",
             base.display(),
             log.display(),
             marker.display(),
@@ -69,7 +69,7 @@ fn unwaited_pipe_holds_its_local_lock_until_the_child_exits() {
         let acquired = base.join("lock-was-free");
         let lock = base.join("recipe.lock");
         format!(
-            "MAILDIR={}\nTIMEOUT=3\n:0 c : {}\n| while test ! -e {}; do sleep 0.01; done\n:0\n| if flock -n {} -c true; then : > {}; fi; : > {}\n",
+            "MAILDIR={}\nTIMEOUT=3\n:0 c : {}\n| while test ! -e {}; do sleep 0.01; done\n:0\n| cat >/dev/null; if flock -n {} -c true; then : > {}; fi; : > {}\n",
             base.display(),
             lock.display(),
             marker.display(),

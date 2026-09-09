@@ -216,7 +216,7 @@ fn injected_flock_error_is_returned_without_retrying() {
         &parent,
         "lock",
         OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC,
-        Mode::from_raw_mode(LOCK_FILE_MODE),
+        super::super::creation_mode(LOCK_FILE_MODE, 0),
     )
     .unwrap();
     let mut attempts = 0usize;
@@ -249,7 +249,7 @@ fn flock_waits_for_the_selected_retry_interval() {
         &parent,
         "lock",
         OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC,
-        Mode::from_raw_mode(LOCK_FILE_MODE),
+        super::super::creation_mode(LOCK_FILE_MODE, 0),
     )
     .unwrap();
     let retry = Duration::from_millis(40);

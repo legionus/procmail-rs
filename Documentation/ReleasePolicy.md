@@ -39,6 +39,8 @@ All third-party CI actions are selected by a full commit identifier with a
 nearby release-tag comment. Review and update both together rather than using
 a moving tag.
 
-The supported release platform is 32-bit and 64-bit Linux. Non-Linux Unix and
-Windows releases remain deferred until their delivery behavior has dedicated
-implementation and runtime tests.
+The supported release platforms are 32-bit and 64-bit Linux and 64-bit
+FreeBSD. Linux delivery is exercised directly by the main CI jobs, while a
+native FreeBSD VM job exercises its platform-specific Maildir publication.
+Other Unix systems and Windows remain deferred until their delivery behavior
+has dedicated implementation and runtime tests.

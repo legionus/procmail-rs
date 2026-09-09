@@ -22,8 +22,57 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  linux-64:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build and test
+        run: |
+          cargo +stable check --locked
+          cargo +stable test --locked
+
+  linux-32:
+    name: Linux i686
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the 32-bit toolchain support
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-multilib
+          rustup toolchain install stable --profile minimal
+          rustup target add --toolchain stable i686-unknown-linux-gnu
+      - name: Run tests as 32-bit Linux executables
+        run: cargo +stable test --locked --target i686-unknown-linux-gnu
+
+  freebsd-64:
+    name: FreeBSD x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Native execution is required here: cross-compilation cannot exercise
+      # the named-file publication path, filesystem checks, locks, or mapping.
+      - name: Build and test in FreeBSD
+        uses: vmactions/freebsd-vm@8b0f1a8fc0ea0def307835c258940ca358fe6480 # v1.5.6
+        with:
+          prepare: |
+            fetch -o /tmp/rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-freebsd/rustup-init
+            chmod 755 /tmp/rustup-init
+            /tmp/rustup-init -y --profile minimal --default-toolchain stable
+          run: |
+            export PATH="$HOME/.cargo/bin:$PATH"
+            cargo +stable check --locked
+            cargo +stable test --locked
+
   quality:
-    name: Stable build, lint, and tests
+    name: Formatting, lint, documentation, and packaging
+    needs: [linux-64, linux-32, freebsd-64]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -38,34 +87,16 @@ jobs:
         run: |
           cargo +stable fmt --all -- --check
           cargo +stable fmt --manifest-path fuzz/Cargo.toml --all -- --check
-      - name: Check the production targets
-        run: cargo +stable check --locked
       - name: Run clippy
         run: cargo +stable clippy --locked --all-targets -- -D warnings
-      - name: Run the complete test suite
-        run: cargo +stable test --locked
       - name: Test the source package and staged installation
         run: make check-package
       - name: Check patch whitespace
         run: git diff --check
 
-  linux-32:
-    name: 32-bit Linux tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install the 32-bit toolchain support
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes gcc-multilib
-          rustup toolchain install stable --profile minimal
-          rustup target add --toolchain stable i686-unknown-linux-gnu
-      - name: Run tests as 32-bit Linux executables
-        run: cargo +stable test --locked --target i686-unknown-linux-gnu
-
   audit:
     name: Dependencies, licenses, and unsafe audit
+    needs: [linux-64, linux-32, freebsd-64]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -93,6 +124,7 @@ jobs:
 
   fuzz:
     name: Nightly fuzz smoke tests
+    needs: [linux-64, linux-32, freebsd-64]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -112,6 +144,7 @@ jobs:
 
   delivery-stress:
     name: Performance and concurrent delivery
+    needs: [linux-64, linux-32, freebsd-64]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -127,6 +160,7 @@ jobs:
 
   msrv:
     name: Rust 1.85 compatibility
+    needs: [linux-64, linux-32, freebsd-64]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

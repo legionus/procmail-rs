@@ -13,10 +13,16 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use rustix::fd::OwnedFd;
-use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, fsync, linkat, openat, renameat_with};
-use rustix::rand::{GetRandomFlags, getrandom};
+use rustix::fs::{CWD, Mode, OFlags, fsync, openat};
 
 use super::{PendingSink, PublishedDelivery, SinkCommitError};
+
+#[cfg(target_os = "freebsd")]
+#[path = "maildir/freebsd.rs"]
+mod platform;
+#[cfg(target_os = "linux")]
+#[path = "maildir/linux.rs"]
+mod platform;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Durability {
@@ -63,7 +69,7 @@ const MAILDIR_FILE_MODE: u32 = 0o600;
 /// The destination and its `tmp`, `new`, and `cur` directories must already
 /// exist. Delivery never creates or repairs Maildir directory structures.
 pub struct MaildirSink {
-    file: OwnedFd,
+    pending: platform::PendingFile,
     tmp_dir: OwnedFd,
     new_dir: OwnedFd,
     maildir: PathBuf,
@@ -81,11 +87,11 @@ impl MaildirSink {
         // also reject a component replaced with a symlink during this step.
         let tmp_dir = open_directory_at(&maildir, OsStr::new("tmp"))?;
         let new_dir = open_directory_at(&maildir, OsStr::new("new"))?;
-        let _cur_dir = open_directory_at(&maildir, OsStr::new("cur"))?;
-
-        let file = create_unnamed_pending_file(&tmp_dir, mask)?;
+        let cur_dir = open_directory_at(&maildir, OsStr::new("cur"))?;
+        platform::validate_directories(&maildir, &tmp_dir, &new_dir, &cur_dir)?;
+        let pending = platform::PendingFile::create(&tmp_dir, mask, unique_name)?;
         Ok(Self {
-            file,
+            pending,
             tmp_dir,
             new_dir,
             maildir: path.to_owned(),
@@ -94,49 +100,9 @@ impl MaildirSink {
     }
 }
 
-fn create_unnamed_pending_file(dir: &OwnedFd, mask: u32) -> io::Result<OwnedFd> {
-    // Keeping the inode unnamed until commit makes abort a close-only
-    // operation. No directory entry needs deletion when validation or a write
-    // fails, so another process cannot substitute a victim for cleanup.
-    openat(
-        dir,
-        ".",
-        OFlags::WRONLY | OFlags::TMPFILE | OFlags::CLOEXEC,
-        Mode::from_raw_mode(MAILDIR_FILE_MODE & !mask),
-    )
-    .map_err(io_error)
-}
-
-fn link_unique_pending_file(
-    file: &OwnedFd,
-    dir: &OwnedFd,
-    mut next_name: impl FnMut() -> io::Result<String>,
-) -> io::Result<String> {
-    // Retry only collisions: another error describes a condition that choosing
-    // another name cannot repair. The fixed attempt count also prevents a bad
-    // random source or a hostile directory from keeping delivery in this loop.
-    for _ in 0..MAX_NAME_ATTEMPTS {
-        let name = next_name()?;
-        match linkat(file, "", dir, name.as_str(), AtFlags::EMPTY_PATH) {
-            Ok(()) => return Ok(name),
-            Err(rustix::io::Errno::EXIST) => continue,
-            Err(error) => return Err(io_error(error)),
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("cannot allocate a unique Maildir name after {MAX_NAME_ATTEMPTS} attempts"),
-    ))
-}
-
-fn publish_linked_file(tmp_dir: &OwnedFd, new_dir: &OwnedFd, name: &str) -> io::Result<()> {
-    renameat_with(tmp_dir, name, new_dir, name, RenameFlags::NOREPLACE).map_err(io_error)
-}
-
 impl Write for MaildirSink {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        rustix::io::write(&self.file, bytes).map_err(io_error)
+        rustix::io::write(self.pending.file(), bytes).map_err(io_error)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -146,49 +112,77 @@ impl Write for MaildirSink {
 
 impl PendingSink for MaildirSink {
     fn commit(self: Box<Self>) -> Result<PublishedDelivery, SinkCommitError> {
-        (*self).commit_with(|file| fsync(file).map_err(io_error), publish_linked_file)
+        (*self).commit_with(|file| fsync(file).map_err(io_error))
     }
 
     fn abort(self: Box<Self>) -> io::Result<()> {
-        Ok(())
+        let MaildirSink {
+            pending, tmp_dir, ..
+        } = *self;
+        pending.abort(&tmp_dir)
     }
 }
 
 impl MaildirSink {
-    // Keep publication ordering in one path while allowing tests to fail the
-    // otherwise hard-to-reproduce sync and rename syscalls. The supplied
-    // operations must have the same success effects as fsync and the
-    // descriptor-relative tmp-to-new rename used by production.
+    // Keep durability ordering above the platform publication mechanism so
+    // every backend reaches the same visible success point. Tests replace only
+    // fsync here; platform-specific collision and pathname behavior stays in
+    // the selected implementation module.
     fn commit_with(
         self,
         mut sync: impl FnMut(&OwnedFd) -> io::Result<()>,
-        rename: impl FnOnce(&OwnedFd, &OwnedFd, &str) -> io::Result<()>,
     ) -> Result<PublishedDelivery, SinkCommitError> {
         if self.durability != Durability::None {
-            sync(&self.file).map_err(SinkCommitError::before_publication)?;
+            sync(self.pending.file()).map_err(SinkCommitError::before_publication)?;
         }
 
-        let name = link_unique_pending_file(&self.file, &self.tmp_dir, unique_name)
-            .map_err(SinkCommitError::before_publication)?;
+        let name = self
+            .pending
+            .publish(&self.tmp_dir, &self.new_dir, unique_name)
+            .map_err(|error| match error.into_parts() {
+                (source, Some(name)) => SinkCommitError::after_publication(
+                    source,
+                    PublishedDelivery::new(self.maildir.join("new").join(name)),
+                ),
+                (source, None) => SinkCommitError::before_publication(source),
+            })?;
+        let published = PublishedDelivery::new(self.maildir.join("new").join(name));
 
-        // Publish with one descriptor-relative rename so readers observe
-        // either no entry or the complete file. A cross-mount layout fails
-        // with EXDEV; falling back to copy-and-remove would expose partial
-        // contents and is deliberately not attempted.
-        match rename(&self.tmp_dir, &self.new_dir, &name) {
-            Ok(()) => {
-                let published = PublishedDelivery::new(self.maildir.join("new").join(&name));
-                if self.durability == Durability::Full {
-                    for directory in [&self.tmp_dir, &self.new_dir] {
-                        if let Err(error) = sync(directory) {
-                            return Err(SinkCommitError::after_publication(error, published));
-                        }
-                    }
+        if self.durability == Durability::Full {
+            for directory in [&self.tmp_dir, &self.new_dir] {
+                if let Err(error) = sync(directory) {
+                    return Err(SinkCommitError::after_publication(error, published));
                 }
-                Ok(published)
             }
-            Err(error) => Err(SinkCommitError::before_publication(error)),
         }
+        Ok(published)
+    }
+}
+
+#[derive(Debug)]
+struct PlatformPublishError {
+    source: io::Error,
+    published_name: Option<String>,
+}
+
+impl PlatformPublishError {
+    fn before(source: io::Error) -> Self {
+        Self {
+            source,
+            published_name: None,
+        }
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn after(source: io::Error, published_name: String) -> Self {
+        Self {
+            source,
+            published_name: Some(published_name),
+        }
+    }
+
+    fn into_parts(self) -> (io::Error, Option<String>) {
+        (self.source, self.published_name)
     }
 }
 
@@ -260,7 +254,7 @@ pub(crate) fn open_directory_at(dir: impl rustix::fd::AsFd, name: &OsStr) -> io:
 
 fn unique_name() -> io::Result<String> {
     let mut random = [0u8; MAILDIR_RANDOM_BYTES];
-    getrandom(&mut random, GetRandomFlags::empty()).map_err(io_error)?;
+    platform::fill_random(&mut random)?;
 
     // Encode the fixed-size random value directly so the name cannot contain
     // path separators or metadata about the process. Exclusive creation below

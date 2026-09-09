@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{
-    FileType, FlockOperation, Mode, OFlags, SeekFrom, flock, fstat, fsync, ftruncate, openat, seek,
+    FileType, FlockOperation, OFlags, SeekFrom, flock, fstat, fsync, ftruncate, openat, seek,
 };
 
 use crate::config::OutputEnding;
@@ -131,7 +131,7 @@ impl MboxFile {
             &parent,
             name.as_bytes(),
             OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::from_raw_mode(MBOX_FILE_MODE & !mask),
+            super::creation_mode(MBOX_FILE_MODE, mask),
         )
         .map_err(io_error)?;
         let stat = fstat(&fd).map_err(io_error)?;

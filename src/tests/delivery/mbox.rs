@@ -129,13 +129,19 @@ fn opens_regular_mailbox_without_following_symlinks_or_hard_links() {
     fs::hard_link(&mailbox, &hardlink).unwrap();
     assert!(MboxFile::open(&mailbox, 0).is_err());
 
-    let inaccessible = directory.join("inaccessible");
-    fs::write(&inaccessible, b"").unwrap();
-    fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o000)).unwrap();
-    assert_eq!(
-        MboxFile::open(&inaccessible, 0).err().unwrap().kind(),
-        std::io::ErrorKind::PermissionDenied
-    );
+    // Root can legitimately open a mode-000 file on the FreeBSD CI guest, so
+    // that environment cannot exercise the permission-denied branch. Keep the
+    // assertion on every unprivileged test run instead of mistaking successful
+    // privilege bypass for a delivery error.
+    if rustix::process::getuid().as_raw() != 0 {
+        let inaccessible = directory.join("inaccessible");
+        fs::write(&inaccessible, b"").unwrap();
+        fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(
+            MboxFile::open(&inaccessible, 0).err().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
     drop(_opened);
     fs::remove_dir_all(directory).unwrap();
 }

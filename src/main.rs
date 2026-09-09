@@ -3,12 +3,6 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(not(all(
-    target_os = "linux",
-    any(target_pointer_width = "32", target_pointer_width = "64")
-)))]
-compile_error!("procmail-rs currently supports only 32-bit and 64-bit Linux targets");
-
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;

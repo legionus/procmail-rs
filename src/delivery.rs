@@ -7,18 +7,34 @@ use std::path::PathBuf;
 
 use crate::message::{Message, MessageHead, MessageReadError, StreamedMessage};
 
-#[cfg(target_os = "linux")]
 pub mod discard;
-#[cfg(target_os = "linux")]
 pub mod local_lock;
-#[cfg(target_os = "linux")]
 pub mod maildir;
-#[cfg(target_os = "linux")]
 pub mod mbox;
-#[cfg(target_os = "linux")]
 pub mod staging;
 
 pub const MAX_PENDING_SINKS: usize = 256;
+
+pub(crate) fn creation_mode(requested: u32, mask: u32) -> rustix::fs::Mode {
+    let allowed = requested & !mask;
+    let mut mode = rustix::fs::Mode::empty();
+    for (bit, permission) in [
+        (0o400, rustix::fs::Mode::RUSR),
+        (0o200, rustix::fs::Mode::WUSR),
+        (0o100, rustix::fs::Mode::XUSR),
+        (0o040, rustix::fs::Mode::RGRP),
+        (0o020, rustix::fs::Mode::WGRP),
+        (0o010, rustix::fs::Mode::XGRP),
+        (0o004, rustix::fs::Mode::ROTH),
+        (0o002, rustix::fs::Mode::WOTH),
+        (0o001, rustix::fs::Mode::XOTH),
+    ] {
+        if allowed & bit != 0 {
+            mode.insert(permission);
+        }
+    }
+    mode
+}
 
 /// A destination which keeps written bytes private until `commit` succeeds.
 ///
@@ -41,12 +57,10 @@ pub enum DeliveryFailureClass {
 
 impl DeliveryFailureClass {
     pub fn from_io_error(error: &io::Error) -> Self {
-        // Rust 1.93 does not expose EMFILE as a distinct ErrorKind. On the
-        // currently supported Linux target, descriptor exhaustion is a
-        // temporary process resource failure and can succeed after retry.
-        const LINUX_EMFILE: i32 = 24;
-
-        if error.raw_os_error() == Some(LINUX_EMFILE) {
+        // Rust 1.93 does not expose descriptor exhaustion as a distinct
+        // ErrorKind. Ask rustix for the target ABI value instead of embedding
+        // a Linux errno number now that delivery also runs on FreeBSD.
+        if error.raw_os_error() == Some(rustix::io::Errno::MFILE.raw_os_error()) {
             return Self::Retryable;
         }
         Self::from_io_kind(error.kind())
@@ -247,7 +261,6 @@ impl PendingFanout {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub fn stage(
         mut self,
         head: MessageHead,
@@ -286,13 +299,11 @@ impl PendingFanout {
     }
 }
 
-#[cfg(target_os = "linux")]
 struct TeeWriter<'a> {
     fanout: &'a mut PendingFanout,
     staging: &'a mut staging::StagingFile,
 }
 
-#[cfg(target_os = "linux")]
 impl Write for TeeWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.fanout.write_all(bytes)?;

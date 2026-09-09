@@ -35,15 +35,24 @@ one hard link is rejected.
 
 | Setting | Maildir | mbox |
 | --- | --- | --- |
-| `none` | Atomic publication from an unnamed `O_TMPFILE`, without `fsync` | Complete append while locked, without `fsync` |
+| `none` | Atomic no-replace publication, without `fsync` | Complete append while locked, without `fsync` |
 | `file` | `fsync` message before publication | `fsync` mailbox after append |
 | `full` | As `file`, then `fsync` both `tmp` and `new` after publication | As `file`, then `fsync` the parent directory |
 
-Maildir publication uses a no-replace, descriptor-relative rename from `tmp`
-to `new`. A `full` directory-sync failure occurs after publication and is
-reported as such; retrying can create a duplicate. The implementation makes no
-claim about filesystems that do not provide the Linux operations or persistence
-semantics used here.
+On Linux, Maildir data remains in an unnamed `O_TMPFILE` until it is linked
+into `tmp`, then a descriptor-relative no-replace rename publishes it in
+`new`. On FreeBSD, delivery creates a named file exclusively in `tmp`, links
+it into `new` without replacement, verifies that both names identify the open
+file, and removes the `tmp` name. The Maildir and all three subdirectories must
+be owned by the current uid and not writable by group or other users on
+FreeBSD. These checks reduce the pathname-replacement risk but cannot remove
+the race between a check and a pathname operation; Linux therefore remains
+the stronger backend against hostile concurrent directory mutation.
+
+A `full` directory-sync failure occurs after publication and is reported as
+such; retrying can create a duplicate. The implementation makes no claim about
+filesystems whose link, rename, locking, or persistence behavior differs from
+the local filesystems covered by the platform tests.
 
 Mbox appends are serialized with `flock`, using `LOCKTIMEOUT` and `LOCKSLEEP`.
 The original

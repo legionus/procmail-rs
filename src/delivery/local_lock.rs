@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-//! Local recipe locking for the supported Linux target.
+//! Local recipe locking for supported Unix targets.
 
 use std::ffi::OsStr;
 use std::io;
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{
-    AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fstat, openat, statat, unlinkat,
+    AtFlags, FileType, FlockOperation, OFlags, flock, fstat, openat, statat, unlinkat,
 };
 
 use super::maildir::open_directory_path;
@@ -168,7 +168,7 @@ fn acquire_flock(
         &parent,
         name.as_bytes(),
         OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::from_raw_mode(LOCK_FILE_MODE & !mask),
+        super::creation_mode(LOCK_FILE_MODE, mask),
     )
     .map_err(io_error)?;
     let stat = fstat(&file).map_err(io_error)?;
@@ -245,7 +245,7 @@ fn acquire_dotlock(
             &parent,
             name.as_bytes(),
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::from_raw_mode(DOTLOCK_FILE_MODE & !mask),
+            super::creation_mode(DOTLOCK_FILE_MODE, mask),
         ) {
             Ok(file) => {
                 drop(file);

@@ -33,6 +33,12 @@ This program is not a privileged local-delivery agent. It does not select a
 system mailbox, use `/var/spool/mail/$LOGNAME`, forward through sendmail, or
 provide an implicit fallback destination.
 
+Supported targets are 32-bit and 64-bit Linux and 64-bit FreeBSD. Linux keeps
+pending Maildir data unnamed until publication. FreeBSD uses an exclusively
+created named file in `tmp`, restricts directory ownership and permissions,
+and checks the open file identity around publication; it cannot completely
+exclude hostile pathname replacement between a check and an operation.
+
 # COMMANDS
 
 **check**
