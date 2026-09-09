@@ -10,7 +10,7 @@ use crate::config::shell_eval::{
 
 struct OrderedTreeExecution<'a, E, T> {
     message: CompleteMessage<'a>,
-    replacement: Option<OwnedCompleteMessage>,
+    current_message: CurrentMessage,
     runtime: &'a mut RuntimeVariables,
     host: &'a mut dyn OrderedExecutionHost<Error = E, Trace = T>,
     published: usize,
@@ -24,8 +24,7 @@ type OrderedActionResult<E> = Result<(ActionExecution, SequenceControl), Ordered
 
 impl<'a, E, T> OrderedTreeExecution<'a, E, T> {
     fn replace_message(&mut self, message: Message) {
-        let matching = PreparedMatchingMessage::new(&message, true);
-        self.replacement = Some(OwnedCompleteMessage { message, matching });
+        self.current_message.replace(message);
     }
 
     fn action_succeeded(&mut self, control: SequenceControl) -> OrderedActionResult<E> {
@@ -125,7 +124,7 @@ impl CompiledNode {
         T: TraceSink,
     {
         for (index, condition) in self.conditions.iter().enumerate() {
-            let message = current_ordered_message(context.message, context.replacement.as_ref());
+            let message = context.current_message.view(context.message);
             let resolved = condition.resolve_shell_expansion_with(
                 |shell, line| {
                     let parsed;
@@ -211,8 +210,7 @@ impl CompiledNode {
     {
         match &self.action {
             CompiledAction::Capture { action, options } => {
-                let message =
-                    current_ordered_message(context.message, context.replacement.as_ref());
+                let message = context.current_message.view(context.message);
                 let input = message
                     .action_input(options.action_input)
                     .ok_or(EvalError::BodyWasNotBuffered)
@@ -250,8 +248,7 @@ impl CompiledNode {
                 }
             }
             CompiledAction::Headers(action) => {
-                let message =
-                    current_ordered_message(context.message, context.replacement.as_ref());
+                let message = context.current_message.view(context.message);
                 let body = message
                     .body()
                     .ok_or(EvalError::BodyWasNotBuffered)
@@ -285,8 +282,7 @@ impl CompiledNode {
                 context.action_succeeded(SequenceControl::Continue)
             }
             CompiledAction::Pipe { action, options } => {
-                let message =
-                    current_ordered_message(context.message, context.replacement.as_ref());
+                let message = context.current_message.view(context.message);
                 let input = message
                     .action_input(options.action_input)
                     .ok_or(EvalError::BodyWasNotBuffered)
@@ -349,11 +345,12 @@ impl CompiledNode {
                 continuation,
                 output_ending,
             } => {
-                let message =
-                    current_ordered_message(context.message, context.replacement.as_ref())
-                        .raw()
-                        .ok_or(EvalError::BodyWasNotBuffered)
-                        .map_err(OrderedExecutionError::Evaluation)?;
+                let message = context
+                    .current_message
+                    .view(context.message)
+                    .raw()
+                    .ok_or(EvalError::BodyWasNotBuffered)
+                    .map_err(OrderedExecutionError::Evaluation)?;
                 let destination = if let Some(parts) = destination.command_expression() {
                     let limit = active_command_value_limit(
                         context.runtime,
@@ -531,7 +528,9 @@ fn execute_command_assignment<E, T>(
 where
     T: TraceSink,
 {
-    let message = current_ordered_message(context.message, context.replacement.as_ref())
+    let message = context
+        .current_message
+        .view(context.message)
         .raw()
         .ok_or(EvalError::BodyWasNotBuffered)
         .map_err(OrderedExecutionError::Evaluation)?;
@@ -740,7 +739,7 @@ impl ExecutionPlan {
             ))?;
         let mut context = OrderedTreeExecution {
             message,
-            replacement: None,
+            current_message: CurrentMessage::default(),
             runtime,
             host: &mut host,
             published: 0,
@@ -769,9 +768,7 @@ impl ExecutionPlan {
         // bytes belong to mapped staging. Invoke completion while either
         // owner is still alive so callers such as TRAP can consume the final
         // message without allocating another message-sized buffer.
-        let Some(message) =
-            current_ordered_message(context.message, context.replacement.as_ref()).raw()
-        else {
+        let Some(message) = context.current_message.view(context.message).raw() else {
             return Err(OrderedExecutionError::Evaluation(
                 EvalError::BodyWasNotBuffered,
             ));

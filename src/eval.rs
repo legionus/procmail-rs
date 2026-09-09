@@ -42,7 +42,7 @@ pub use explanation::{
     HeaderOperationExplanation, PlanExplanation, RecipeExplanation,
 };
 use header::FanoutPlanState;
-use message::{CompleteMessage, OwnedCompleteMessage, current_ordered_message};
+use message::{CompleteMessage, CurrentMessage};
 pub use message::{
     ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage, PreparedMatchingMessage,
 };

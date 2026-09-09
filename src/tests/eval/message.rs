@@ -22,3 +22,20 @@ fn prepared_matching_message_skips_unused_complete_view() {
 
     assert_eq!(full, None);
 }
+
+#[test]
+fn current_message_clones_share_the_complete_replacement() {
+    let original = Message::from_bytes(b"Subject: original\n\nbody".to_vec());
+    let prepared = PreparedMatchingMessage::new(&original, true);
+    let mut current = CurrentMessage::default();
+    let replacement = b"X-State: replaced\n\nlarge body".repeat(1024);
+    current.replace(Message::from_bytes(replacement.clone()));
+
+    let branch = current.clone();
+
+    assert!(current.shares_replacement_with(&branch));
+    assert_eq!(
+        branch.view(prepared.complete(&original)).raw(),
+        Some(replacement.as_slice())
+    );
+}

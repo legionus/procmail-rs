@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
+use std::sync::Arc;
+
 use crate::config::{ActionInput, ConditionInput};
 use crate::message::Message;
 #[cfg(test)]
@@ -122,6 +124,37 @@ pub(super) struct OwnedCompleteMessage {
     pub(super) matching: PreparedMatchingMessage,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(super) struct CurrentMessage {
+    replacement: Option<Arc<OwnedCompleteMessage>>,
+}
+
+impl CurrentMessage {
+    pub(super) fn replace(&mut self, message: Message) {
+        let matching = PreparedMatchingMessage::new(&message, true);
+        self.replacement = Some(Arc::new(OwnedCompleteMessage { message, matching }));
+    }
+
+    pub(super) fn view<'a>(&'a self, original: CompleteMessage<'a>) -> CompleteMessage<'a> {
+        match self.replacement.as_deref() {
+            Some(replacement) => CompleteMessage::Buffered {
+                message: &replacement.message,
+                matching_full: replacement.matching.full.as_deref(),
+            },
+            None => original,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn shares_replacement_with(&self, other: &Self) -> bool {
+        match (&self.replacement, &other.replacement) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FinalMessage<'a> {
     bytes: &'a [u8],
@@ -151,19 +184,6 @@ pub(super) enum CompleteMessage<'a> {
         matching_header: Option<&'a [u8]>,
         matching_raw: Option<&'a [u8]>,
     },
-}
-
-pub(super) fn current_ordered_message<'a>(
-    original: CompleteMessage<'a>,
-    replacement: Option<&'a OwnedCompleteMessage>,
-) -> CompleteMessage<'a> {
-    match replacement {
-        Some(replacement) => CompleteMessage::Buffered {
-            message: &replacement.message,
-            matching_full: replacement.matching.full.as_deref(),
-        },
-        None => original,
-    }
 }
 
 fn matching_views_are_valid(
