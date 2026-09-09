@@ -990,6 +990,19 @@ mbox:archive
 documented replacement risk. `LOCKFILE` holds a global lock until it is
 replaced, cleared, or processing ends.
 
+During migration, `LOCKMETHOD=dotlock` and a recipe colon combine both locking
+schemes for an mbox. The local lock is acquired first and the mbox `flock`
+second; they are released in reverse order. This coordinates with old writers
+which use the same destination plus `LOCKEXT` and with new writers which lock
+the mbox itself:
+
+```
+LOCKMETHOD=dotlock
+
+:0 :
+mbox:archive
+```
+
 `DURABILITY=none`, `file`, or `full` selects publication sync points. Maildir
 uses an unnamed temporary inode and no-replace rename. Mbox holds `flock`,
 records the original length, and attempts rollback after a failed append or

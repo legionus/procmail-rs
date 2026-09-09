@@ -60,3 +60,19 @@ persistent lock file. `LOCKMETHOD=dotlock` provides compatibility with the
 original named-file scheme, including its pathname replacement risk and stale
 lock removal. See [Compatibility.md](Compatibility.md) for the exact behavioral
 differences.
+
+For a transition in which old and new programs write the same mbox, combine
+`LOCKMETHOD=dotlock` with a local recipe lock:
+
+```procmail
+LOCKMETHOD=dotlock
+
+:0 :
+mbox:archive
+```
+
+The recipe first acquires `archive.lock` through compatible exclusive creation
+and then locks `archive` itself with `flock`. It releases the mbox lock before
+removing the dotlock. Writers which observe either mechanism are therefore
+excluded while procmail-rs appends, provided the old writers use the same
+`LOCKEXT` and destination pathname. The dotlock replacement risk still applies.

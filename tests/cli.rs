@@ -2935,6 +2935,58 @@ fn lockext_is_applied_when_each_implicit_lock_is_acquired() {
 }
 
 #[test]
+fn dotlock_recipe_lock_bridges_dotlock_and_flock_mbox_writers() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let mailbox = base.join("transition.mbox");
+    let dotlock = base.join("transition.mbox.lock");
+    let held_mailbox = rustix::fs::open(
+        mailbox.as_os_str().as_bytes(),
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CREATE,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .unwrap();
+    rustix::fs::flock(&held_mailbox, rustix::fs::FlockOperation::LockExclusive).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nLOCKMETHOD=dotlock\nLOCKSLEEP=1\nLOCKTIMEOUT=3\n:0 :\nmbox:{}\n",
+            base.display(),
+            mailbox.display()
+        ),
+    )
+    .unwrap();
+
+    let input = b"Subject: transition locking\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+
+    // Seeing the dotlock while the child is blocked by our kernel lock proves
+    // the transition recipe acquires the old-writer lock before the mbox
+    // flock. Releasing them in the opposite order keeps both writer groups
+    // excluded throughout the append operation.
+    wait_for_path(&dotlock);
+    assert!(child.try_wait().unwrap().is_none());
+    rustix::fs::flock(&held_mailbox, rustix::fs::FlockOperation::Unlock).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(!dotlock.exists());
+    assert!(
+        fs::read(&mailbox)
+            .unwrap()
+            .ends_with(b"Subject: transition locking\n\nbody\n\n")
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn named_dotlock_is_held_while_a_pipe_action_runs() {
     let config = config_file("");
     let base = config.parent().unwrap();
