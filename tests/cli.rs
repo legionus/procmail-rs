@@ -3154,23 +3154,24 @@ fn block_lock_timeout_is_recoverable_by_an_error_handler() {
 
     let second_input = b"Subject: second block lock\n\nbody";
     let started = std::time::Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+    let mut second = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args(["filter", "--config"])
         .arg(&config)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .and_then(|mut child| {
-            child.stdin.take().unwrap().write_all(second_input)?;
-            child.wait_with_output()
-        })
         .unwrap();
+    let second_write = second.stdin.take().unwrap().write_all(second_input);
+    let output = second.wait_with_output().unwrap();
+    let elapsed = started.elapsed();
+    let first_status = first.wait().unwrap();
+    second_write.unwrap();
 
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
-    assert!(started.elapsed() >= std::time::Duration::from_millis(900));
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(elapsed >= std::time::Duration::from_millis(900));
+    assert!(elapsed < std::time::Duration::from_secs(2));
     assert_eq!(delivered_messages(&fallback), [second_input.to_vec()]);
-    assert!(first.wait().unwrap().success());
+    assert!(first_status.success());
     assert!(lock.is_file());
     fs::remove_dir_all(base).unwrap();
 }

@@ -1,0 +1,1560 @@
+.\" SPDX-License-Identifier: MIT
+.\" Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+.\"
+.TH "PROCMAIL\-RS.RC" "5" "" "File Formats Manual" "procmail\-rs"
+.SH NAME
+procmail\-rs.rc \- configuration language for procmail\-rs
+.SH DESCRIPTION
+An rc file is a UTF\-8 sequence of assignments and recipes evaluated in
+source order.
+It selects how \f[B]procmail\-rs\f[R](1) examines and delivers one
+byte\-oriented mail message.
+The accepted language is intentionally smaller than procmail 3.22;
+unsupported recognized forms are rejected instead of being approximated.
+.PP
+The root file is completely parsed and validated before message input is
+read.
+An \f[CR]INCLUDERC\f[R] or \f[CR]SWITCHRC\f[R] whose path depends on
+message processing is loaded when execution reaches it and is subjected
+to the same aggregate limits.
+.SH LEXICAL RULES
+Blank lines and lines whose first non\-whitespace byte is \f[CR]#\f[R]
+are ignored.
+Assignments have the form \f[CR]NAME=value\f[R].
+A recipe begins with \f[CR]:0\f[R], contains zero or more condition
+lines beginning with \f[CR]*\f[R], and ends in one action.
+.PP
+A standalone comment may occur between recipe conditions.
+An assignment value is one shell\-like word.
+After that word, optional whitespace followed by \f[CR]#\f[R] begins a
+comment.
+A \f[CR]#\f[R] within the word, inside either quote mode, after a
+backslash, or inside a backquoted command is data.
+A second unquoted word is rejected instead of being ignored.
+A recipe header may also have a trailing comment.
+Do not append an rc comment to a condition or destination action: there
+it belongs to the regex, path, or shell text being parsed.
+.PP
+Pipe commands and recipe conditions may span physical lines.
+Every continued pipe\-command line retains its trailing backslash for
+the real shell.
+A condition\(cqs trailing backslash and physical newline are removed;
+leading space and tab on the following line are removed for ordinary
+conditions and retained for shell\-expanded \f[CR]$\f[R] conditions.
+Each physical line and the complete joined command or condition are
+bounded by \f[CR]LINEBUF\f[R].
+Unquoted, single\-quoted, and double\-quoted assignment fragments may be
+concatenated without whitespace, as in
+\f[CR]NAME=pre\-\(aqliteral\-\(aq\(dq$VALUE\(dq\f[R].
+.PP
+Physical rc lines, expanded values, and continued conditions and pipe
+commands are bounded by the active \f[CR]LINEBUF\f[R].
+The root rc file itself is bounded independently.
+.SH VARIABLE EXPANSION
+The supported forms are \f[CR]$NAME\f[R], \f[CR]${NAME}\f[R],
+\f[CR]${NAME\-word}\f[R], \f[CR]${NAME:\-word}\f[R],
+\f[CR]${NAME+word}\f[R], \f[CR]${NAME:+word}\f[R],
+\f[CR]${NAME:=word}\f[R], and \f[CR]${NAME:?word}\f[R].
+A name begins with an ASCII letter or underscore and continues with
+ASCII letters, digits, or underscores.
+The \f[CR]\-\f[R] form uses \f[CR]word\f[R] when the name is unset;
+\f[CR]:\-\f[R] also treats an empty value as unset.
+The \f[CR]+\f[R] form uses \f[CR]word\f[R] when the name is set;
+\f[CR]:+\f[R] additionally requires a non\-empty value.
+An unselected word is not evaluated, and \f[CR]word\f[R] may be empty.
+.PP
+.TS
+tab(@);
+lw(17.5n) lw(17.5n) lw(17.5n) lw(17.5n).
+T{
+Form
+T}@T{
+Result when unset
+T}@T{
+Result when empty
+T}@T{
+Result when non\-empty
+T}
+_
+T{
+\f[CR]${NAME\-word}\f[R]
+T}@T{
+\f[CR]word\f[R]
+T}@T{
+empty value
+T}@T{
+value
+T}
+T{
+\f[CR]${NAME:\-word}\f[R]
+T}@T{
+\f[CR]word\f[R]
+T}@T{
+\f[CR]word\f[R]
+T}@T{
+value
+T}
+T{
+\f[CR]${NAME+word}\f[R]
+T}@T{
+empty
+T}@T{
+\f[CR]word\f[R]
+T}@T{
+\f[CR]word\f[R]
+T}
+T{
+\f[CR]${NAME:+word}\f[R]
+T}@T{
+empty
+T}@T{
+empty
+T}@T{
+\f[CR]word\f[R]
+T}
+T{
+\f[CR]${NAME:=word}\f[R]
+T}@T{
+assign and use \f[CR]word\f[R]
+T}@T{
+assign and use \f[CR]word\f[R]
+T}@T{
+value
+T}
+T{
+\f[CR]${NAME:?word}\f[R]
+T}@T{
+error
+T}@T{
+error
+T}@T{
+value
+T}
+.TE
+.PP
+\f[CR]${NAME:=word}\f[R] is a procmail\-rs extension accepted in
+assignment values and destination expressions.
+\f[CR]NAME\f[R] must be an ordinary user variable; settings,
+runtime\-produced names, and read\-only names cannot be changed this
+way.
+Changes are held until the complete expression succeeds, but later parts
+of that same expression see them.
+An error in any later part discards all such changes.
+Other expression contexts reject \f[CR]:=\f[R] while preparing the rc
+file.
+.PP
+\f[CR]${NAME:?word}\f[R] is a privacy\-preserving procmail\-rs
+extension.
+If \f[CR]NAME\f[R] is unset or empty, evaluation reports only
+\f[CR]parameter NAME is unset or empty\f[R].
+The parser checks \f[CR]word\f[R] syntax, but the evaluator neither
+expands nor executes it and never includes it in the diagnostic.
+\f[CR]word\f[R] may be empty.
+.PP
+\f[CR]${#NAME}\f[R] produces the length of the value in bytes, not
+Unicode characters.
+\f[CR]${NAME#pattern}\f[R] removes the shortest matching prefix and
+\f[CR]${NAME##pattern}\f[R] removes the longest.
+\f[CR]${NAME%pattern}\f[R] and \f[CR]${NAME%%pattern}\f[R] apply the
+corresponding operations to a suffix.
+If no prefix or suffix matches, the value is unchanged.
+.PP
+\f[CR]${NAME\(hapattern}\f[R] converts the first byte to ASCII uppercase
+when that byte matches \f[CR]pattern\f[R];
+\f[CR]${NAME\(ha\(hapattern}\f[R] applies the conversion to every
+matching byte.
+\f[CR]${NAME,pattern}\f[R] and \f[CR]${NAME,,pattern}\f[R] provide the
+corresponding ASCII lowercase operations.
+An omitted or empty pattern behaves as \f[CR]?\f[R], matching any single
+byte.
+These operations are byte\-oriented and locale\-independent: ASCII
+letters change case and every non\-ASCII byte is preserved.
+.PP
+Patterns operate on bytes.
+\f[CR]*\f[R] matches zero or more bytes, \f[CR]?\f[R] matches one byte,
+and bracket expressions select bytes or inclusive byte ranges.
+A leading \f[CR]!\f[R] or \f[CR]\(ha\f[R] negates a class.
+Backslash quotes the next pattern byte.
+An unterminated or empty bracket expression is treated as a literal
+\f[CR][\f[R].
+Pattern words use the normal variable, command, quote, and nesting
+syntax.
+Metacharacters from an unquoted variable or command remain active;
+single quotes, double quotes, and backslash make their protected bytes
+literal.
+.PP
+Pattern expansion shares the enclosing value limit.
+Matching is non\-recursive and uses memory proportional to the bounded
+pattern.
+Work above 16777216 state transitions is rejected before matching
+starts.
+.IP
+.EX
+ARCHIVE=reports/2026/final.tar.gz
+NAME=${ARCHIVE##*/}
+STEM=${NAME%%.*}
+BYTES=${#STEM}
+LOWER=${STEM,,}
+.EE
+.PP
+Inserted variable bytes are literal and are not scanned for another
+expansion.
+Outside quotes, backslash makes the next byte literal.
+Inside double quotes, it quotes only \f[CR]$\f[R], backquote, double
+quote, backslash, and newline; before another byte the backslash is
+retained.
+Inside single quotes, every byte is literal until the next single quote:
+variables are not expanded, backquoted commands are not run, and
+backslash has no special meaning.
+.IP
+.EX
+MAILDIR=/srv/mail
+FOLDER=${ACCOUNT:\-personal}
+TAG=${OPTIONAL_TAG:=inbox}
+LABEL=\(aqliteral $ACCOUNT\(aq\-\(dq\-$FOLDER\(dq
+
+:0
+maildir:$MAILDIR/$FOLDER/
+.EE
+.PP
+Field splitting, pathname expansion, tilde expansion, arithmetic
+substitution, special parameters, and other parameter operators are not
+rc expansion features.
+Shell command text is different: it is interpreted by the trusted shell
+selected by \f[CR]SHELL\f[R] and \f[CR]SHELLFLAGS\f[R].
+.SH ASSIGNMENTS
+An ordinary assignment replaces the runtime value used by following
+statements.
+Top\-level settings that affect parsing, such as \f[CR]LINEBUF\f[R] and
+the \f[CR]LIMIT_RC_*\f[R] family, apply only to following source text.
+Parser\-limit assignments are rejected inside recipe blocks.
+.PP
+Backquotes run a trusted shell command when the assignment is reached.
+The command receives the complete current message.
+All trailing LF bytes are removed from its bounded stdout before
+fragments are joined.
+.IP
+.EX
+DOMAIN=\(gaprintf \(aq%s\(rsn\(aq \(dq$MATCH1\(dq | tr A\-Z a\-z\(ga
+ARCHIVE=${DOMAIN:\-unknown}
+.EE
+.PP
+No partial value becomes visible if expansion, execution, or output
+validation fails.
+.SH RECIPES
+The general form is:
+.IP
+.EX
+:0 [FLAGS] [: [LOCKFILE]]
+* CONDITION
+* CONDITION
+ACTION
+.EE
+.PP
+All conditions must match.
+With no conditions, the recipe matches immediately.
+A delivering recipe stops processing the original message; a
+\f[CR]c\f[R] recipe acts on a copy and permits later recipes to
+continue.
+.IP
+.EX
+:0
+* \(haSubject:.*release
+releases/
+
+:0
+inbox/
+.EE
+.SS Recipe flags
+Condition flags and action flags are independent: uppercase \f[CR]H\f[R]
+and \f[CR]B\f[R] select where conditions search, while lowercase
+\f[CR]h\f[R] and \f[CR]b\f[R] select bytes passed to an action.
+Repeating a flag has no additional effect.
+.TP
+\f[CR]H\f[R]
+Search normalized headers.
+This is the condition default when neither \f[CR]H\f[R] nor \f[CR]B\f[R]
+is present.
+Header folding is normalized only for matching; delivery retains the
+original bytes.
+.TP
+\f[CR]B\f[R]
+Search the body.
+\f[CR]HB\f[R] or \f[CR]BH\f[R] searches one combined area containing
+normalized headers, their separator, and the body.
+.TP
+\f[CR]D\f[R]
+Distinguish ASCII uppercase and lowercase in regex conditions.
+Matching is case\-insensitive by default.
+\f[CR]\(haFROM_DAEMON\f[R] remains case\-insensitive because that
+procmail macro requires it.
+.TP
+\f[CR]A\f[R]
+Run only if the last preceding recipe at the same nesting level which
+did not itself have \f[CR]A\f[R] or \f[CR]a\f[R] had matching
+conditions.
+This permits several actions to share one test.
+.TP
+\f[CR]a\f[R]
+Like \f[CR]A\f[R], and additionally require the immediately preceding
+recipe action to have succeeded.
+.TP
+\f[CR]E\f[R]
+Run only if the immediately preceding recipe was not executed.
+A selected \f[CR]E\f[R] recipe prevents a following \f[CR]E\f[R] recipe,
+forming an else\-if chain.
+.TP
+\f[CR]e\f[R]
+Run only if the immediately preceding recipe action was attempted and
+failed.
+A recipe skipped because its conditions did not match is not an error.
+.TP
+\f[CR]c\f[R]
+Deliver or process a copy, then continue with later recipes.
+A copy\-only result does not count as delivery of the original.
+\f[CR]c\f[R] on a recipe block is rejected because process\-cloning
+block behavior is not implemented.
+.TP
+\f[CR]h\f[R]
+Pass only the header section to a pipe, filter, capture, or
+sole\-\f[CR]|\f[R] stdout action.
+.TP
+\f[CR]b\f[R]
+Pass only the body to one of those actions.
+With neither or both of \f[CR]h\f[R] and \f[CR]b\f[R], pass the complete
+message.
+Partial\-area filesystem delivery is rejected.
+.TP
+\f[CR]f\f[R]
+Treat a pipe as a filter.
+Successful bounded stdout replaces the action area; unselected message
+bytes are retained.
+This flag requires a non\-empty pipe command.
+.TP
+\f[CR]w\f[R]
+Wait for a child and make an ordinary nonzero status fail the action.
+The failure is diagnosed and may select a following \f[CR]e\f[R] recipe.
+.TP
+\f[CR]W\f[R]
+Apply the same status handling as \f[CR]w\f[R], but suppress the
+child\-failure diagnostic.
+\f[CR]w\f[R] and \f[CR]W\f[R] cannot be combined.
+.PP
+A non\-filter pipe without \f[CR]w\f[R] or \f[CR]W\f[R] continues recipe
+evaluation after its complete selected input has been written.
+The command remains supervised in the background: \f[CR]TIMEOUT\f[R],
+process\-group termination, stderr redirection to the active
+\f[CR]LOGFILE\f[R], reaping, and any local recipe lock remain in effect.
+procmail\-rs reaps all such commands before finishing the message.
+At most 128 background commands may belong to one message; the next
+action fails instead of creating another process or worker.
+.TP
+\f[CR]i\f[R]
+Ignore only an error encountered while writing selected input to a child
+or direct stdout.
+It does not ignore child status, timeout, invalid filter output, or
+output\-limit failure.
+It is rejected on filesystem delivery so a partial message cannot be
+reported as delivered.
+.TP
+\f[CR]r\f[R]
+Preserve the selected input ending for pipe\-like actions.
+Without \f[CR]r\f[R], the action input receives procmail\-compatible
+terminating LF bytes.
+Maildir already preserves the message, while mbox retains its required
+postmark and framing even with \f[CR]r\f[R].
+.PP
+Flags that have no meaning for an action are either rejected or, for the
+documented block cases, ignored with a source\-located warning.
+In particular, \f[CR]i\f[R], \f[CR]h\f[R], and \f[CR]b\f[R] cannot
+weaken filesystem delivery.
+.PP
+This chain delivers command failures to a fallback Maildir:
+.IP
+.EX
+:0 fw
+| bogofilter \-p \-u \-e
+
+:0 e
+failed\-filter/
+
+:0
+* \(haX\-Bogosity: (Spam|Yes)
+spam/
+.EE
+.PP
+Uppercase chaining can reuse one condition without repeating its regex.
+The lowercase \f[CR]a\f[R] additionally depends on successful completion
+of the immediately preceding action:
+.IP
+.EX
+:0 c
+* \(haX\-Project: compiler
+projects/compiler/
+
+:0 Ac
+mbox:project\-audit
+
+:0 a
+projects/notified/
+.EE
+.PP
+An \f[CR]E\f[R] recipe supplies an else branch when the preceding recipe
+was skipped:
+.IP
+.EX
+:0
+* \(haList\-Id:
+lists/
+
+:0 E
+ordinary/
+.EE
+.SH CONDITIONS
+.SS Regular expressions
+A plain condition searches the area selected by the recipe.
+Matching operates on bytes and ignores ASCII case unless \f[CR]D\f[R] is
+present.
+It is not Unicode matching: character classes, \f[CR].\f[R] and case
+folding operate on message bytes.
+Prefix \f[CR]!\f[R] negates any supported condition and repeated
+\f[CR]!\f[R] prefixes alternate the result.
+.IP
+.EX
+:0 D
+* ! \(haX\-Verified: yes$
+unverified/
+.EE
+.PP
+\f[CR]H ?? REGEX\f[R], \f[CR]B ?? REGEX\f[R], and \f[CR]HB ?? REGEX\f[R]
+or \f[CR]BH ?? REGEX\f[R] override the recipe search area for one
+condition.
+\f[CR]$NAME ?? REGEX\f[R] searches the current byte value of a variable.
+.IP
+.EX
+:0 B
+* H ?? \(haContent\-Type: text/plain
+* urgent
+urgent\-body/
+.EE
+.PP
+The ordinary operators are:
+.TP
+\f[CR]literal\f[R]
+Match the same literal byte sequence.
+A backslash quotes a regex metabyte.
+.TP
+\f[CR].\f[R]
+Match one byte other than LF.
+.TP
+\f[CR][abc]\f[R], \f[CR][\(haabc]\f[R], \f[CR][a\-z]\f[R], \f[CR][[:digit:]]\f[R]
+Match one listed, excluded, ranged, or named ASCII byte class.
+.TP
+\f[CR]a?\f[R], \f[CR]a*\f[R], \f[CR]a+\f[R]
+Match zero or one, zero or more, or one or more repetitions.
+.TP
+\f[CR]a{m}\f[R], \f[CR]a{m,}\f[R], \f[CR]a{m,n}\f[R]
+Counted repetition in the Rust regex dialect.
+Original procmail treats braces as ordinary text; escape them as
+\f[CR]\(rs{\f[R] and \f[CR]\(rs}\f[R] when literal braces are intended.
+.TP
+\f[CR]ab|cd\f[R], \f[CR](expression)\f[R]
+Alternation and grouping.
+Capturing groups populate numbered \f[CR]MATCHn\f[R] variables after a
+successful condition.
+Noncapturing groups \f[CR](?:...)\f[R] are accepted.
+Named groups, look\-around, and backreferences are rejected.
+.PP
+The dialect also accepts ASCII \f[CR]\(rsd\f[R], \f[CR]\(rss\f[R],
+\f[CR]\(rsw\f[R] classes and their uppercase negations, zero\-width
+\f[CR]\(rsb\f[R] and \f[CR]\(rsB\f[R], hexadecimal byte escapes, lazy
+repetition, and scoped flag groups such as \f[CR](?i:expression)\f[R].
+Some of these forms have no equivalent in original procmail.
+Unicode properties are unavailable because matching operates on bytes.
+.PP
+The following anchors and macros have procmail\-specific handling:
+.TP
+\f[CR]\(ha\f[R], \f[CR]$\f[R]
+Match the start or end of a line or the edge of the selected search
+area.
+At an internal line boundary they consume the separating LF, matching
+the documented procmail multiline behavior.
+.TP
+\f[CR]\(ha\(ha\f[R]
+At the start of an expression, match only the start of the complete
+selected area.
+At the end, match only its end.
+\f[CR]\(ha\(ha\f[R] elsewhere is rejected.
+.TP
+\f[CR]\(rs<\f[R], \f[CR]\(rs>\f[R]
+Match and consume one byte outside \f[CR][A\-Za\-z0\-9_]\f[R], including
+LF.
+These are procmail consuming word\-edge forms, not zero\-width word
+boundaries.
+.TP
+\f[CR]\(rs/\f[R]
+Mark the start of the suffix assigned to \f[CR]MATCH\f[R].
+Up to 64 \f[CR]\(rs/\f[R] markers may occur in one expression, including
+inside groups and alternatives.
+The last marker reached by the successful path selects the value; a
+successful alternative which does not reach any marker preserves the
+preceding \f[CR]MATCH\f[R].
+The value extends to the end of the complete regex match, so it includes
+an LF consumed by a terminal \f[CR]$\f[R].
+.TP
+\f[CR]\(haTO\f[R], \f[CR]\(haTO_\f[R]
+Expand to procmail\-compatible recipient\-header expressions.
+\f[CR]\(haTO\f[R] uses a word\-style address boundary;
+\f[CR]\(haTO_\f[R] uses the broader address boundary.
+The macro is recognized wherever it occurs unless its caret is
+immediately preceded by backslash.
+.TP
+\f[CR]\(haFROM_DAEMON\f[R], \f[CR]\(haFROM_MAILER\f[R]
+Expand to the fixed procmail daemon or mailer\-sender expressions.
+\f[CR]\(haFROM_DAEMON\f[R] forces case\-insensitive matching.
+.PP
+Text matched after \f[CR]\(rs/\f[R] is assigned to \f[CR]MATCH\f[R];
+ordinary capture groups are assigned to \f[CR]MATCH1\f[R],
+\f[CR]MATCH2\f[R], and so on, excluding the private groups used to
+locate \f[CR]MATCH\f[R] markers.
+An unmatched optional group becomes an empty value.
+At most 64 ordinary capture groups are accepted and one captured value
+is bounded to 64 KiB.
+.IP
+.EX
+:0 c
+* \(haList\-Id:.*<\(rs/([\(ha.>]+)\(rs.([\(ha.>]+)>
+maildir:lists/$MATCH2/$MATCH1/
+.EE
+.PP
+The complete user pattern is bounded to 64 KiB, the parsed regex tree to
+256 levels, and its compiled form to 8 MiB.
+Generated text for the four fixed macros does not consume
+\f[CR]LINEBUF\f[R], but does consume the translated\-pattern and
+compiled\-size ceilings.
+.PP
+Procmail chooses the leftmost shortest match except while selecting
+\f[CR]MATCH\f[R].
+For a condition containing \f[CR]\(rs/\f[R], it selects the leftmost
+shortest span before the reached marker and the leftmost longest suffix
+after it.
+The \f[B]procmail\-rs\f[R] engine is leftmost\-first, so ambiguous
+alternatives and repetitions can select different spans, marker paths,
+and numbered captures.
+Alternative order therefore matters in \f[B]procmail\-rs\f[R] even where
+it did not affect original procmail.
+Weighted scoring conditions and their \f[CR]$=\f[R] result are rejected.
+See the compatibility document before migrating expressions that depend
+on ambiguous match selection.
+.IP
+.EX
+:0
+* \(haSubject: [[:digit:]]{3}$
+numbered\-subject/
+.EE
+.SS Size conditions
+\f[CR]< NUMBER\f[R] matches when the complete message is smaller than
+the decimal byte count.
+\f[CR]> NUMBER\f[R] matches when it is larger.
+.IP
+.EX
+:0
+* > 10485760
+large/
+.EE
+.SS Program conditions
+\f[CR]? COMMAND\f[R] sends the complete current message to a trusted
+shell command and matches status zero.
+\f[CR]TIMEOUT\f[R], \f[CR]LOGFILE\f[R], and the rebuilt bounded child
+environment apply.
+.IP
+.EX
+:0
+* ? test \-e \(dq$HOME/.accept\-mail\(dq
+accepted/
+.EE
+.SS Shell\-expanded conditions
+A condition beginning with \f[CR]$\f[R] expands its remainder using the
+supported double\-quoted rules and reparses the bounded result as a
+condition.
+\f[CR]$\(rsNAME\f[R] quotes the selected variable as literal regex
+bytes, preventing its contents from becoming condition syntax.
+.IP
+.EX
+ADDRESS=user\(atexample.org
+
+:0
+* $\(haTo:.*<$\(rsADDRESS>
+addressed/
+.EE
+.PP
+A backquoted command in this form receives the complete current message.
+Every intermediate expansion remains subject to \f[CR]LINEBUF\f[R] and
+the destination condition\(cqs own limits.
+.SH ACTIONS
+.SS Maildir and mbox
+\f[CR]maildir:PATH\f[R] and a path ending in \f[CR]/\f[R] select
+Maildir.
+\f[CR]mbox:PATH\f[R] and every other unmarked path select mboxrd.
+The unmarked path \f[CR]/dev/null\f[R] is the sole discard action.
+Backend selection never depends on the current filesystem type.
+.PP
+Relative paths use \f[CR]MAILDIR\f[R] active when the statement
+executes, or the process working directory when it is unset.
+.IP
+.EX
+MAILDIR=/srv/mail
+
+:0 c
+maildir:audit/
+
+:0
+mbox:archive/received.mbox
+.EE
+.PP
+Maildir directories must already contain \f[CR]tmp\f[R], \f[CR]new\f[R],
+and \f[CR]cur\f[R].
+Filesystem paths reject NUL, empty components, \f[CR].\f[R],
+\f[CR]..\f[R], repeated separators, and unexpected trailing separators.
+.SS Pipes and filters
+An action beginning with \f[CR]|\f[R] runs its remainder through the
+configured trusted shell.
+The selected message bytes are written to stdin.
+A successful \f[CR]f\f[R] recipe replaces the selected message area with
+bounded stdout.
+.IP
+.EX
+:0 fw
+| formail \-I \(aqX\-Checked: yes\(aq
+.EE
+.PP
+A complete action consisting only of \f[CR]|\f[R] writes the selected
+area directly to \f[B]procmail\-rs\f[R] standard output without starting
+a shell.
+.SS Command\-output capture
+\f[CR]NAME=| COMMAND\f[R] assigns bounded stdout.
+Exactly one trailing LF is removed.
+The \f[CR]h\f[R] and \f[CR]b\f[R] flags choose the input area, while
+\f[CR]w\f[R], \f[CR]W\f[R], \f[CR]i\f[R], and \f[CR]r\f[R] retain their
+pipe meanings.
+.IP
+.EX
+:0 hW
+MSG_FROM=| sed \-n \(aqs/\(haFrom: //p\(aq
+.EE
+.SS Recipe blocks
+A matched block evaluates its child statements in order.
+Chain state is local to the block.
+A local lock named on the block is held across the complete child
+sequence.
+.IP
+.EX
+:0 : account.lock
+{
+    ACCOUNT=work
+
+    :0
+    * \(haX\-Account: work
+    work/
+}
+.EE
+.PP
+The \f[CR]c\f[R] flag clones a block branch.
+The parent skips the block and continues after it, while the branch
+executes the block and then follows the same remaining recipes unless a
+delivering action stops that branch.
+Variable assignments, message changes, global locks, and runtime rc
+transitions remain local to each side.
+Runtime include and switch paths are resolved from the variables of the
+side which reaches them.
+.PP
+A plain \f[CR]c\f[R] branch runs concurrently with its parent.
+procmail\-rs supervises and joins every branch before message processing
+returns.
+An ordinary action failure in that branch does not change the parent
+status, while configuration, resource\-limit, and supervision failures
+still fail the message.
+At most 128 background copy branches may be started for one message;
+reaching the limit fails evaluation.
+The \f[CR]cw\f[R] and \f[CR]cW\f[R] combinations wait before the parent
+continues and apply the branch status.
+Naming a local lock on a copy block also makes it waited, as in original
+procmail, so the lock covers the complete branch execution.
+.SS Native header editing
+The \f[B]procmail\-rs\f[R] extension \f[CR]headers { ... }\f[R] changes
+the current header without starting an external filter.
+It is a recipe action, not a top\-level statement and not standard
+procmail syntax:
+.IP
+.EX
+:0 [CONDITION_FLAGS] [CONTROL_FLAG]
+* CONDITION
+headers {
+    OPERATION
+    ...
+}
+.EE
+.PP
+The opening brace must occur on the action line after the word
+\f[CR]headers\f[R].
+Blank and comment\-only lines are accepted between operations.
+The closing \f[CR]}\f[R] must appear alone apart from whitespace.
+One action may contain at most 256 operations, and every physical
+operation line is checked against the active \f[CR]LINEBUF\f[R].
+.PP
+Operations execute from top to bottom.
+A later operation sees the result of every earlier one; this matters
+when \f[CR]set\f[R], \f[CR]add\f[R], and \f[CR]remove\f[R] use the same
+field name.
+Field\-name comparisons ignore ASCII case, while field values are never
+interpreted as addresses or MIME text.
+.TP
+\f[CR]remove NAME\f[R]
+Delete every field named \f[CR]NAME\f[R].
+A field includes all immediately following physical lines beginning with
+space or tab, so removing a folded field also removes all its
+continuation lines.
+Absence of the field is success.
+.IP
+.EX
+headers {
+    remove X\-Spam\-Status
+}
+.EE
+.TP
+\f[CR]set NAME: VALUE\f[R]
+Replace the first matching field at its existing position and remove
+every later duplicate.
+If no match exists, append one new field.
+The emitted name uses the spelling supplied by this operation, even when
+it replaces a field with different capitalization.
+\f[CR]VALUE\f[R] may be empty.
+.IP
+.EX
+headers {
+    set X\-Spam\-Status: checked
+    set X\-Empty:
+}
+.EE
+.TP
+\f[CR]add NAME: VALUE\f[R]
+Append one field after all fields currently present.
+Existing fields with that name are retained, so repeated \f[CR]add\f[R]
+operations deliberately create repeated fields in source order.
+.IP
+.EX
+headers {
+    add Received: by first\-filter
+    add Received: by second\-filter
+}
+.EE
+.TP
+\f[CR]prepend NAME: VALUE\f[R]
+Insert one field before every field currently present.
+Consequently, a later \f[CR]prepend\f[R] appears before an earlier
+\f[CR]prepend\f[R].
+.IP
+.EX
+headers {
+    prepend X\-Processed\-By: first
+    prepend X\-Processed\-By: second
+}
+.EE
+.PP
+Here the resulting order is \f[CR]second\f[R], then \f[CR]first\f[R],
+then the original fields.
+.TP
+\f[CR]rename OLD\-NAME to NEW\-NAME\f[R]
+Rename every matching field without changing its value, continuation
+lines, position, or line endings.
+Matching \f[CR]OLD\-NAME\f[R] ignores ASCII case, and all renamed fields
+use the exact \f[CR]NEW\-NAME\f[R] spelling.
+.IP
+.EX
+headers {
+    rename X\-Old\-Status to X\-Status
+}
+.EE
+.TP
+\f[CR]extract raw NAME into VARIABLE\f[R]
+Assign the value of the first matching field to an ordinary user
+variable.
+The field name, colon, and final line ending are omitted; leading
+whitespace, embedded fold line endings, continuation indentation, and
+arbitrary bytes are preserved.
+An absent field assigns an empty value.
+.TP
+\f[CR]extract unfolded NAME into VARIABLE\f[R]
+Extract the first matching field after removing leading space and tab
+from each physical value line and joining continuation lines with one
+ASCII space.
+It does not decode MIME words, parse addresses, or interpret the
+resulting bytes as UTF\-8.
+.IP
+.EX
+headers {
+    extract unfolded To into MSG_TO
+    extract raw X\-Original into ORIGINAL_RAW
+}
+.EE
+.PP
+Extraction can assign only an ordinary user variable; message data
+cannot change settings, limits, or runtime\-produced names.
+Extracted values become visible after the complete action succeeds, so
+later recipes and runtime rc files may use them.
+A later failure in the same action publishes none of its extractions.
+Repeated extraction into one variable follows operation order, with the
+last value winning.
+.PP
+\f[CR]NAME\f[R] must be non\-empty printable ASCII without whitespace or
+colon.
+Punctuation allowed by RFC\-style field names is preserved.
+The first colon separates name and value; later colons belong to
+\f[CR]VALUE\f[R]:
+.IP
+.EX
+headers {
+    set X\-Source\-URI: imap://mail.example/inbox
+}
+.EE
+.PP
+Leading whitespace after the separating colon is removed by the rc
+parser.
+New fields are serialized as \f[CR]NAME: VALUE\f[R] followed by the line
+ending chosen from the first physical input header line.
+If the input has no such line, the header/body separator selects CRLF or
+LF; LF is the final fallback.
+Existing unmodified fields, their original endings, malformed binary
+fields, the separator, and the body retain their bytes.
+.PP
+\f[CR]VALUE\f[R] supports all parameter forms described under VARIABLE
+EXPANSION and the ordinary backslash rules described there.
+Expansion occurs when the selected recipe executes, so \f[CR]MATCH\f[R],
+numbered captures, \f[CR]LASTFOLDER\f[R], and earlier assignments may be
+used:
+.IP
+.EX
+:0
+* \(haList\-Id:.*<\(rs/([\(ha.>]+)\(rs.example>
+headers {
+    set X\-List\-Name: $MATCH1
+}
+.EE
+.PP
+Expanded bytes are inserted literally and are not scanned a second time.
+Backquoted commands are not accepted in header\-operation values.
+NUL, CR, LF, and a trailing backslash requesting a folded continuation
+are rejected; native editing cannot create a multi\-line field.
+.PP
+The condition flags \f[CR]H\f[R], \f[CR]B\f[R], and \f[CR]D\f[R],
+control flags \f[CR]A\f[R], \f[CR]a\f[R], \f[CR]E\f[R], and
+\f[CR]e\f[R], and \f[CR]c\f[R] are accepted.
+A successful native edit always continues with the next recipe, so
+\f[CR]c\f[R] has no additional effect.
+Flags \f[CR]h\f[R], \f[CR]b\f[R], \f[CR]f\f[R], \f[CR]w\f[R],
+\f[CR]W\f[R], \f[CR]i\f[R], and \f[CR]r\f[R] are rejected because this
+action neither selects pipe input nor invokes a child.
+A local lockfile is also rejected because no external publication
+occurs.
+.PP
+Every operation is checked against \f[CR]LIMIT_MSG_SIZE\f[R],
+\f[CR]LIMIT_MSG_HEADERS\f[R], \f[CR]LIMIT_HEADER_LINE\f[R], and
+\f[CR]LIMIT_HEADER_FIELD\f[R].
+All operations are prepared privately; if parsing, expansion,
+validation, or any size check fails, none of the changes becomes the
+current message and the preceding message remains available to normal
+error handling.
+A successful header\-only execution can still stream an unread body
+without retaining it in memory.
+.PP
+Each extracted value is independently limited to
+\f[CR]MAX_ASSIGNMENT_VALUE_LEN\f[R] (65536 bytes).
+The limit is checked while unfolding, before an oversized result can be
+accumulated.
+Raw extraction checks the selected byte range before copying it.
+Together with the 256\-operation limit, this also caps values retained
+by one action at 16 MiB.
+.PP
+For example, several common \f[CR]formail \-I\f[R] cleanup operations
+can be expressed without copying the message through a child:
+.IP
+.EX
+:0
+headers {
+    remove X\-Spam\-Status
+    set X\-Filter: checked
+    add X\-Filter\-Result: clean
+    prepend X\-Processed\-By: procmail\-rs
+}
+.EE
+.PP
+This extension is not a general replacement for \f[B]formail\f[R].
+It does not parse addresses, decode MIME fields, generate
+\f[CR]Message\-Id\f[R], split digests, change the body, or implement
+\f[CR]formail\f[R]\(cqs duplicate\-detection and reply\-header modes.
+Use a trusted pipe when those operations are required.
+.SH VARIABLE REFERENCE
+Names outside the typed names and unsupported list below are user
+variables.
+They can be assigned in an rc file or supplied initially with
+\f[B]\(enset\f[R].
+Values may be arbitrary bounded bytes when produced by a capture, but a
+value exported to a child environment cannot contain NUL.
+Assignment and expansion occur in statement order.
+.SS Identity and runtime results
+.TP
+\f[CR]HOME\f[R]
+Initialized from the current uid\(cqs passwd entry.
+It is not imported from the ambient environment and may be replaced by
+an rc assignment or \f[B]\(enset\f[R].
+.TP
+\f[CR]LOGNAME\f[R]
+Initialized and controlled like \f[CR]HOME\f[R] using the passwd login
+name.
+.TP
+\f[CR]HOST\f[R]
+Initialized from the system node name.
+Assigning the exact system name continues processing.
+Any other value ends the current rc file successfully; a bare
+\f[CR]HOST\f[R] is the supported empty assignment and therefore also
+ends it.
+.TP
+\f[CR]PROCMAIL_VERSION\f[R]
+Read\-only \f[B]procmail\-rs\f[R] package version.
+It deliberately does not claim to contain the procmail 3.22 version.
+.TP
+\f[CR]LASTFOLDER\f[R]
+Runtime\-only path of the last successfully published destination.
+A failure before publication does not change it.
+When an error occurs after a message became visible, it records that
+visible destination.
+.TP
+\f[CR]MATCH\f[R]
+Runtime\-only bytes selected by the most recent successful
+\f[CR]\(rs/\f[R] regex marker.
+Evaluating another condition which contains \f[CR]\(rs/\f[R] or ordinary
+capture groups first clears all preceding match values, including when
+that condition fails.
+A regex without captures does not change them.
+.TP
+\f[CR]MATCH1\f[R], \f[CR]MATCH2\f[R], \&...
+\f[B]procmail\-rs\f[R] additions containing ordinary regex capture
+groups from the most recent successful regex condition.
+Unmatched optional groups are empty.
+These names cannot be assigned directly.
+.SS Paths and delivery
+.TP
+\f[CR]MAILDIR\f[R]
+Base directory for following relative destination, staging, lock,
+include, switch, and log paths.
+It has no implicit default; when unset or empty, relative paths use the
+process working directory.
+Assignment does not change the process working directory.
+.TP
+\f[CR]DURABILITY\f[R]
+Select \f[CR]none\f[R] (default), \f[CR]file\f[R], or \f[CR]full\f[R].
+\f[CR]file\f[R] synchronizes delivered message data before success.
+\f[CR]full\f[R] additionally synchronizes the documented publication
+directories.
+This is a statically prepared root setting rather than a
+message\-conditional assignment.
+.TP
+\f[CR]UMASK\f[R]
+Octal \f[CR]0000\f[R] through \f[CR]0777\f[R], default \f[CR]077\f[R].
+It can only remove permission bits from restrictive modes requested for
+newly created delivery, lock, and log files.
+It never broadens permissions or changes the process\-wide umask.
+.SS Locking
+.TP
+\f[CR]LOCKMETHOD\f[R]
+\f[CR]flock\f[R] (default) selects a persistent checked file and kernel
+lock.
+\f[CR]dotlock\f[R] selects compatible exclusive creation, stale removal,
+and final pathname removal with the documented replacement risk.
+.TP
+\f[CR]LOCKFILE\f[R]
+Acquire a global lock at this statement.
+A later assignment releases the previous lock before acquiring its
+replacement; an empty value only releases it.
+The active \f[CR]LOCKMETHOD\f[R], \f[CR]LOCKSLEEP\f[R],
+\f[CR]LOCKTIMEOUT\f[R], \f[CR]UMASK\f[R], and \f[CR]MAILDIR\f[R] apply.
+.TP
+\f[CR]LOCKEXT\f[R]
+Suffix used to derive an implicit local lock name, default
+\f[CR].lock\f[R].
+It may be empty but cannot contain NUL or \f[CR]/\f[R]; both the suffix
+and resulting path are bounded.
+.TP
+\f[CR]LOCKTIMEOUT\f[R]
+Finite lock acquisition limit in seconds, default 1024.
+Decimal values 1 through 86400 are accepted.
+Zero is rejected rather than meaning an unlimited wait.
+.TP
+\f[CR]LOCKSLEEP\f[R]
+Retry interval in seconds for local, global, and mbox locks, default 8.
+Decimal values 1 through 86400 are accepted.
+Zero is rejected to prevent an active retry loop.
+Assignments affect only later lock attempts.
+.SS External processes
+.TP
+\f[CR]SHELL\f[R]
+Absolute shell path used for every trusted command, default
+\f[CR]/bin/sh\f[R].
+Empty, relative, trailing\-slash, repeated\-component, \f[CR].\f[R] and
+\f[CR]..\f[R] paths are rejected.
+It may be supplied with \f[B]\(enset\f[R].
+.TP
+\f[CR]SHELLFLAGS\f[R]
+One argument placed between \f[CR]SHELL\f[R] and command text, default
+\f[CR]\-c\f[R].
+It is not split into several arguments and may be supplied with
+\f[B]\(enset\f[R].
+.TP
+\f[CR]PATH\f[R]
+Child command search path, default \f[CR]/usr/bin:/bin\f[R].
+It belongs to the rebuilt child environment and may be supplied with
+\f[B]\(enset\f[R].
+.TP
+\f[CR]TIMEOUT\f[R]
+Finite child limit in seconds, default 960.
+Decimal values 1 through 86400 are accepted.
+It covers concurrent stdin writing, stdout reading, waiting,
+process\-group termination, and reaping.
+.TP
+\f[CR]TRAP\f[R]
+Bounded trusted shell command run after normal recipe completion and
+complete input validation.
+The final message plus one LF is supplied on stdin; stdout and stderr go
+to \f[CR]LOGFILE\f[R].
+An empty assignment disables a preceding trap.
+.TP
+\f[CR]EXITCODE\f[R]
+Final decimal status from 0 through 255.
+An explicit non\-empty value takes precedence.
+An explicitly empty value allows a nonzero \f[CR]TRAP\f[R] result to
+become the final status; when never assigned, the provisional filter
+result remains authoritative and is exported to the trap.
+.SS Diagnostics
+.TP
+\f[CR]LOGFILE\f[R]
+Append destination for trace records, diagnostics, and child stderr.
+Empty or unset means diagnostics use standard error.
+The path is resolved through the active \f[CR]MAILDIR\f[R].
+This is a statically prepared root setting.
+.TP
+\f[CR]VERBOSE\f[R]
+Enable or disable detailed tracing.
+Case\-insensitive prefixes \f[CR]on\f[R], \f[CR]y\f[R], \f[CR]t\f[R],
+\f[CR]e\f[R], or a nonzero leading digit mean true; \f[CR]off\f[R],
+\f[CR]n\f[R], \f[CR]f\f[R], \f[CR]d\f[R], or a leading zero mean false.
+It is disabled by default and is statically prepared.
+.TP
+\f[CR]LOGDETAIL\f[R]
+\f[CR]metadata\f[R] (default) prevents variable values from entering
+trace records.
+\f[CR]values\f[R] permits bounded and escaped value prefixes.
+Neither mode permits bodies, header values, regex text, destination
+paths, or command arguments.
+.TP
+\f[CR]LOGABSTRACT\f[R]
+Only \f[CR]no\f[R] is accepted.
+Original abstract modes are rejected because they log sensitive
+\f[CR]From\f[R] and \f[CR]Subject\f[R] values.
+No abstract is generated by default.
+.SS Input and parser limits
+.TP
+\f[CR]LINEBUF\f[R]
+Decimal limit for following physical rc lines, complete continued pipe
+commands, and values expanded by \f[B]procmail\-rs\f[R].
+It defaults to 2048 and may range from 128 through 1048576.
+Only a literal top\-level assignment is accepted.
+.PP
+\f[CR]LIMIT_MSG_SIZE\f[R], \f[CR]LIMIT_MSG_HEADERS\f[R],
+\f[CR]LIMIT_MSG_BODY\f[R], \f[CR]LIMIT_HEADER_LINE\f[R],
+\f[CR]LIMIT_HEADER_FIELD\f[R]
+.PP
+: Bound complete mail, the header section, body, one physical header
+line, and one logical folded field.
+Values accept binary \f[CR]K\f[R], \f[CR]M\f[R], and \f[CR]G\f[R]
+suffixes and cannot exceed the ceilings listed under LIMITS.
+These are statically prepared root settings.
+.PP
+\f[CR]LIMIT_MAX_ASSIGNMENTS\f[R], \f[CR]LIMIT_RC_STATEMENTS\f[R],
+\f[CR]LIMIT_RC_RECIPES\f[R], \f[CR]LIMIT_RC_CONDITIONS\f[R],
+\f[CR]LIMIT_RC_REGEXES\f[R], \f[CR]LIMIT_RECIPE_CONDITIONS\f[R],
+\f[CR]LIMIT_RECIPE_NESTING\f[R]
+.PP
+: Decimal structural limits applied to following syntax.
+The assignment that changes a limit is checked using the preceding
+limit.
+These assignments and \f[CR]LINEBUF\f[R] are rejected inside recipe
+blocks.
+.SS Explicitly unsupported reserved names
+Assignments and references to \f[CR]DEFAULT\f[R], \f[CR]ORGMAIL\f[R],
+\f[CR]COMSAT\f[R], \f[CR]DELIVERED\f[R], \f[CR]DROPPRIVS\f[R],
+\f[CR]LOG\f[R], \f[CR]MSGPREFIX\f[R], \f[CR]NORESRETRY\f[R],
+\f[CR]PROCMAIL_OVERFLOW\f[R], \f[CR]SHELLMETAS\f[R], \f[CR]SUSPEND\f[R],
+\f[CR]SENDMAIL\f[R], \f[CR]SENDMAILFLAGS\f[R], and \f[CR]SHIFT\f[R] are
+rejected with an explicit unsupported\-variable diagnostic.
+\f[CR]LIMIT_RC_SIZE\f[R] is likewise reserved and rejected because an rc
+file cannot choose the bound under which that same file was already
+read.
+These names are not treated as ordinary user variables.
+.SH RUNTIME RC FILES
+\f[CR]INCLUDERC=EXPRESSION\f[R] evaluates another rc file and then
+returns to the caller.
+\f[CR]SWITCHRC=EXPRESSION\f[R] evaluates another file and abandons the
+remainder of the current file; an empty value ends only the current
+file.
+A value resolving exactly to \f[CR]/dev/null\f[R] also ends the current
+file, consumes one runtime rc transition, and does not open the device.
+This special case does not apply to \f[CR]INCLUDERC\f[R], which retains
+the regular\-file checks.
+.IP
+.EX
+:0
+* \(haList\-Id:.*<\(rs/[\(ha.>]+\(rs.([\(ha.>]+)>
+{
+    INCLUDERC=$MAILDIR/rules/$MATCH1.rc
+}
+.EE
+.PP
+Runtime files must be regular, owned by the owner of the root rc file,
+neither group\- nor other\-writable, and not reached through a
+final\-component symlink.
+Their number, total bytes, nesting depth, and transitions are bounded.
+.SH LOCKING AND DURABILITY
+A recipe colon requests a local lock.
+With no explicit name, a filesystem recipe derives it by appending
+\f[CR]LOCKEXT\f[R] to the resolved destination.
+An explicit name is required for a pipe or block.
+.IP
+.EX
+LOCKMETHOD=flock
+LOCKSLEEP=2
+LOCKTIMEOUT=30
+
+:0 : archive.lock
+mbox:archive
+.EE
+.PP
+\f[CR]LOCKMETHOD=flock\f[R] is the default and retains a checked lock
+file after use.
+\f[CR]LOCKMETHOD=dotlock\f[R] selects pathname\-based
+procmail\-compatible locking and its documented replacement risk.
+\f[CR]LOCKFILE\f[R] holds a global lock until it is replaced, cleared,
+or processing ends.
+.PP
+During migration, \f[CR]LOCKMETHOD=dotlock\f[R] and a recipe colon
+combine both locking schemes for an mbox.
+The local lock is acquired first and the mbox \f[CR]flock\f[R] second;
+they are released in reverse order.
+This coordinates with old writers which use the same destination plus
+\f[CR]LOCKEXT\f[R] and with new writers which lock the mbox itself:
+.IP
+.EX
+LOCKMETHOD=dotlock
+
+:0 :
+mbox:archive
+.EE
+.PP
+\f[CR]DURABILITY=none\f[R], \f[CR]file\f[R], or \f[CR]full\f[R] selects
+publication sync points.
+Maildir uses an unnamed temporary inode and no\-replace rename.
+Mbox holds \f[CR]flock\f[R], records the original length, and attempts
+rollback after a failed append or sync.
+No NFS\-safety claim is made.
+.SH LOGGING
+\f[CR]LOGFILE=PATH\f[R] selects append\-only diagnostics.
+\f[CR]VERBOSE=yes\f[R] enables detailed metadata events without message
+contents, header values, paths, regex text, commands, or variable
+values.
+\f[CR]LOGDETAIL=values\f[R] additionally permits bounded, escaped
+variable value prefixes.
+\f[CR]LOGABSTRACT=no\f[R] is accepted; header\-bearing abstract modes
+are not.
+.IP
+.EX
+LOGFILE=/srv/mail/filter.log
+VERBOSE=yes
+LOGDETAIL=values
+.EE
+.PP
+Child stderr is appended to the active \f[CR]LOGFILE\f[R] and is not
+discarded.
+A trace\-write failure is reported once to stderr and does not turn a
+successful delivery into a retry that could duplicate mail.
+.SH PROCESS SETTINGS AND TRAP
+\f[CR]SHELL\f[R], \f[CR]SHELLFLAGS\f[R], and \f[CR]PATH\f[R] construct
+the trusted child environment.
+Ambient environment entries are not inherited.
+\f[CR]TIMEOUT\f[R] bounds every external shell; timeout terminates its
+process group with \f[CR]SIGTERM\f[R] followed by \f[CR]SIGKILL\f[R] and
+reaps the direct child.
+.PP
+\f[CR]TRAP\f[R] is the last executed non\-empty trusted command assigned
+in statement order.
+It runs after complete input validation and recipe processing, receives
+the final message plus one LF, and writes stdout and stderr to
+\f[CR]LOGFILE\f[R].
+It is not run after \f[CR]SIGHUP\f[R], \f[CR]SIGINT\f[R],
+\f[CR]SIGQUIT\f[R], or \f[CR]SIGTERM\f[R] interrupts filtering.
+.IP
+.EX
+TIMEOUT=60
+TRAP=printf \(aqfilter status=%s\(rsn\(aq \(dq$EXITCODE\(dq
+.EE
+.PP
+The outer double quotes delimit the rc assignment word and are removed.
+The single quotes remain inside that word and are later interpreted by
+the trusted shell as part of the \f[CR]TRAP\f[R] command.
+.SH LIMITS
+Message limits are \f[CR]LIMIT_MSG_SIZE\f[R],
+\f[CR]LIMIT_MSG_HEADERS\f[R], \f[CR]LIMIT_MSG_BODY\f[R],
+\f[CR]LIMIT_HEADER_LINE\f[R], and \f[CR]LIMIT_HEADER_FIELD\f[R].
+Their byte counts accept an optional binary \f[CR]K\f[R], \f[CR]M\f[R],
+or \f[CR]G\f[R] suffix.
+.PP
+.TS
+tab(@);
+l r r.
+T{
+Variable
+T}@T{
+Default
+T}@T{
+Hard ceiling
+T}
+_
+T{
+\f[CR]LIMIT_MSG_SIZE\f[R]
+T}@T{
+64 MiB
+T}@T{
+256 MiB
+T}
+T{
+\f[CR]LIMIT_MSG_HEADERS\f[R]
+T}@T{
+256 KiB
+T}@T{
+16 MiB
+T}
+T{
+\f[CR]LIMIT_MSG_BODY\f[R]
+T}@T{
+64 MiB
+T}@T{
+256 MiB
+T}
+T{
+\f[CR]LIMIT_HEADER_LINE\f[R]
+T}@T{
+64 KiB
+T}@T{
+1 MiB
+T}
+T{
+\f[CR]LIMIT_HEADER_FIELD\f[R]
+T}@T{
+256 KiB
+T}@T{
+16 MiB
+T}
+.TE
+.TP
+\f[CR]LIMIT_MSG_SIZE\f[R]
+Bounds the complete message in bytes: the original header bytes, the
+header/body separator when present, and the body.
+It is checked while stdin is read and again when a filter or native
+header edit produces a replacement message.
+A body may be streamed instead of retained, but its bytes still
+contribute to this limit.
+.TP
+\f[CR]LIMIT_MSG_HEADERS\f[R]
+Bounds the complete raw header section in bytes, including physical line
+endings and the empty line which separates headers from the body.
+If EOF is reached before an empty separator line, every byte read is
+treated as header data and contributes to this limit.
+.TP
+\f[CR]LIMIT_MSG_BODY\f[R]
+Bounds the bytes after the first empty header line.
+The separator itself is not body data.
+A message without a separator therefore has a zero\-byte body.
+The limit is enforced for retained and streamed bodies and for
+replacement messages returned by filters.
+.TP
+\f[CR]LIMIT_HEADER_LINE\f[R]
+Bounds one physical header line, including its LF or CRLF ending.
+A final unterminated line is also checked.
+Folded continuations are separate physical lines for this limit.
+Reading stops as soon as the next input chunk proves that the line would
+be too large; EOF is not required.
+.TP
+\f[CR]LIMIT_HEADER_FIELD\f[R]
+Bounds one logical header field before folding is normalized for
+matching.
+The count is the sum of the original bytes in its first physical line
+and every immediately following line beginning with space or tab,
+including their line endings.
+A continuation cannot evade the physical\-line limit: both limits apply.
+.PP
+Structural limits are \f[CR]LIMIT_MAX_ASSIGNMENTS\f[R],
+\f[CR]LIMIT_RC_STATEMENTS\f[R], \f[CR]LIMIT_RC_RECIPES\f[R],
+\f[CR]LIMIT_RC_CONDITIONS\f[R], \f[CR]LIMIT_RC_REGEXES\f[R],
+\f[CR]LIMIT_RECIPE_CONDITIONS\f[R], and \f[CR]LIMIT_RECIPE_NESTING\f[R].
+They accept decimal counts and cannot exceed their compiled ceilings.
+.PP
+.TS
+tab(@);
+l r r.
+T{
+Variable
+T}@T{
+Default
+T}@T{
+Hard ceiling
+T}
+_
+T{
+\f[CR]LIMIT_MAX_ASSIGNMENTS\f[R]
+T}@T{
+4096
+T}@T{
+65536
+T}
+T{
+\f[CR]LIMIT_RC_STATEMENTS\f[R]
+T}@T{
+4096
+T}@T{
+65536
+T}
+T{
+\f[CR]LIMIT_RC_RECIPES\f[R]
+T}@T{
+1024
+T}@T{
+16384
+T}
+T{
+\f[CR]LIMIT_RC_CONDITIONS\f[R]
+T}@T{
+4096
+T}@T{
+65536
+T}
+T{
+\f[CR]LIMIT_RC_REGEXES\f[R]
+T}@T{
+256
+T}@T{
+1024
+T}
+T{
+\f[CR]LIMIT_RECIPE_CONDITIONS\f[R]
+T}@T{
+256
+T}@T{
+4096
+T}
+T{
+\f[CR]LIMIT_RECIPE_NESTING\f[R]
+T}@T{
+64
+T}@T{
+256
+T}
+.TE
+.TP
+\f[CR]LIMIT_MAX_ASSIGNMENTS\f[R]
+Bounds assignments across the root rc file and every runtime
+\f[CR]INCLUDERC\f[R] or \f[CR]SWITCHRC\f[R] file.
+Ordinary assignment statements count.
+A \f[CR]NAME=| command\f[R] recipe action also counts because it writes
+command output to a variable.
+The assignment which changes this limit is charged against the preceding
+value, then its new value applies to following source text.
+.TP
+\f[CR]LIMIT_RC_STATEMENTS\f[R]
+Bounds top\-level and nested assignment and recipe statements across all
+rc files loaded for one message.
+Blank lines, comments, condition lines, action lines, and header\-edit
+commands are not separate statements.
+An assignment that is also counted by \f[CR]LIMIT_MAX_ASSIGNMENTS\f[R]
+consumes one statement; \f[CR]NAME=| command\f[R] consumes an assignment
+but not an additional statement beyond its containing recipe.
+.TP
+\f[CR]LIMIT_RC_RECIPES\f[R]
+Bounds recipe headers beginning with \f[CR]:0\f[R] across all loaded rc
+files.
+A recipe whose action is a block counts once, and every recipe inside
+that block counts separately.
+.TP
+\f[CR]LIMIT_RC_CONDITIONS\f[R]
+Bounds all recipe condition lines beginning with \f[CR]*\f[R] across all
+loaded rc files.
+Regex, size, program, and shell\-expanded \f[CR]$\f[R] conditions each
+consume one entry.
+.TP
+\f[CR]LIMIT_RC_REGEXES\f[R]
+Bounds conditions which can compile a regular expression.
+An ordinary regex condition counts once.
+A shell\-expanded \f[CR]$\f[R] condition also reserves one entry because
+its expanded text is reparsed at runtime and may become a regex.
+Size and program conditions do not count.
+This limits the number of regex programs, not the number of capture
+groups; those have separate fixed ceilings.
+.TP
+\f[CR]LIMIT_RECIPE_CONDITIONS\f[R]
+Bounds condition lines in one recipe.
+The count starts again for each nested or following recipe.
+The same condition is also charged to the file\-wide
+\f[CR]LIMIT_RC_CONDITIONS\f[R] count.
+.TP
+\f[CR]LIMIT_RECIPE_NESTING\f[R]
+Bounds nested recipe\-action blocks.
+A root\-level recipe is at depth zero; entering its \f[CR]{ ... }\f[R]
+action creates depth one.
+Plain recipe count is controlled separately by
+\f[CR]LIMIT_RC_RECIPES\f[R].
+.IP
+.EX
+LIMIT_MSG_SIZE=32M
+LIMIT_MSG_HEADERS=512K
+LIMIT_HEADER_LINE=64K
+LIMIT_RC_RECIPES=2048
+LINEBUF=4096
+.EE
+.PP
+All message and count limits accept zero.
+A limit permits exactly that many bytes or items and rejects the next
+one; values at \f[CR]limit \- 1\f[R] and \f[CR]limit\f[R] succeed when
+no other limit is exceeded.
+Structural limits and \f[CR]LINEBUF\f[R] take effect in statement order.
+Lowering a structural limit below work already counted is accepted; the
+next matching item is rejected.
+Structural\-limit and \f[CR]LINEBUF\f[R] assignments are rejected inside
+recipe blocks.
+Runtime rc files share the counts accumulated by their caller and see
+only settings which executed before they were loaded.
+.PP
+\f[CR]LIMIT_RC_SIZE\f[R] is reserved but not supported because an rc
+file cannot safely choose the limit used to read itself.
+Each rc file instead has a fixed 1 MiB ceiling, and all rc files loaded
+while processing one message have a fixed combined 4 MiB ceiling.
+See \f[B]Documentation/Limits.md\f[R] for the other fixed ceilings which
+have no rc variable.
+.PP
+\f[CR]TIMEOUT\f[R], \f[CR]LOCKSLEEP\f[R], and \f[CR]LOCKTIMEOUT\f[R]
+accept 1 through 86400 seconds; zero is rejected.
+\f[CR]UMASK\f[R] accepts octal \f[CR]0000\f[R] through \f[CR]0777\f[R]
+but can only remove permissions from restrictive backend modes.
+.SH PRACTICAL EXAMPLES
+The destination Maildirs used below, including their \f[CR]tmp\f[R],
+\f[CR]new\f[R], and \f[CR]cur\f[R] subdirectories, must be created
+before filtering.
+.SS Mailing\-list delivery
+Capture two components of \f[CR]List\-Id\f[R], reverse them in the
+destination hierarchy, and retain a final inbox:
+.IP
+.EX
+MAILDIR=/srv/mail
+
+:0
+* \(haList\-Id:.*<\(rs/([\(ha.>]+)\(rs.([\(ha.>]+)>
+lists/$MATCH2/$MATCH1/
+
+:0
+inbox/
+.EE
+.SS Filtering and native header cleanup
+Remove stale scanner results without \f[CR]formail\f[R], run a spam
+filter over the complete message, then classify its generated header.
+A failed waited filter sets status 75 and stops the current rc file
+through \f[CR]HOST\f[R].
+.IP
+.EX
+:0
+headers {
+    remove X\-Spam\-Flag
+    remove X\-Spam\-Level
+    remove X\-Spam\-Status
+}
+
+:0 fw
+| bogofilter \-p \-u \-e \-c \(dq$HOME/.bogofilter.cf\(dq
+
+:0 e
+{
+    EXITCODE=75
+    HOST
+}
+
+:0
+* \(haX\-Bogosity: (Spam|Yes)
+spam/
+
+:0
+inbox/
+.EE
+.SS Bounded command\-selected folder
+Backquoted destination fragments receive the complete message, have
+trailing LF bytes removed, and are checked as part of the final path.
+The selected year\-month Maildir must already exist.
+.IP
+.EX
+MAILDIR=/srv/mail/archive
+
+:0
+maildir:\(gadate +%Y\-%m\(ga
+.EE
+.SS Header extraction for later rules
+Extract a folded header natively when later rules need its unfolded
+value.
+This avoids starting a child and does not consume or stage the body.
+.IP
+.EX
+:0
+headers {
+    extract unfolded To into MSG_TO
+}
+
+:0
+* MSG_TO ?? user\(atexample\(rs.org
+personal/
+.EE
+.SS Message\-selected rule file
+An included file can depend on a capture made while filtering.
+It is loaded only on the selected path, then processing returns after
+its statements end.
+.IP
+.EX
+RULE_ROOT=/srv/mail/rules
+
+:0
+* \(haX\-Account: \(rs/[A\-Za\-z0\-9_\-]+
+{
+    INCLUDERC=$RULE_ROOT/$MATCH.rc
+}
+.EE
+.SH UNSUPPORTED FEATURES
+There is no implicit \f[CR]DEFAULT\f[R] or \f[CR]ORGMAIL\f[R] delivery,
+system mailbox, sendmail forward action, comsat notification, privileged
+identity change, LMTP mode, MH folder, ordinary directory folder,
+multi\-folder action, weighted scoring, or automatic
+\f[CR]\(ti/.procmailrc\f[R] discovery.
+.PP
+Reserved names for unsupported procmail behavior are rejected
+explicitly.
+Consult \f[CR]Documentation/Compatibility.md\f[R] for narrowed semantics
+and known regular\-expression differences before using an existing
+procmail rc file.
+.SH SEE ALSO
+\f[B]procmail\-rs\f[R](1), \f[B]maildir\f[R](5), \f[B]mbox\f[R](5)
+.PP
+The source distribution also contains
+\f[CR]Documentation/Compatibility.md\f[R],
+\f[CR]Documentation/Delivery.md\f[R], and
+\f[CR]Documentation/Limits.md\f[R].

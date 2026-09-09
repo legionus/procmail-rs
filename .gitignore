@@ -1,6 +1,5 @@
 external
 target
-/man
 fuzz/artifacts
 fuzz/corpus
 fuzz/target

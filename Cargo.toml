@@ -2,7 +2,22 @@
 name = "procmail-rs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "A bounded mail filter with explicit Maildir and mbox delivery"
 license = "MIT"
+include = [
+    "/.github/scripts/check-package.sh",
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/Documentation/**",
+    "/LICENSE",
+    "/Makefile",
+    "/README.md",
+    "/examples/**",
+    "/man/**",
+    "/src/**",
+    "/tests/**",
+]
 
 [dependencies]
 libc = { version = "0.2.189", default-features = false }

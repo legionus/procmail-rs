@@ -444,10 +444,10 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
                 format!("variable {name} cannot be assigned in an rc file"),
             )
         })?;
-    if target.controls_rc_parsing()
-        && let Some(literal) = parsed.expression.literal_text()
-    {
-        value = literal;
+    if target.controls_rc_parsing() {
+        if let Some(literal) = parsed.expression.literal_text() {
+            value = literal;
+        }
     }
     let limit = target.value_limit();
     if value.len() > limit {

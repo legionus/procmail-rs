@@ -1,0 +1,173 @@
+.\" SPDX-License-Identifier: MIT
+.\" Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+.TH "PROCMAIL\-RS" "1" "" "User Commands" "procmail\-rs"
+.SH NAME
+procmail\-rs \- bounded procmail\-compatible mail filtering
+.SH SYNOPSIS
+\f[B]procmail\-rs\f[R] \f[B]check\f[R] \f[B]\(enconfig\f[R]
+\f[I]PATH\f[R] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+.PP
+\f[B]procmail\-rs\f[R] \f[B]explain\f[R] \f[B]\(enconfig\f[R]
+\f[I]PATH\f[R] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+.PP
+\f[B]procmail\-rs\f[R] \f[B]filter\f[R] \f[B]\(enconfig\f[R]
+\f[I]PATH\f[R] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+.PP
+\f[B]procmail\-rs\f[R] \f[B]\(enhelp\f[R]
+.PP
+\f[B]procmail\-rs\f[R] \f[B]\(enversion\f[R]
+.SH DESCRIPTION
+\f[B]procmail\-rs\f[R] validates and evaluates a deliberately limited
+procmail rc language.
+In \f[B]filter\f[R] mode it reads exactly one mail message from standard
+input and delivers it only to destinations selected explicitly by that
+rc file.
+.PP
+The message is handled as arbitrary bytes.
+Configured limits are enforced while input is read; an unterminated
+header line or body cannot grow memory or staging storage beyond those
+limits.
+Maildir publication and mbox append are completed before delivery is
+reported as successful.
+.PP
+This program is not a privileged local\-delivery agent.
+It does not select a system mailbox, use
+\f[CR]/var/spool/mail/$LOGNAME\f[R], forward through sendmail, or
+provide an implicit fallback destination.
+.SH COMMANDS
+.TP
+\f[B]check\f[R]
+Validate the root rc file and every runtime rc file whose path can be
+determined without a message.
+Standard input is not read.
+A message\-derived \f[CR]INCLUDERC\f[R] or \f[CR]SWITCHRC\f[R] path
+produces a bounded warning and is checked only if \f[B]filter\f[R] later
+reaches it.
+.TP
+\f[B]explain\f[R]
+Perform the same validation as \f[B]check\f[R], then write a value\-free
+execution plan to standard output.
+Commands are described by type but are not run and their text is not
+printed.
+.TP
+\f[B]filter\f[R]
+Read one message from standard input, evaluate recipes in order, and
+perform the selected explicit deliveries.
+An original message delivered only by copy recipes remains undelivered.
+.SH OPTIONS
+.TP
+\f[B]\(enconfig\f[R] \f[I]PATH\f[R]
+Select the root rc file.
+The file must be UTF\-8 and no larger than 1 MiB.
+It is parsed before \f[B]filter\f[R] reads standard input.
+.TP
+\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]
+Supply one policy\-checked initial rc value.
+The option may occur at most 256 times.
+Rc assignments can replace supplied values in statement order.
+Ambient process variables are not imported.
+.TP
+\f[B]\-h\f[R], \f[B]\(enhelp\f[R]
+Print brief command\-line help.
+.TP
+\f[B]\-V\f[R], \f[B]\(enversion\f[R]
+Print the package version.
+.SH INITIAL VALUES
+\f[CR]HOME\f[R] and \f[CR]LOGNAME\f[R] are obtained from the passwd
+entry for the current uid.
+\f[CR]HOST\f[R] is obtained from the current system node name.
+\f[CR]PROCMAIL_VERSION\f[R] contains the \f[B]procmail\-rs\f[R] package
+version.
+Ambient variables with those names cannot override the initial values.
+.PP
+Other external values must be admitted explicitly:
+.IP
+.EX
+procmail\-rs check \-\-config rules.rc \-\-set ACCOUNT=work
+.EE
+.SH FILTERING EXAMPLE
+Create the destination Maildir before filtering; \f[B]procmail\-rs\f[R]
+does not create or repair its \f[CR]tmp\f[R], \f[CR]new\f[R], and
+\f[CR]cur\f[R] directories.
+.IP
+.EX
+MAILDIR=/home/user/Mail
+
+:0
+* \(haList\-Id:.*<project\(rs.example>
+lists/project/
+
+:0
+inbox/
+.EE
+.PP
+Validate the configuration, inspect its plan, and then filter a message:
+.IP
+.EX
+procmail\-rs check \-\-config rules.rc
+procmail\-rs explain \-\-config rules.rc
+procmail\-rs filter \-\-config rules.rc <message.eml
+.EE
+.SH EXIT STATUS
+.TP
+\f[B]0\f[R] (\f[CR]EX_OK\f[R])
+Validation, explanation, or complete filtering succeeded.
+.TP
+\f[B]65\f[R] (\f[CR]EX_DATAERR\f[R])
+Message input was rejected, for example because a message limit was
+exceeded.
+Retrying the same bytes unchanged will not help.
+.TP
+\f[B]70\f[R] (\f[CR]EX_SOFTWARE\f[R])
+An internal failure prevented a reliable result.
+.TP
+\f[B]73\f[R] (\f[CR]EX_CANTCREAT\f[R])
+A permanent destination problem prevented delivery.
+.TP
+\f[B]75\f[R] (\f[CR]EX_TEMPFAIL\f[R])
+A temporary resource, locking, process, or delivery failure occurred.
+.TP
+\f[B]78\f[R] (\f[CR]EX_CONFIG\f[R])
+The command line or rc configuration is invalid.
+.TP
+\f[B]79\f[R] (\f[CR]PROCMAIL_RS_UNDELIVERED\f[R])
+No final recipe delivered the original message.
+Copy destinations may already have been published.
+.TP
+\f[B]129\f[R], \f[B]130\f[R], \f[B]131\f[R], or \f[B]143\f[R]
+Filtering was interrupted by \f[CR]SIGHUP\f[R], \f[CR]SIGINT\f[R],
+\f[CR]SIGQUIT\f[R], or \f[CR]SIGTERM\f[R], respectively.
+An active external command process group is terminated and
+\f[CR]TRAP\f[R] is not run.
+.PP
+An invoking MTA must retain the message unless \f[B]filter\f[R] exits
+with status 0.
+A retry after one of several copy destinations was published can create
+a duplicate at that destination.
+A signal observed before publication prevents it; a signal arriving
+after an atomic Maildir publication or completed mbox append cannot
+retract that delivery and a retry may duplicate it.
+.SH FILES
+There is no automatically discovered rc file.
+The root file is always named with \f[B]\(enconfig\f[R].
+Runtime files may be selected explicitly by \f[CR]INCLUDERC\f[R] and
+\f[CR]SWITCHRC\f[R] statements.
+.SH SECURITY NOTES
+Mail, configuration text, command\-line values, paths, filesystem state,
+and child output are treated as potentially hostile and are bounded by
+the program.
+Commands written in a trusted rc file are trusted code: they are not
+sandboxed.
+Use namespaces, cgroups, or a service manager when those commands need
+additional containment.
+.PP
+Trace output is metadata\-only by default.
+Rc values are logged only after an explicit \f[CR]LOGDETAIL=values\f[R];
+message bodies and header values are not enabled by that setting.
+.SH SEE ALSO
+\f[B]procmail\-rs.rc\f[R](5), \f[B]maildir\f[R](5), \f[B]mbox\f[R](5)
+.PP
+The source distribution also contains
+\f[CR]Documentation/Compatibility.md\f[R],
+\f[CR]Documentation/Delivery.md\f[R], and
+\f[CR]Documentation/Limits.md\f[R].

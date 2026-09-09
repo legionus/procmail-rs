@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - name: Install documentation tools
@@ -44,6 +44,8 @@ jobs:
         run: cargo +stable clippy --locked --all-targets -- -D warnings
       - name: Run the complete test suite
         run: cargo +stable test --locked
+      - name: Test the source package and staged installation
+        run: make check-package
       - name: Check patch whitespace
         run: git diff --check
 
@@ -52,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the 32-bit toolchain support
         run: |
           sudo apt-get update
@@ -67,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
       # Pin the audit frontends so a release of a development tool cannot
@@ -94,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install nightly Rust and the fuzz frontend
         run: |
           rustup toolchain install nightly --profile minimal
@@ -113,7 +115,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
       - name: Run the five-round release benchmark
@@ -122,3 +124,16 @@ jobs:
         run: >-
           cargo +stable test --locked --release --test stress_delivery --
           --ignored --test-threads=1
+
+  msrv:
+    name: Rust 1.85 compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Build and test with the minimum supported Rust toolchain
+        run: |
+          cargo +1.85.0 check --locked
+          cargo +1.85.0 test --locked

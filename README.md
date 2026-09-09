@@ -17,18 +17,32 @@ external namespace, cgroup, or service policy when they need containment.
 
 ## Build
 
-The build requires the stable Rust toolchain and Cargo. The supported release
-target is Linux with a 32-bit or 64-bit pointer width.
+The build requires Rust 1.85 or later and Cargo. The supported release target
+is Linux with a 32-bit or 64-bit pointer width.
 
 ```text
 cargo build --locked --release
 ./target/release/procmail-rs --version
 ```
 
+Install the release binary and pre-generated manual pages under `/usr/local`:
+
+```text
+make install
+```
+
+Packagers can stage the same files without changing the running system:
+
+```text
+make install DESTDIR=/tmp/procmail-rs-package PREFIX=/usr
+```
+
 Development and release checks are described in
 [Documentation/ReleasePolicy.md](Documentation/ReleasePolicy.md).
 The project is distributed under the MIT license; dependency and fixture
 provenance is recorded in [Documentation/Licenses.md](Documentation/Licenses.md).
+Migration from original procmail, including a rollback procedure, is described
+in [Documentation/Migration.md](Documentation/Migration.md).
 
 The editable manual-page sources are
 [Documentation/man/procmail-rs.1.md](Documentation/man/procmail-rs.1.md) and

@@ -1429,8 +1429,10 @@ fn validate_filesystem_path(
     if let Some(relative) = components.strip_prefix('/') {
         components = relative;
     }
-    if allows_trailing_slash && let Some(without_marker) = components.strip_suffix('/') {
-        components = without_marker;
+    if allows_trailing_slash {
+        if let Some(without_marker) = components.strip_suffix('/') {
+            components = without_marker;
+        }
     }
     if components.is_empty() {
         return Err(ExpansionError::new(

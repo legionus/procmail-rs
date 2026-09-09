@@ -93,7 +93,15 @@ impl<R: io::Read> io::Read for InterruptibleReader<R> {
 impl<R: io::BufRead> io::BufRead for InterruptibleReader<R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         check_io()?;
-        self.inner.fill_buf()
+        let result = self.inner.fill_buf();
+
+        // A handled signal can interrupt the underlying syscall before the
+        // caller gets another chance to inspect the recorded signal. Check
+        // again after fill_buf so the filtering result reports signal
+        // termination instead of misclassifying the resulting EINTR as
+        // malformed message input.
+        check_io()?;
+        result
     }
 
     fn consume(&mut self, amount: usize) {

@@ -593,12 +593,12 @@ fn write_stdout(
         }
         stdout.flush()
     });
-    if let Err(error) = result
-        && options.write_errors == WriteErrorMode::Fail
-    {
-        return Err(recoverable_error(format!(
-            "cannot write message to stdout: {error}"
-        )));
+    if options.write_errors == WriteErrorMode::Fail {
+        if let Err(error) = result {
+            return Err(recoverable_error(format!(
+                "cannot write message to stdout: {error}"
+            )));
+        }
     }
     runtime.set("LASTFOLDER", "|");
     Ok(None)

@@ -329,9 +329,6 @@ fn run() -> Result<u8, OperationalError> {
             // handler may assign it using values produced while filtering.
             // A valid value deliberately replaces a delivery error, matching
             // procmail's final-status override behavior.
-            if let Some(signal) = signal_state::received() {
-                return Err(OperationalError::Signaled(signal));
-            }
             requested_status = parse_requested_exit_code(&runtime)?;
             if requested_status.is_some() {
                 Ok(())
@@ -340,6 +337,14 @@ fn run() -> Result<u8, OperationalError> {
             }
         }
     })();
+    // A signal may interrupt any fallible operation inside the closure before
+    // normal filtering reaches its completion path. Resolve the recorded
+    // signal here so an early `?`, including an interrupted stdin read, cannot
+    // turn deliberate termination into an unrelated operational error.
+    let result = match signal_state::received() {
+        Some(signal) if command.action == Action::Filter => Err(OperationalError::Signaled(signal)),
+        _ => result,
+    };
     for diagnostic in plan.take_rc_diagnostics() {
         eprintln!("procmail-rs: {diagnostic}");
     }

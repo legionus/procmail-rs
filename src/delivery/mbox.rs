@@ -243,19 +243,19 @@ impl LockedMbox {
             return Err(MboxAppendError::before_publication(source, rollback));
         }
 
-        if durability == Durability::Full
-            && let Err(source) = sync(&self.parent)
-        {
-            let rollback = rollback_with(
-                &self.file,
-                original_len,
-                durability,
-                &mut truncate,
-                &mut sync,
-            )
-            .err();
-            let _unlock = flock(&self.file, FlockOperation::Unlock);
-            return Err(MboxAppendError::before_publication(source, rollback));
+        if durability == Durability::Full {
+            if let Err(source) = sync(&self.parent) {
+                let rollback = rollback_with(
+                    &self.file,
+                    original_len,
+                    durability,
+                    &mut truncate,
+                    &mut sync,
+                )
+                .err();
+                let _unlock = flock(&self.file, FlockOperation::Unlock);
+                return Err(MboxAppendError::before_publication(source, rollback));
+            }
         }
 
         let published = PublishedDelivery::new(self.path.clone());

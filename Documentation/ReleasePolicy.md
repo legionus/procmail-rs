@@ -10,6 +10,11 @@ releases are reserved for compatible fixes and documentation corrections.
 After 1.0, incompatible CLI or documented rc-language changes require a major
 release.
 
+Rust 1.85.0 is the minimum supported compiler. `Cargo.toml` rejects older
+compilers, and CI runs the normal check and test suite with that exact release.
+Raising the minimum requires a documented reason, a changelog entry, and an
+explicit CI change in the same revision.
+
 A release candidate must pass the locked formatting, build, lint, unit,
 integration, unsafe, license, advisory, fuzz smoke, concurrent delivery, and
 fault-path checks listed in `AGENTS.md`. Regex changes additionally require the
@@ -21,6 +26,18 @@ Run `make check-man` with Pandoc before packaging a release. The generated
 `man/procmail-rs.1` and `man/procmail-rs.rc.5` files must match their Markdown
 sources under `Documentation/man/`; release packages install the generated
 files and do not need Pandoc at build or installation time.
+
+Run `make check-package` before publishing. It creates a Cargo source archive,
+extracts it into an empty directory, runs its tests, and installs the binary
+and generated pages into a temporary `DESTDIR`. This check detects release
+files that were available only in the working tree or omitted from the source
+archive. Perform the final run from a clean checkout of the intended release
+revision; `--allow-dirty` exists only so contributors can validate a proposed
+change before committing it.
+
+All third-party CI actions are selected by a full commit identifier with a
+nearby release-tag comment. Review and update both together rather than using
+a moving tag.
 
 The supported release platform is 32-bit and 64-bit Linux. Non-Linux Unix and
 Windows releases remain deferred until their delivery behavior has dedicated
