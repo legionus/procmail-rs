@@ -635,6 +635,46 @@ headers {
 
 Here the resulting order is `second`, then `first`, then the original fields.
 
+`rename OLD-NAME to NEW-NAME`
+
+: Rename every matching field without changing its value, continuation lines,
+  position, or line endings. Matching `OLD-NAME` ignores ASCII case, and all
+  renamed fields use the exact `NEW-NAME` spelling.
+
+```
+headers {
+    rename X-Old-Status to X-Status
+}
+```
+
+`extract raw NAME into VARIABLE`
+
+: Assign the value of the first matching field to an ordinary user variable.
+  The field name, colon, and final line ending are omitted; leading whitespace,
+  embedded fold line endings, continuation indentation, and arbitrary bytes
+  are preserved. An absent field assigns an empty value.
+
+`extract unfolded NAME into VARIABLE`
+
+: Extract the first matching field after removing leading space and tab from
+  each physical value line and joining continuation lines with one ASCII
+  space. It does not decode MIME words, parse addresses, or interpret the
+  resulting bytes as UTF-8.
+
+```
+headers {
+    extract unfolded To into MSG_TO
+    extract raw X-Original into ORIGINAL_RAW
+}
+```
+
+Extraction can assign only an ordinary user variable; message data cannot
+change settings, limits, or runtime-produced names. Extracted values become
+visible after the complete action succeeds, so later recipes and runtime rc
+files may use them. A later failure in the same action publishes none of its
+extractions. Repeated extraction into one variable follows operation order,
+with the last value winning.
+
 `NAME` must be non-empty printable ASCII without whitespace or colon. Punctuation
 allowed by RFC-style field names is preserved. The first colon separates name
 and value; later colons belong to `VALUE`:
@@ -684,6 +724,12 @@ the changes becomes the current message and the preceding message remains
 available to normal error handling. A successful header-only execution can
 still stream an unread body without retaining it in memory.
 
+Each extracted value is independently limited to
+`MAX_ASSIGNMENT_VALUE_LEN` (65536 bytes). The limit is checked while unfolding,
+before an oversized result can be accumulated. Raw extraction checks the
+selected byte range before copying it. Together with the 256-operation limit,
+this also caps values retained by one action at 16 MiB.
+
 For example, several common `formail -I` cleanup operations can be expressed
 without copying the message through a child:
 
@@ -697,10 +743,10 @@ headers {
 }
 ```
 
-This extension is not a general replacement for **formail**. It does not
-extract or rename fields, parse addresses, generate `Message-Id`, split
-digests, change the body, or implement `formail`'s duplicate-detection and
-reply-header modes. Use a trusted pipe when those operations are required.
+This extension is not a general replacement for **formail**. It does not parse
+addresses, decode MIME fields, generate `Message-Id`, split digests, change the
+body, or implement `formail`'s duplicate-detection and reply-header modes. Use
+a trusted pipe when those operations are required.
 
 # VARIABLE REFERENCE
 
@@ -1199,12 +1245,14 @@ maildir:`date +%Y-%m`
 
 ## Header extraction for later rules
 
-Capture a header through a trusted external command when native modification is
-not enough. `h` avoids sending the body and `W` observes failure quietly.
+Extract a folded header natively when later rules need its unfolded value.
+This avoids starting a child and does not consume or stage the body.
 
 ```
-:0 hW
-MSG_TO=| sed -n 's/^To:[[:space:]]*//p'
+:0
+headers {
+    extract unfolded To into MSG_TO
+}
 
 :0
 * MSG_TO ?? user@example\.org

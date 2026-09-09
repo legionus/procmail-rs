@@ -1783,7 +1783,7 @@ fn config_with_conditions(mut count: usize) -> String {
 #[test]
 fn parses_typed_header_action_operations() {
     let config = parse(
-        ":0\nheaders {\n remove X-Old\n set X-State: ready\n add X-State: later\n prepend X-First: yes\n}\n",
+        ":0\nheaders {\n remove X-Old\n set X-State: ready\n add X-State: later\n prepend X-First: yes\n rename X-Legacy to X-Current\n extract unfolded Subject into SUBJECT\n}\n",
     )
     .unwrap();
     let Statement::Recipe(recipe) = &config.statements[0] else {
@@ -1822,9 +1822,58 @@ fn parses_typed_header_action_operations() {
                         expansion: None,
                     },
                 },
+                HeaderOperation::Rename {
+                    line: 7,
+                    from: "X-Legacy".into(),
+                    to: "X-Current".into(),
+                },
+                HeaderOperation::Extract {
+                    line: 8,
+                    name: "Subject".into(),
+                    target: "SUBJECT".into(),
+                    mode: HeaderExtractionMode::Unfolded,
+                },
             ],
         })
     );
+}
+
+#[test]
+fn rejects_malformed_or_privileged_header_extraction() {
+    for (operation, message) in [
+        (
+            "extract decoded Subject into VALUE",
+            "header extraction mode must be 'raw' or 'unfolded'",
+        ),
+        (
+            "extract raw Subject as VALUE",
+            "header operation 'extract' requires raw|unfolded NAME into VARIABLE",
+        ),
+        (
+            "extract raw Subject into MAILDIR",
+            "header extraction cannot modify protected variable MAILDIR",
+        ),
+        (
+            "extract raw Subject into 1VALUE",
+            "header extraction target must be a variable name",
+        ),
+    ] {
+        let error = parse(&format!(":0\nheaders {{\n {operation}\n}}\n")).unwrap_err();
+        assert_eq!(error.line, 3, "{operation}");
+        assert_eq!(error.message, message, "{operation}");
+    }
+}
+
+#[test]
+fn rejects_malformed_header_rename() {
+    for operation in [
+        "rename X-Old X-New",
+        "rename X-Old to",
+        "rename Bad:Name to X-New",
+    ] {
+        let error = parse(&format!(":0\nheaders {{\n {operation}\n}}\n")).unwrap_err();
+        assert_eq!(error.line, 3, "{operation}");
+    }
 }
 
 #[test]

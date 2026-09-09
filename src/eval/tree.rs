@@ -300,6 +300,12 @@ impl CompiledSequence {
                             crate::config::HeaderOperation::Prepend { .. } => {
                                 operations.prepend += 1;
                             }
+                            crate::config::HeaderOperation::Rename { .. } => {
+                                operations.rename += 1;
+                            }
+                            crate::config::HeaderOperation::Extract { .. } => {
+                                operations.extract += 1;
+                            }
                         }
                     }
                     explanations.push(RecipeExplanation {

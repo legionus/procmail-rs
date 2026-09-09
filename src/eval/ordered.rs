@@ -260,7 +260,7 @@ impl CompiledNode {
                     .resolve_with(|name| context.runtime.get(name).map(str::to_owned))
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                let edited = crate::header_edit::apply_header_action(
+                let applied = crate::header_edit::apply_header_action(
                     message.raw_header(),
                     body.len(),
                     &action,
@@ -271,6 +271,7 @@ impl CompiledNode {
                     message: error.to_string(),
                 })
                 .map_err(OrderedExecutionError::Evaluation)?;
+                let (edited, extractions) = applied.into_parts();
                 let message = Message::from_edited_header(edited, body)
                     .map_err(|error| EvalError::HeaderEdit {
                         line: self.line,
@@ -278,6 +279,9 @@ impl CompiledNode {
                     })
                     .map_err(OrderedExecutionError::Evaluation)?;
                 context.replace_message(message);
+                context
+                    .runtime
+                    .apply_header_extractions(extractions, context.host.trace());
                 context.action_succeeded(SequenceControl::Continue)
             }
             CompiledAction::Pipe { action, options } => {

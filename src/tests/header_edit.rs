@@ -19,7 +19,10 @@ fn action(operations: Vec<HeaderOperation>) -> HeaderAction {
 }
 
 fn apply(header: &[u8], body_len: usize, action: &HeaderAction) -> EditedHeader {
-    apply_header_action(header, body_len, action, MessageLimits::default()).unwrap()
+    apply_header_action(header, body_len, action, MessageLimits::default())
+        .unwrap()
+        .into_parts()
+        .0
 }
 
 #[test]
@@ -47,6 +50,139 @@ fn operations_run_in_order_and_match_names_without_ascii_case() {
         apply(header, 0, &action).as_bytes(),
         b"First: yes\nA: one\nx-test: new\nZ: last\nX-Test: added\n\n"
     );
+}
+
+#[test]
+fn rename_preserves_values_folding_order_and_endings() {
+    let header = b"Legacy: one\r\n\tcontinued\r\nKeep: exact\r\nlegacy: two\r\n\r\n";
+    let action = action(vec![HeaderOperation::Rename {
+        line: 1,
+        from: "LEGACY".into(),
+        to: "Current".into(),
+    }]);
+
+    assert_eq!(
+        apply(header, 0, &action).as_bytes(),
+        b"Current: one\r\n\tcontinued\r\nKeep: exact\r\nCurrent: two\r\n\r\n"
+    );
+}
+
+#[test]
+fn extraction_reads_the_first_field_after_preceding_edits() {
+    let header = b"Subject:  first\r\n\tcontinued\r\nSubject: second\r\n\r\n";
+    let action = action(vec![
+        HeaderOperation::Rename {
+            line: 1,
+            from: "Subject".into(),
+            to: "X-Subject".into(),
+        },
+        HeaderOperation::Extract {
+            line: 2,
+            name: "X-Subject".into(),
+            target: "RAW".into(),
+            mode: HeaderExtractionMode::Raw,
+        },
+        HeaderOperation::Extract {
+            line: 3,
+            name: "X-Subject".into(),
+            target: "UNFOLDED".into(),
+            mode: HeaderExtractionMode::Unfolded,
+        },
+        HeaderOperation::Extract {
+            line: 4,
+            name: "Missing".into(),
+            target: "MISSING".into(),
+            mode: HeaderExtractionMode::Raw,
+        },
+    ]);
+
+    let (edited, extracted) = apply_header_action(header, 0, &action, MessageLimits::default())
+        .unwrap()
+        .into_parts();
+    assert_eq!(
+        edited.as_bytes(),
+        b"X-Subject:  first\r\n\tcontinued\r\nX-Subject: second\r\n\r\n"
+    );
+    assert_eq!(
+        extracted,
+        [
+            HeaderExtraction {
+                line: 2,
+                target: "RAW".into(),
+                value: b"  first\r\n\tcontinued".to_vec(),
+            },
+            HeaderExtraction {
+                line: 3,
+                target: "UNFOLDED".into(),
+                value: b"first continued".to_vec(),
+            },
+            HeaderExtraction {
+                line: 4,
+                target: "MISSING".into(),
+                value: Vec::new(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn extraction_preserves_arbitrary_value_bytes() {
+    let action = action(vec![HeaderOperation::Extract {
+        line: 1,
+        name: "X-Binary".into(),
+        target: "VALUE".into(),
+        mode: HeaderExtractionMode::Unfolded,
+    }]);
+    let (_, extracted) = apply_header_action(
+        b"X-Binary: \xff\0value\n\n",
+        0,
+        &action,
+        MessageLimits::default(),
+    )
+    .unwrap()
+    .into_parts();
+
+    assert_eq!(extracted[0].value, b"\xff\0value");
+}
+
+#[test]
+fn extraction_enforces_its_value_limit_at_the_boundary() {
+    for mode in [HeaderExtractionMode::Raw, HeaderExtractionMode::Unfolded] {
+        for length in [
+            MAX_ASSIGNMENT_VALUE_LEN - 1,
+            MAX_ASSIGNMENT_VALUE_LEN,
+            MAX_ASSIGNMENT_VALUE_LEN + 1,
+        ] {
+            let mut header = b"X:".to_vec();
+            header.extend(std::iter::repeat_n(b'x', length));
+            header.extend_from_slice(b"\n\n");
+            let action = action(vec![HeaderOperation::Extract {
+                line: 1,
+                name: "X".into(),
+                target: "VALUE".into(),
+                mode,
+            }]);
+            let input_limit = MAX_ASSIGNMENT_VALUE_LEN + 1024;
+            let limits = MessageLimits {
+                message_size: input_limit,
+                headers_size: input_limit,
+                header_line_size: input_limit,
+                header_field_size: input_limit,
+                ..MessageLimits::default()
+            };
+            let result = apply_header_action(&header, 0, &action, limits);
+            if length <= MAX_ASSIGNMENT_VALUE_LEN {
+                assert_eq!(result.unwrap().into_parts().1[0].value.len(), length);
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    HeaderEditError::ExtractedValueTooLong {
+                        limit: MAX_ASSIGNMENT_VALUE_LEN,
+                    }
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -147,7 +283,10 @@ fn edited_header_streams_a_large_synthetic_body_without_retaining_it() {
         name: "A".into(),
         value: value("new"),
     }]);
-    let edited = apply_header_action(head.as_bytes(), 0, &action, limits).unwrap();
+    let edited = apply_header_action(head.as_bytes(), 0, &action, limits)
+        .unwrap()
+        .into_parts()
+        .0;
     head.replace_edited_header(edited);
 
     // Generate the body on demand so the fixture itself does not allocate
@@ -233,7 +372,7 @@ fn growth_limit_failure_keeps_the_input_header_unchanged() {
 }
 
 fn assert_limit_result(
-    result: Result<EditedHeader, HeaderEditError>,
+    result: Result<AppliedHeaderAction, HeaderEditError>,
     size: usize,
     limit: usize,
     kind: MessageLimit,

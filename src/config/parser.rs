@@ -10,13 +10,13 @@ use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaptureAction, CaseMode,
     ChildStatusMode, CommandAssignment, Condition, ConditionInput, ConditionKind, Config,
-    ContinuationMode, ControlFlow, Destination, HeaderAction, HeaderOperation, HeaderValue,
-    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION,
-    MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_AST_NESTING,
-    MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS, MAX_REGEX_PATTERN_LEN,
-    OutputEnding, ParseBudget, ParseError, PathExpression, PipeAction, RcFileExpression, RcLimits,
-    RcParseCounts, Recipe, RecipeAction, RecipeOptions, RegexCondition, ShellExpression, Statement,
-    VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
+    ContinuationMode, ControlFlow, Destination, HeaderAction, HeaderExtractionMode,
+    HeaderOperation, HeaderValue, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN,
+    MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE,
+    MAX_REGEX_AST_NESTING, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS,
+    MAX_REGEX_PATTERN_LEN, OutputEnding, ParseBudget, ParseError, PathExpression, PipeAction,
+    RcFileExpression, RcLimits, RcParseCounts, Recipe, RecipeAction, RecipeOptions, RegexCondition,
+    ShellExpression, Statement, VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
 };
 
 #[cfg(test)]
@@ -861,6 +861,59 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
         });
     }
 
+    if operation == "rename" {
+        let mut parts = arguments.split_ascii_whitespace();
+        if let (Some(from), Some("to"), Some(to), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        {
+            validate_header_name(from, line)?;
+            validate_header_name(to, line)?;
+            return Ok(HeaderOperation::Rename {
+                line,
+                from: from.to_owned(),
+                to: to.to_owned(),
+            });
+        }
+        return Err(ParseError::new(
+            line,
+            "header operation 'rename' requires OLD-NAME to NEW-NAME",
+        ));
+    }
+
+    if operation == "extract" {
+        let mut parts = arguments.split_ascii_whitespace();
+        let (Some(mode), Some(name), Some("into"), Some(target), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            return Err(ParseError::new(
+                line,
+                "header operation 'extract' requires raw|unfolded NAME into VARIABLE",
+            ));
+        };
+        let mode = match mode {
+            "raw" => HeaderExtractionMode::Raw,
+            "unfolded" => HeaderExtractionMode::Unfolded,
+            _ => {
+                return Err(ParseError::new(
+                    line,
+                    "header extraction mode must be 'raw' or 'unfolded'",
+                ));
+            }
+        };
+        validate_header_name(name, line)?;
+        validate_header_extraction_target(target, line)?;
+        return Ok(HeaderOperation::Extract {
+            line,
+            name: name.to_owned(),
+            target: target.to_owned(),
+            mode,
+        });
+    }
+
     if !matches!(operation, "set" | "add" | "prepend") {
         return Err(ParseError::new(
             line,
@@ -916,6 +969,36 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
         _ => Err(ParseError::new(
             line,
             format!("unknown headers operation '{operation}'"),
+        )),
+    }
+}
+
+fn validate_header_extraction_target(name: &str, line: usize) -> Result<(), ParseError> {
+    if name.len() > MAX_ASSIGNMENT_NAME_LEN {
+        return Err(ParseError::new(
+            line,
+            format!("assignment name exceeds the hard limit of {MAX_ASSIGNMENT_NAME_LEN} bytes"),
+        ));
+    }
+    if name.is_empty()
+        || !name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphanumeric() && (index > 0 || !byte.is_ascii_digit())
+        })
+    {
+        return Err(ParseError::new(
+            line,
+            "header extraction target must be a variable name",
+        ));
+    }
+    match variable_policy(name) {
+        VariablePolicy::RcOrCommandLine(AssignmentTarget::User) => Ok(()),
+        VariablePolicy::Unsupported => Err(ParseError::new(
+            line,
+            format!("procmail variable {name} is not supported"),
+        )),
+        _ => Err(ParseError::new(
+            line,
+            format!("header extraction cannot modify protected variable {name}"),
         )),
     }
 }

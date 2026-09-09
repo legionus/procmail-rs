@@ -467,7 +467,7 @@ impl CompiledSequence {
                         let action = action
                             .resolve_with(|name| context.runtime.get(name).map(str::to_owned))
                             .map_err(EvalError::Expansion)?;
-                        let edited = crate::header_edit::apply_header_action(
+                        let applied = crate::header_edit::apply_header_action(
                             context.head.as_bytes(),
                             0,
                             &action,
@@ -477,7 +477,11 @@ impl CompiledSequence {
                             line: recipe.line,
                             message: error.to_string(),
                         })?;
+                        let (edited, extractions) = applied.into_parts();
                         context.head.replace_edited_header(edited);
+                        context
+                            .runtime
+                            .apply_header_extractions(extractions, context.trace);
                         HeaderControl::Continue
                     }
                     CompiledAction::Deliver { .. } => {

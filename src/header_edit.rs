@@ -3,7 +3,10 @@
 
 use std::fmt;
 
-use crate::config::{HeaderAction, HeaderOperation};
+use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
+use crate::config::{
+    HeaderAction, HeaderExtractionMode, HeaderOperation, MAX_ASSIGNMENT_VALUE_LEN,
+};
 use crate::limits::MessageLimits;
 use crate::message::MessageLimit;
 
@@ -11,6 +14,25 @@ use crate::message::MessageLimit;
 pub(crate) struct EditedHeader {
     bytes: Vec<u8>,
     limits: MessageLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeaderExtraction {
+    pub(crate) line: usize,
+    pub(crate) target: String,
+    pub(crate) value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppliedHeaderAction {
+    header: EditedHeader,
+    extractions: Vec<HeaderExtraction>,
+}
+
+impl AppliedHeaderAction {
+    pub(crate) fn into_parts(self) -> (EditedHeader, Vec<HeaderExtraction>) {
+        (self.header, self.extractions)
+    }
 }
 
 impl EditedHeader {
@@ -33,6 +55,7 @@ impl EditedHeader {
 pub(crate) enum HeaderEditError {
     SizeOverflow,
     LimitExceeded { kind: MessageLimit, limit: usize },
+    ExtractedValueTooLong { limit: usize },
 }
 
 impl fmt::Display for HeaderEditError {
@@ -41,6 +64,12 @@ impl fmt::Display for HeaderEditError {
             Self::SizeOverflow => formatter.write_str("edited header size overflows usize"),
             Self::LimitExceeded { kind, limit } => {
                 write!(formatter, "edited message exceeds {kind} ({limit} bytes)")
+            }
+            Self::ExtractedValueTooLong { limit } => {
+                write!(
+                    formatter,
+                    "extracted header value exceeds MAX_ASSIGNMENT_VALUE_LEN ({limit} bytes)"
+                )
             }
         }
     }
@@ -91,9 +120,10 @@ pub(crate) fn apply_header_action(
     body_len: usize,
     action: &HeaderAction,
     limits: MessageLimits,
-) -> Result<EditedHeader, HeaderEditError> {
+) -> Result<AppliedHeaderAction, HeaderEditError> {
     let (fields, separator, line_ending) = split_fields(header);
     let mut edited: Vec<EditedField<'_>> = fields.into_iter().map(EditedField::Borrowed).collect();
+    let mut extractions = Vec::new();
 
     // Keeping edits as whole physical byte ranges prevents a folded field
     // from being separated from its continuation lines. Operations are
@@ -139,6 +169,32 @@ pub(crate) fn apply_header_action(
                     EditedField::Added(make_field(name, &value.source, line_ending)?),
                 );
             }
+            HeaderOperation::Rename { from, to, .. } => {
+                for field in &mut edited {
+                    if field.matches(from.as_bytes()) {
+                        *field = EditedField::Added(rename_field(field.bytes(), to)?);
+                    }
+                }
+            }
+            HeaderOperation::Extract {
+                line,
+                name,
+                target,
+                mode,
+            } => {
+                let value = edited
+                    .iter()
+                    .find(|field| field.matches(name.as_bytes()))
+                    .map_or_else(
+                        || Ok(Vec::new()),
+                        |field| extract_value(field.bytes(), *mode),
+                    )?;
+                extractions.push(HeaderExtraction {
+                    line: *line,
+                    target: target.clone(),
+                    value,
+                });
+            }
         }
         validate_aggregate_size(&edited, separator, line_ending, body_len, limits)?;
     }
@@ -153,10 +209,95 @@ pub(crate) fn apply_header_action(
     }
     result.extend_from_slice(separator);
     validate_edited_header(&result, body_len, limits)?;
-    Ok(EditedHeader {
-        bytes: result,
-        limits,
+    Ok(AppliedHeaderAction {
+        header: EditedHeader {
+            bytes: result,
+            limits,
+        },
+        extractions,
     })
+}
+
+fn rename_field(field: &[u8], name: &str) -> Result<Vec<u8>, HeaderEditError> {
+    let colon = field
+        .iter()
+        .position(|byte| *byte == b':')
+        .unwrap_or(field.len());
+    let suffix = field.get(colon..).unwrap_or_default();
+    let size = name
+        .len()
+        .checked_add(suffix.len())
+        .ok_or(HeaderEditError::SizeOverflow)?;
+    let mut renamed = Vec::with_capacity(size);
+    renamed.extend_from_slice(name.as_bytes());
+    renamed.extend_from_slice(suffix);
+    Ok(renamed)
+}
+
+fn extract_value(field: &[u8], mode: HeaderExtractionMode) -> Result<Vec<u8>, HeaderEditError> {
+    let first_line_end = field
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(field.len(), |offset| offset + 1);
+    let colon = field[..first_line_end]
+        .iter()
+        .position(|byte| *byte == b':')
+        .unwrap_or(first_line_end);
+    let value = colon
+        .checked_add(1)
+        .and_then(|start| field.get(start..))
+        .unwrap_or_default();
+    match mode {
+        HeaderExtractionMode::Raw => {
+            let value = strip_line_ending(value);
+            if value.len() > MAX_ASSIGNMENT_VALUE_LEN {
+                return Err(HeaderEditError::ExtractedValueTooLong {
+                    limit: MAX_ASSIGNMENT_VALUE_LEN,
+                });
+            }
+            Ok(value.to_vec())
+        }
+        HeaderExtractionMode::Unfolded => unfold_value(value),
+    }
+}
+
+fn unfold_value(value: &[u8]) -> Result<Vec<u8>, HeaderEditError> {
+    let mut output = BoundedBytes::with_capacity(MAX_ASSIGNMENT_VALUE_LEN, value.len());
+    let mut cursor = 0usize;
+    let mut first = true;
+    while cursor < value.len() {
+        let end = value[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(value.len(), |offset| cursor + offset + 1);
+        let line = strip_line_ending(&value[cursor..end]);
+        let content = line
+            .iter()
+            .position(|byte| !matches!(byte, b' ' | b'\t'))
+            .map_or(&[][..], |start| &line[start..]);
+        if !first {
+            output.try_extend(b" ").map_err(extraction_length_error)?;
+        }
+        output
+            .try_extend(content)
+            .map_err(extraction_length_error)?;
+        first = false;
+        cursor = end;
+    }
+    Ok(output.into_vec())
+}
+
+fn strip_line_ending(value: &[u8]) -> &[u8] {
+    value
+        .strip_suffix(b"\r\n")
+        .or_else(|| value.strip_suffix(b"\n"))
+        .unwrap_or(value)
+}
+
+fn extraction_length_error(_: BoundedBytesError) -> HeaderEditError {
+    HeaderEditError::ExtractedValueTooLong {
+        limit: MAX_ASSIGNMENT_VALUE_LEN,
+    }
 }
 
 fn serialized_size(

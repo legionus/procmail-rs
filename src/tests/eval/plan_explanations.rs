@@ -245,7 +245,7 @@ fn explains_plan_shape_without_private_configuration_values() {
 #[test]
 fn explains_header_operation_kinds_without_private_fields() {
     let config = config::parse(
-        ":0\nheaders {\n remove X-Secret-Remove\n set X-Secret-Set: secret-set-value\n add X-Secret-Add: secret-add-value\n add X-Other-Add: other-add-value\n prepend X-Secret-Prepend: secret-prepend-value\n}\n",
+        ":0\nheaders {\n remove X-Secret-Remove\n set X-Secret-Set: secret-set-value\n add X-Secret-Add: secret-add-value\n add X-Other-Add: other-add-value\n prepend X-Secret-Prepend: secret-prepend-value\n rename X-Secret-Old to X-Secret-New\n extract raw X-Secret-Value into PRIVATE_VALUE\n}\n",
     )
     .unwrap()
     .expand(&[])
@@ -261,6 +261,8 @@ fn explains_header_operation_kinds_without_private_fields() {
     assert_eq!(operations.set_count(), 1);
     assert_eq!(operations.add_count(), 2);
     assert_eq!(operations.prepend_count(), 1);
+    assert_eq!(operations.rename_count(), 1);
+    assert_eq!(operations.extract_count(), 1);
     let rendered = format!("{explanation:?}");
     for private in [
         "X-Secret-Remove",
@@ -268,6 +270,10 @@ fn explains_header_operation_kinds_without_private_fields() {
         "X-Secret-Add",
         "X-Other-Add",
         "X-Secret-Prepend",
+        "X-Secret-Old",
+        "X-Secret-New",
+        "X-Secret-Value",
+        "PRIVATE_VALUE",
         "secret-set-value",
         "secret-add-value",
         "other-add-value",
@@ -291,4 +297,3 @@ fn explains_static_null_destination_as_discard() {
     assert_eq!(recipe.action(), ActionKindExplanation::Discard);
     assert!(!recipe.defers_destination());
 }
-

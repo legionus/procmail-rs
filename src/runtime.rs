@@ -135,6 +135,22 @@ impl RuntimeVariables {
         }
     }
 
+    pub(crate) fn apply_header_extractions(
+        &mut self,
+        extractions: Vec<crate::header_edit::HeaderExtraction>,
+        trace: &mut impl TraceSink,
+    ) {
+        for extraction in extractions {
+            self.set_bytes_with_trace(
+                extraction.target,
+                extraction.value,
+                Some(extraction.line),
+                TraceVariableSource::RcFile,
+                trace,
+            );
+        }
+    }
+
     pub fn last_folder(&self) -> Option<&str> {
         self.get("LASTFOLDER")
     }

@@ -393,6 +393,23 @@ pub enum HeaderOperation {
         name: String,
         value: HeaderValue,
     },
+    Rename {
+        line: usize,
+        from: String,
+        to: String,
+    },
+    Extract {
+        line: usize,
+        name: String,
+        target: String,
+        mode: HeaderExtractionMode,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderExtractionMode {
+    Raw,
+    Unfolded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

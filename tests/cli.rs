@@ -1389,6 +1389,42 @@ fn runtime_include_header_edit_updates_following_parent_recipe() {
 }
 
 #[test]
+fn native_header_extraction_drives_later_rules_without_a_child() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let mailbase = base.join("mailbase");
+    let selected = mailbase.join("selected");
+    create_maildir(&mailbase);
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!(
+            "MAILDIR={}\n:0\nheaders {{\n rename X-Legacy to X-Current\n extract unfolded X-Current into HEADER_VALUE\n}}\n:0\n* HEADER_VALUE ?? ^^selected value^^\nmaildir:selected\n",
+            mailbase.display()
+        ),
+    )
+    .unwrap();
+    let input = b"X-Legacy: selected\n\tvalue\n\nbody";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(
+        delivered_messages(&selected),
+        [b"X-Current: selected\n\tvalue\n\nbody".to_vec()]
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn body_runtime_include_touches_staging_only_when_selected() {
     let path = config_file("");
     let base = path.parent().unwrap();

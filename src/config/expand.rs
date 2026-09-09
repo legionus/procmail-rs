@@ -273,7 +273,9 @@ impl HeaderAction {
         let mut resolved = self.clone();
         for operation in &mut resolved.operations {
             let (line, value) = match operation {
-                HeaderOperation::Remove { .. } => continue,
+                HeaderOperation::Remove { .. }
+                | HeaderOperation::Rename { .. }
+                | HeaderOperation::Extract { .. } => continue,
                 HeaderOperation::Set { line, value, .. }
                 | HeaderOperation::Add { line, value, .. }
                 | HeaderOperation::Prepend { line, value, .. } => (*line, value),
@@ -1117,7 +1119,14 @@ fn record_recipe_dynamic_names(recipe: &Recipe, dynamic: &mut BTreeSet<String>) 
                 });
             }
         }
-        RecipeAction::Pipe(_) | RecipeAction::Headers(_) => {}
+        RecipeAction::Headers(action) => {
+            for operation in &action.operations {
+                if let HeaderOperation::Extract { target, .. } = operation {
+                    dynamic.insert(target.clone());
+                }
+            }
+        }
+        RecipeAction::Pipe(_) => {}
     }
 }
 
@@ -1128,7 +1137,9 @@ fn prepare_header_action(
 ) -> Result<(), ExpansionError> {
     for operation in &mut action.operations {
         let (line, value) = match operation {
-            HeaderOperation::Remove { .. } => continue,
+            HeaderOperation::Remove { .. }
+            | HeaderOperation::Rename { .. }
+            | HeaderOperation::Extract { .. } => continue,
             HeaderOperation::Set { line, value, .. }
             | HeaderOperation::Add { line, value, .. }
             | HeaderOperation::Prepend { line, value, .. } => (*line, value),

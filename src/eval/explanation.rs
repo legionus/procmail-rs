@@ -109,6 +109,8 @@ pub struct HeaderOperationExplanation {
     pub(super) set: usize,
     pub(super) add: usize,
     pub(super) prepend: usize,
+    pub(super) rename: usize,
+    pub(super) extract: usize,
 }
 
 impl HeaderOperationExplanation {
@@ -126,5 +128,13 @@ impl HeaderOperationExplanation {
 
     pub fn prepend_count(self) -> usize {
         self.prepend
+    }
+
+    pub fn rename_count(self) -> usize {
+        self.rename
+    }
+
+    pub fn extract_count(self) -> usize {
+        self.extract
     }
 }

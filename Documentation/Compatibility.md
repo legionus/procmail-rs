@@ -273,10 +273,12 @@ follows:
 | `set NAME: VALUE` | Replaces the first matching field at its existing position and removes later duplicates. Appends a new field when none exists. |
 | `add NAME: VALUE` | Appends a new field even when fields with the same name already exist. Repeated additions retain source order. |
 | `prepend NAME: VALUE` | Inserts a new field before every current field. A later `prepend` therefore appears before an earlier one. |
+| `rename OLD-NAME to NEW-NAME` | Renames every matching field while preserving values, folding, ordering, and line endings. |
+| `extract raw NAME into VARIABLE` | Assigns the first field value without its name, colon, or final line ending while preserving leading whitespace and folds. |
+| `extract unfolded NAME into VARIABLE` | Assigns the first field value after removing leading horizontal whitespace from each physical line and joining folds with one space. |
 
-`NAME` must be non-empty printable ASCII without `:`. `VALUE` uses the bounded
-rc expansion forms `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`,
-`${NAME+word}`, and `${NAME:+word}` when the action executes. NUL, CR, LF, and
+`NAME` must be non-empty printable ASCII without `:`. `VALUE` uses the
+documented bounded parameter forms when the action executes. NUL, CR, LF, and
 requested folded continuations are rejected.
 Inserted values are not reparsed as shell text. Existing fields and the body
 remain byte-for-byte unchanged. New fields use the first physical header
@@ -295,9 +297,16 @@ message remains selected. Later conditions, runtime rc files, external
 actions, and delivery see the edited header. A header-only path can still
 stream the untouched body without retaining it.
 
+Extraction targets are restricted to ordinary user variables. Values become
+visible only after the complete action succeeds, absent fields assign empty,
+and repeated targets use the last extracted value. Raw and unfolded values may
+contain arbitrary bytes and are limited to `MAX_ASSIGNMENT_VALUE_LEN` before
+publication. The operation-count limit caps their aggregate retained size at
+16 MiB per action.
+
 This action is not a complete built-in replacement for `formail`. It does not
-extract or rename fields, generate addresses or message identifiers, split
-digests, rewrite the body, or implement other `formail` options. In particular,
+parse addresses, decode MIME fields, generate addresses or message identifiers,
+split digests, rewrite the body, or implement other `formail` options. In particular,
 the common `formail -I NAME:` removal idiom maps to `remove NAME`; `set NAME:`
 creates an empty field. Unlike a `formail -I` filter, `set` keeps the position
 of the first matching field. Use a trusted pipe action when broader `formail`
