@@ -418,11 +418,11 @@ fn program_condition_uses_child_status_before_entering_block() {
 
 #[test]
 fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
-    struct Guard(std::rc::Rc<std::cell::Cell<bool>>);
+    struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            self.0.set(false);
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -434,7 +434,7 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
     .unwrap();
     let plan = ExecutionPlan::compile(&config, None);
     let raw = b"Subject: lock\n\nbody";
-    let held = std::rc::Rc::new(std::cell::Cell::new(false));
+    let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed = held.clone();
     let released = held.clone();
     let mut runtime = RuntimeVariables::default();
@@ -446,7 +446,7 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
             &mut runtime,
             ExecutionServices::new(
                 &mut |destination, message, _, _, runtime, _| {
-                    assert!(observed.get());
+                    assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
                     assert_eq!(
                         destination
                             .resolve_with(|name| runtime.get(name).map(str::to_owned))
@@ -470,7 +470,7 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
                 assert_eq!(runtime.get("LOCKSLEEP"), Some("3"));
                 assert_eq!(runtime.get("LOCKTIMEOUT"), Some("7"));
                 assert_eq!(runtime.get("UMASK"), Some("077"));
-                assert!(!held.replace(true));
+                assert!(!held.swap(true, std::sync::atomic::Ordering::SeqCst));
                 Ok::<Box<dyn RecipeLockGuard>, DeliveryAttemptError<&str>>(Box::new(Guard(
                     held.clone(),
                 )))
@@ -480,7 +480,7 @@ fn ordered_block_lock_guard_spans_the_complete_child_sequence() {
 
     assert!(outcome.original_delivered());
     assert_eq!(outcome.published(), 1);
-    assert!(!released.get());
+    assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]

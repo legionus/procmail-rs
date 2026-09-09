@@ -828,9 +828,11 @@ impl ExecutionPlan {
                 .map_err(OrderedExecutionError::Evaluation)?,
         };
         let execution = self.root.execute_ordered(&mut context);
-        let result = match execution {
-            Err(error) => Err(error),
-            Ok(_) => match context.pending_error.take() {
+        let background = context.host.finish_background();
+        let result = match (execution, background) {
+            (_, Err(error)) => Err(OrderedExecutionError::Delivery(error)),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Ok(())) => match context.pending_error.take() {
                 Some(error) => Err(OrderedExecutionError::Delivery(error)),
                 None => Ok(DeliveryOutcome {
                     published: context.published,

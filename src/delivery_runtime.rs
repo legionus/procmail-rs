@@ -93,11 +93,16 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         runtime: &mut RuntimeVariables,
     ) -> Result<Option<procmail_rs::message::Message>, DeliveryAttemptError<Self::Error>> {
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
-        let _local_lock =
-            acquire_recipe_lock(lock, None, runtime, self.uid).map_err(classify_execution_error)?;
-        let result = self
-            .command_runner
-            .action(action.command.as_str(), options, input, runtime);
+        let local_lock = acquire_recipe_lock(lock, None, runtime, self.uid)
+            .map(|lock| lock.map(|guard| Box::new(guard) as Box<dyn RecipeLockGuard>))
+            .map_err(classify_execution_error)?;
+        let result = self.command_runner.action(
+            action.command.as_str(),
+            options,
+            input,
+            local_lock,
+            runtime,
+        );
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
         result
     }
@@ -178,6 +183,10 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
     fn leave_copy_branch(&mut self) {
         *self.global_lock = None;
         *self.global_lock = self.suspended_global_locks.pop().unwrap_or_default();
+    }
+
+    fn finish_background(&mut self) -> Result<(), Self::Error> {
+        self.command_runner.finish_background()
     }
 
     fn complete(

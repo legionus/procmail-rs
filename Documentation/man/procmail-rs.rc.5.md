@@ -250,6 +250,14 @@ action. Repeating a flag has no additional effect.
 : Apply the same status handling as `w`, but suppress the child-failure
   diagnostic. `w` and `W` cannot be combined.
 
+A non-filter pipe without `w` or `W` continues recipe evaluation after its
+complete selected input has been written. The command remains supervised in
+the background: `TIMEOUT`, process-group termination, stderr redirection to
+the active `LOGFILE`, reaping, and any local recipe lock remain in effect.
+procmail-rs reaps all such commands before finishing the message.
+At most 128 background commands may belong to one message; the next action
+fails instead of creating another process or worker.
+
 `i`
 
 : Ignore only an error encountered while writing selected input to a child or

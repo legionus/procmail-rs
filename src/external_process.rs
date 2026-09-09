@@ -64,6 +64,12 @@ pub struct CaptureRun {
     exit_code: Option<u8>,
 }
 
+#[derive(Debug)]
+pub struct BackgroundProgramRun {
+    input_write: InputWrite,
+    waiter: thread::JoinHandle<Result<(ExitStatus, bool), ExternalProcessError>>,
+}
+
 struct ProgramIoOptions {
     output_ending: OutputEnding,
     timeout: Duration,
@@ -189,6 +195,25 @@ impl ProgramRun {
 
     pub fn exit_code(self) -> Option<u8> {
         self.exit_code
+    }
+}
+
+impl BackgroundProgramRun {
+    pub fn input_write(&self) -> InputWrite {
+        self.input_write
+    }
+
+    pub fn wait(self) -> Result<ProgramRun, ExternalProcessError> {
+        let (status, timed_out) = self
+            .waiter
+            .join()
+            .map_err(|_| process_error("background command wait worker failed"))??;
+        let completed = complete_child(self.input_write, status, timed_out);
+        Ok(ProgramRun {
+            input_write: completed.input_write,
+            child_exit: completed.child_exit,
+            exit_code: completed.exit_code,
+        })
     }
 }
 
@@ -456,6 +481,77 @@ pub fn run_program_with_timeout(
             body_input: options.action_input == ActionInput::Body,
         },
     )
+}
+
+pub fn run_program_in_background(
+    policy: &ShellPolicy,
+    environment: &ProcessEnvironment,
+    command: &str,
+    input: &[u8],
+    options: ProgramOptions,
+    stderr: Stdio,
+) -> Result<BackgroundProgramRun, ExternalProcessError> {
+    let (child_sender, child_receiver) = std::sync::mpsc::sync_channel(1);
+    let waiter = thread::Builder::new()
+        .name("procmail-rs-command-wait".to_owned())
+        .spawn(move || {
+            let (mut child, timeout) = child_receiver
+                .recv()
+                .map_err(|_| process_error("background command wait worker received no child"))?;
+            wait_for_process_group(&mut child, timeout)
+        })
+        .map_err(|error| process_error(format!("cannot start command wait worker: {error}")))?;
+    let lifecycle = match ChildLifecycle::spawn(
+        policy,
+        environment,
+        command,
+        options.timeout,
+        Stdio::null(),
+        stderr,
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => {
+            drop(child_sender);
+            let _ = waiter.join();
+            return Err(error);
+        }
+    };
+    let ChildLifecycle {
+        child,
+        stdin,
+        timeout,
+    } = lifecycle;
+
+    // The caller must know whether the complete selected input reached the
+    // pipe before it continues recipe evaluation. Supervise the child in a
+    // detached worker at the same time so a full pipe or a child that never
+    // exits still reaches TIMEOUT and unblocks this write.
+    if let Err(error) = child_sender.send((child, timeout)) {
+        let (mut child, _) = error.0;
+        let cleanup = terminate_process_group(&mut child);
+        let _ = waiter.join();
+        return Err(match cleanup {
+            Ok(_) => process_error("command wait worker stopped before receiving its child"),
+            Err(cleanup) => process_error(format!(
+                "command wait worker stopped and child cleanup failed: {cleanup}"
+            )),
+        });
+    }
+    let input_write = write_process_input(
+        stdin,
+        ProcessInput {
+            bytes: input,
+            output_ending: options.output_ending,
+            append_lf: false,
+            body_input: options.action_input == ActionInput::Body,
+        },
+    )
+    .map(|()| InputWrite::Complete)
+    .unwrap_or(InputWrite::Failed);
+    Ok(BackgroundProgramRun {
+        input_write,
+        waiter,
+    })
 }
 
 pub fn run_capture_with_timeout(

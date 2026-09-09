@@ -3,9 +3,9 @@
 
 use super::*;
 
-pub trait RecipeLockGuard {}
+pub trait RecipeLockGuard: Send {}
 
-impl<T> RecipeLockGuard for T {}
+impl<T: Send> RecipeLockGuard for T {}
 
 pub trait OrderedExecutionHost {
     type Error;
@@ -55,6 +55,9 @@ pub trait OrderedExecutionHost {
     ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<Self::Error>>;
     fn enter_copy_branch(&mut self) {}
     fn leave_copy_branch(&mut self) {}
+    fn finish_background(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn complete(
         &mut self,
         message: FinalMessage<'_>,

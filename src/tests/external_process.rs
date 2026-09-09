@@ -264,6 +264,54 @@ fn regular_program_reports_failed_exit_without_parsing_output() {
 }
 
 #[test]
+fn background_program_returns_after_input_and_is_reaped_later() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let marker = temporary_path("background-finished");
+    let command = format!("cat >/dev/null; sleep 1; : > {}", marker.display());
+    let started = Instant::now();
+    let run = run_program_in_background(
+        &policy,
+        &environment,
+        &command,
+        b"complete input",
+        ProgramOptions::new(OutputEnding::Preserve, ActionInput::Message)
+            .with_timeout(Duration::from_secs(3)),
+        Stdio::null(),
+    )
+    .unwrap();
+
+    assert_eq!(run.input_write(), InputWrite::Complete);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(!marker.exists());
+    let completed = run.wait().unwrap();
+    assert_eq!(completed.outcome().child_exit(), ChildExit::Success);
+    assert!(marker.exists());
+    fs::remove_file(marker).unwrap();
+}
+
+#[test]
+fn background_program_keeps_stderr_and_timeout_supervision_active() {
+    let (environment, policy) = enabled_shell(&RuntimeVariables::default());
+    let path = temporary_path("background-stderr");
+    let file = File::create(&path).unwrap();
+    let run = run_program_in_background(
+        &policy,
+        &environment,
+        "printf diagnostic >&2; sleep 30",
+        b"",
+        ProgramOptions::new(OutputEnding::Preserve, ActionInput::Message)
+            .with_timeout(Duration::from_millis(50)),
+        Stdio::from(file),
+    )
+    .unwrap();
+
+    let completed = run.wait().unwrap();
+    assert_eq!(completed.outcome().child_exit(), ChildExit::TimedOut);
+    assert_eq!(fs::read(&path).unwrap(), b"diagnostic");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn regular_program_distinguishes_signal_termination_from_exit_failure() {
     let (environment, policy) = enabled_shell(&RuntimeVariables::default());
     let run = run_program_with_timeout(

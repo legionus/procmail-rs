@@ -6,13 +6,16 @@ use std::process::Stdio;
 
 use procmail_rs::config::{ActionInput, ActionMode, OutputEnding, RecipeOptions, WriteErrorMode};
 use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
-use procmail_rs::eval::{CapturedCommand, DeliveryAttemptError, ExternalActionInput};
+use procmail_rs::eval::{
+    CapturedCommand, DeliveryAttemptError, ExternalActionInput, RecipeLockGuard,
+};
 use procmail_rs::external_command::{
     ChildExit, CommandDecision, CommandOutcome, CommandOutcomePolicy, FilterOutput,
 };
 use procmail_rs::external_process::{
-    CaptureOptions, CaptureRun, FilterOptions, FilterRun, ProgramOptions, ProgramRun,
-    run_capture_with_timeout, run_filter, run_program_with_timeout, run_trap_with_timeout,
+    BackgroundProgramRun, CaptureOptions, CaptureRun, FilterOptions, FilterRun, ProgramOptions,
+    ProgramRun, run_capture_with_timeout, run_filter, run_program_in_background,
+    run_program_with_timeout, run_trap_with_timeout,
 };
 use procmail_rs::limits::MessageLimits;
 use procmail_rs::message::Message;
@@ -20,6 +23,8 @@ use procmail_rs::runtime::{RuntimeSettings, RuntimeVariables};
 
 use super::{ExitStatus, OperationalError};
 use crate::command_log::{CommandLog, DiagnosticWriteError, TrapOutputError};
+
+pub const MAX_BACKGROUND_COMMANDS: usize = 128;
 
 #[derive(Debug, Clone, Copy)]
 enum InputSelection {
@@ -107,18 +112,26 @@ struct PreparedEnvironment {
     timeout: std::time::Duration,
 }
 
-#[derive(Debug, Clone, Copy)]
+struct BackgroundCommand {
+    run: BackgroundProgramRun,
+    _lock: Option<Box<dyn RecipeLockGuard>>,
+}
+
 pub struct CommandRunner {
     limits: MessageLimits,
+    background: Vec<BackgroundCommand>,
 }
 
 impl CommandRunner {
     pub fn new(limits: MessageLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            background: Vec::new(),
+        }
     }
 
     pub fn condition(
-        self,
+        &mut self,
         command: &str,
         input: &[u8],
         runtime: &mut RuntimeVariables,
@@ -143,7 +156,7 @@ impl CommandRunner {
     }
 
     pub fn capture(
-        self,
+        &mut self,
         command: &str,
         input: &[u8],
         output_ending: OutputEnding,
@@ -187,14 +200,20 @@ impl CommandRunner {
     }
 
     pub fn action(
-        self,
+        &mut self,
         command: &str,
         options: RecipeOptions,
         input: ExternalActionInput<'_>,
+        lock: Option<Box<dyn RecipeLockGuard>>,
         runtime: &mut RuntimeVariables,
     ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
         if command.is_empty() {
             return write_stdout(input.selected(), options, runtime);
+        }
+        if options.action_mode == ActionMode::Deliver
+            && options.child_status == procmail_rs::config::ChildStatusMode::Ignore
+        {
+            return self.start_unwaited_action(command, options, input.selected(), lock, runtime);
         }
         let output = if options.action_mode == ActionMode::Deliver {
             OutputHandling::Discard
@@ -236,7 +255,67 @@ impl CommandRunner {
         }
     }
 
-    pub fn trap(self, message: &[u8], runtime: &mut RuntimeVariables, provisional_status: u8) {
+    fn start_unwaited_action(
+        &mut self,
+        command: &str,
+        options: RecipeOptions,
+        input: &[u8],
+        lock: Option<Box<dyn RecipeLockGuard>>,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
+        let next_count = self
+            .background
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| recoverable_error("background external command count overflows"))?;
+        check_background_command_count(next_count).map_err(recoverable_error)?;
+        self.background.try_reserve(1).map_err(|_| {
+            recoverable_error("cannot reserve background external command supervision")
+        })?;
+        let prepared = prepare(runtime)?;
+        let run = run_program_in_background(
+            &prepared.shell_policy,
+            &prepared.environment,
+            command,
+            input,
+            ProgramOptions::new(options.output_ending, options.action_input)
+                .with_timeout(prepared.timeout),
+            prepared.stderr,
+        )
+        .map_err(process_error)?;
+        let outcome = CommandOutcome::new(run.input_write(), ChildExit::Success);
+
+        // Register the waiter before interpreting a write failure. Even when
+        // the recipe handles that failure through `i` or `e`, the shell still
+        // belongs to this message and must be timed out and reaped.
+        self.background.push(BackgroundCommand { run, _lock: lock });
+        if !outcome
+            .decide(CommandOutcomePolicy::Pipe {
+                child_status: options.child_status,
+                write_errors: options.write_errors,
+            })
+            .accepted()
+        {
+            return Err(recoverable_error(
+                "cannot write complete message to external program",
+            ));
+        }
+        runtime.set("LASTFOLDER", command);
+        Ok(None)
+    }
+
+    pub fn finish_background(&mut self) -> Result<(), OperationalError> {
+        for command in self.background.drain(..) {
+            command.run.wait().map_err(|error| {
+                OperationalError::Internal(format!(
+                    "cannot supervise background external command: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn trap(&mut self, message: &[u8], runtime: &mut RuntimeVariables, provisional_status: u8) {
         let Some(command) = runtime.get("TRAP").filter(|command| !command.is_empty()) else {
             return;
         };
@@ -282,7 +361,7 @@ impl CommandRunner {
     }
 
     fn run(
-        self,
+        &mut self,
         request: CommandRequest<'_>,
         runtime: &RuntimeVariables,
     ) -> Result<CommandRun, DeliveryAttemptError<OperationalError>> {
@@ -342,7 +421,7 @@ impl CommandRunner {
     }
 
     fn run_trap(
-        self,
+        &mut self,
         command: &str,
         message: &[u8],
         runtime: &RuntimeVariables,
@@ -359,6 +438,16 @@ impl CommandRunner {
             stderr,
         )
         .map_err(|error| error.to_string())
+    }
+}
+
+fn check_background_command_count(count: usize) -> Result<(), String> {
+    if count > MAX_BACKGROUND_COMMANDS {
+        Err(format!(
+            "background external command count exceeds the hard limit of {MAX_BACKGROUND_COMMANDS}"
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -538,6 +627,10 @@ fn report_trap_diagnostic(runtime: &RuntimeVariables, message: &str) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/command_runner.rs"]
+mod tests;
 
 fn trap_output(runtime: &RuntimeVariables) -> (Stdio, Stdio) {
     match CommandLog::new(runtime).trap_output() {

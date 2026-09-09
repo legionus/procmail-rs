@@ -279,7 +279,7 @@ fn run() -> Result<u8, OperationalError> {
             let mut head = Message::read_headers(&mut stdin, limits).map_err(|error| {
                 OperationalError::Input(format!("cannot read message headers from stdin: {error}"))
             })?;
-            let command_runner = CommandRunner::new(limits);
+            let mut command_runner = CommandRunner::new(limits);
             let header_evaluation = plan.evaluate_headers_editing_with_capture_trace(
                 &mut head,
                 &mut runtime,
