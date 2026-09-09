@@ -157,6 +157,41 @@ pub fn header_edit(data: &[u8]) {
     );
 }
 
+pub fn rc_configuration(data: &[u8]) {
+    let Ok(source) = std::str::from_utf8(data) else {
+        return;
+    };
+    let supplied = [
+        crate::config::SuppliedVariable::from_environment("HOME", "/fuzz/home".to_owned())
+            .expect("fixed HOME value must be accepted"),
+        crate::config::SuppliedVariable::from_environment("LOGNAME", "fuzzer".to_owned())
+            .expect("fixed LOGNAME value must be accepted"),
+        crate::config::SuppliedVariable::from_system_hostname("fuzz-host".to_owned())
+            .expect("fixed hostname must be accepted"),
+        crate::config::SuppliedVariable::from_program_version()
+            .expect("package version must be accepted"),
+    ];
+    let Ok(config) = crate::config::parse(source) else {
+        return;
+    };
+    let Ok(config) = config.expand(&supplied) else {
+        return;
+    };
+    if crate::configuration::validate(&config).is_err() {
+        return;
+    }
+
+    // Compile and traverse the same lazy tree used by check and filter. A
+    // missing rc loader deliberately prevents this target from touching the
+    // filesystem while retaining include and switch nodes in the plan.
+    let plan = crate::eval::ExecutionPlan::compile(&config, None);
+    let _ = plan.requirements();
+    let _ = plan.requires_ordered_delivery();
+    let _ = plan.needs_message_contents();
+    let _ = plan.has_external_commands();
+    let _ = plan.explain();
+}
+
 fn fuzz_message_limits(data: &[u8]) -> MessageLimits {
     let limit = |index: usize| {
         data.get(index)

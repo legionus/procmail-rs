@@ -18,6 +18,7 @@ mod bounded_bytes;
 pub mod fuzzing;
 
 pub mod config;
+pub mod configuration;
 pub mod delivery;
 pub mod environment;
 pub mod eval;

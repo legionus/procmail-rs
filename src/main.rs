@@ -9,23 +9,18 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use procmail_rs::config::{self, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
+use procmail_rs::configuration;
 use procmail_rs::delivery::DeliveryFailureClass;
-use procmail_rs::delivery::local_lock::{
-    LockMethod, lock_sleep_from_config, lock_timeout_from_config,
-};
-use procmail_rs::delivery::maildir::Durability;
 use procmail_rs::eval::{
     ActionKindExplanation, ConditionKindExplanation, ExecutionPlan, HeaderEvaluation,
     OrderedExecutionError, PlanExplanation,
 };
-use procmail_rs::external_process::process_timeout_from_config;
 use procmail_rs::hostname::current_hostname;
-use procmail_rs::limits::MessageLimits;
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::RcFileLoader;
 use procmail_rs::runtime::RuntimeVariables;
 use procmail_rs::signal_state::{self, InterruptibleReader, ReceivedSignal};
-use procmail_rs::trace::{NoTrace, TraceConfig};
+use procmail_rs::trace::NoTrace;
 use procmail_rs::user_identity::UserIdentity;
 
 mod command_log;
@@ -187,22 +182,10 @@ fn run() -> Result<u8, OperationalError> {
             OperationalError::Configuration(format!("{}: invalid MAILDIR: {error}", path.display()))
         })?;
     }
-    let limits = MessageLimits::from_config(&config)
+    let settings = configuration::validate(&config)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let durability = Durability::from_config(&config)
-        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let _lock_method = LockMethod::from_config(&config)
-        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let _lock_timeout = lock_timeout_from_config(&config)
-        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let _lock_sleep = lock_sleep_from_config(&config)
-        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let _process_timeout = process_timeout_from_config(&config)
-        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let _umask = config::umask_from_config(&config)
-        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
-    let _trace_config = TraceConfig::from_config(&config)
-        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
+    let limits = settings.message_limits;
+    let durability = settings.durability;
 
     config.for_each_compatibility_warning(|line, flag| {
         eprintln!(
