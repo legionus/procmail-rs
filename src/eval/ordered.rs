@@ -86,7 +86,8 @@ impl CompiledSequence {
         // parent also advances to that recipe independently. Keeping the
         // cursor and chain state explicit prevents the two paths from gaining
         // subtly different handling for statements, A/a/E/e, or termination.
-        for recipe in &self.recipes[start..] {
+        for (offset, recipe) in self.recipes[start..].iter().enumerate() {
+            let index = start + offset;
             let statement_control =
                 execute_statements_ordered(&recipe.preceding_statements, context)?;
             if statement_control != SequenceControl::Continue {
@@ -100,7 +101,11 @@ impl CompiledSequence {
                     line: recipe.line,
                     decision: RecipeDecision::Selected,
                 });
-                recipe.execute_ordered_action(context)?
+                if recipe.is_waited_copy_block() {
+                    self.execute_waited_copy_block(index, state, recipe, context)?
+                } else {
+                    recipe.execute_ordered_action(context)?
+                }
             } else {
                 context.host.trace().record(TraceEvent::RecipeEvaluated {
                     line: recipe.line,
@@ -124,6 +129,64 @@ impl CompiledSequence {
             return Ok((sequence_action, statement_control));
         }
         Ok((sequence_action, SequenceControl::Continue))
+    }
+
+    fn execute_waited_copy_block<E, T>(
+        &self,
+        index: usize,
+        mut branch_state: SequenceState,
+        recipe: &CompiledNode,
+        context: &mut OrderedTreeExecution<'_, E, T>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+    where
+        T: TraceSink,
+    {
+        let branch_runtime = context.runtime.fork();
+        let parent_runtime = std::mem::replace(context.runtime, branch_runtime);
+        let parent_message = context.current_message.clone();
+        let parent_pending_error = context.pending_error.take();
+        let parent_original_delivered = context.original_delivered;
+        let parent_rc = context.rc;
+        context.host.enter_copy_branch();
+
+        // Run the block and its possible continuation with branch-local mail
+        // and variables. Publication accounting remains shared because every
+        // successful delivery is externally visible, while delivery status,
+        // pending errors, and rc transitions must not leak into the parent.
+        let branch_result = recipe
+            .execute_ordered_action(context)
+            .and_then(|(action, control)| {
+                branch_state.record(recipe.control, true, action, false);
+                if control == SequenceControl::Continue {
+                    self.execute_ordered_from(index + 1, branch_state, context)
+                } else {
+                    Ok((action, control))
+                }
+            });
+        let branch_pending_error = context.pending_error.take();
+
+        context.host.leave_copy_branch();
+        let _branch_runtime = std::mem::replace(context.runtime, parent_runtime);
+        context.current_message = parent_message;
+        context.pending_error = parent_pending_error;
+        context.original_delivered = parent_original_delivered;
+        context.rc = parent_rc;
+
+        match branch_result {
+            Err(error) => Err(error),
+            Ok(_) => match branch_pending_error {
+                Some(error) => context.action_failed(error),
+                None => context.action_succeeded(SequenceControl::Continue),
+            },
+        }
+    }
+}
+
+impl CompiledNode {
+    fn is_waited_copy_block(&self) -> bool {
+        matches!(self.action, CompiledAction::Block(_))
+            && self.continuation == ContinuationMode::Continue
+            && self.child_status != crate::config::ChildStatusMode::Ignore
     }
 }
 

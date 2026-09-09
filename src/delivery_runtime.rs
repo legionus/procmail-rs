@@ -39,6 +39,7 @@ struct OrderedDeliveryHost<'a, T> {
     durability: Durability,
     uid: u32,
     global_lock: &'a mut Option<LocalLock>,
+    suspended_global_locks: Vec<Option<LocalLock>>,
     trace: &'a mut T,
 }
 
@@ -164,6 +165,19 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         acquire_configured_lock(path, runtime, self.uid)
             .map(|lock| Box::new(lock) as Box<dyn RecipeLockGuard>)
             .map_err(classify_execution_error)
+    }
+
+    fn enter_copy_branch(&mut self) {
+        // A procmail copy branch does not own the parent's tracked locks. Keep
+        // the parent lock alive off to the side while branch-local LOCKFILE
+        // assignments operate on a separate slot, including in nested copies.
+        self.suspended_global_locks
+            .push(std::mem::take(self.global_lock));
+    }
+
+    fn leave_copy_branch(&mut self) {
+        *self.global_lock = None;
+        *self.global_lock = self.suspended_global_locks.pop().unwrap_or_default();
     }
 
     fn complete(
@@ -332,6 +346,7 @@ impl DeliveryRuntime {
                 durability: self.durability,
                 uid: self.uid,
                 global_lock: &mut self.global_lock,
+                suspended_global_locks: Vec::new(),
                 trace,
             };
             let outcome = execution

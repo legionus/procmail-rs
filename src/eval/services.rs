@@ -53,6 +53,8 @@ pub trait OrderedExecutionHost {
         path: &str,
         runtime: &mut RuntimeVariables,
     ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<Self::Error>>;
+    fn enter_copy_branch(&mut self) {}
+    fn leave_copy_branch(&mut self) {}
     fn complete(
         &mut self,
         message: FinalMessage<'_>,

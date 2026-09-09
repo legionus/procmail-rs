@@ -69,7 +69,7 @@ a review source; installed procmail-rs tests do not depend on it.
 | Backquoted commands in assignments and in mailbox names | Supported. Each command receives the complete current message and its stdout participates in bounded path construction. | Destination output must be UTF-8 and obeys both active `LINEBUF` and the fixed path ceiling. It is resolved only after every fragment succeeds. |
 | `| command`, `NAME=| command`, and a sole `|` that writes the selected input to stdout | All three explicit recipe forms are supported. | A sole `|` writes the area selected by `h`/`b` directly, applies `r` and `i`, and does not start a shell. `DEFAULT=|` remains outside project scope because implicit fallback delivery is absent. |
 | A pipe without `w` or `W` may continue without waiting after its input has been accepted. | procmail-rs supervises and reaps every shell even when its normal exit status is ignored. | Side-effect timing and lock lifetime differ. Preserving process supervision is safer; compatibility may require a documented asynchronous mode rather than weakening the default silently. |
-| `c` on a nesting block clones processing and lets the parent skip the block. | Explicitly rejected. | Supporting it requires two bounded execution branches and clear publication/error ordering; it must not be approximated as an ordinary block. |
+| `c` on a nesting block clones processing and lets the parent skip the block. | Waited `cw` and quiet `cW` blocks are supported with branch-local variables and current-message changes. Plain unwaited `c` blocks are explicitly rejected. | The waited branch executes the block and any reachable following recipes before the parent continues from the recipe after the block. Global lock ownership is separated while the branch runs. Unwaited execution awaits the supervised asynchronous implementation. |
 | `h` or `b` on file delivery writes only the selected part and may discard the other part. | Explicitly rejected for filesystem delivery. | This is a deliberate data-loss prevention measure. Keep it as an explicit difference unless partial-message delivery becomes an opt-in feature. |
 | Mailbox actions may contain several directory destinations, ordinary directory folders, MH folders ending in `/.`, or Maildir folders ending in `/`. | Only one mbox or Maildir target is accepted; ordinary directory folders, MH folders, and multi-folder hardlink delivery are absent. | Whitespace in an unmarked destination is rejected both before and after variable expansion. Explicit `mbox:` and `maildir:` paths may contain whitespace because their backend and single-target meaning are unambiguous. |
 | Existing directories can select directory delivery even without a suffix. | Deliberately not inferred from filesystem state. | Use `maildir:PATH` or a trailing `/`; every other bare path deterministically selects mbox. |
@@ -92,7 +92,7 @@ command-output assignments, destination command substitution, pipe-to-stdout,
 shell-expanded conditions, `MATCH`, `TRAP`, and `EXITCODE` have corresponding
 implementation paths. The manual's forwarding and autoreply examples remain
 outside project scope. Its scoring, directory-folder, MH, multi-folder,
-and block-copy examples expose the gaps listed above.
+and unwaited block-copy examples expose the gaps listed above.
 
 The stored differential fixtures cover every supported recipe flag, condition
 search areas, folded and malformed header lines, waited and quiet child

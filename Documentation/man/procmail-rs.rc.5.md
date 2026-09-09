@@ -554,7 +554,11 @@ sequence.
 }
 ```
 
-The `c` flag on a block is not supported.
+The `cw` and `cW` flag combinations clone a block branch and wait for it. The
+parent skips the block and continues after it. The branch executes the block
+and also continues after it unless a delivering action stops that branch.
+Variable assignments and message changes made by the branch do not affect the
+parent. Plain unwaited `c` blocks are not yet supported.
 
 ## Native header editing
 

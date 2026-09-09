@@ -586,8 +586,9 @@ fn parse_recipe(
         && (options.action_input != ActionInput::Message
             || options.action_mode != ActionMode::Deliver
             || (!has_program_condition
+                && action != "{"
                 && (options.child_status != ChildStatusMode::Ignore
-                    || (action != "{" && options.write_errors != WriteErrorMode::Fail))))
+                    || options.write_errors != WriteErrorMode::Fail)))
     {
         return Err(ParseError::new(
             start + 1,
@@ -638,10 +639,12 @@ fn parse_recipe(
                 "an implicit local lockfile cannot be derived for a recipe block",
             ));
         }
-        if options.continuation == ContinuationMode::Continue {
+        if options.continuation == ContinuationMode::Continue
+            && options.child_status == ChildStatusMode::Ignore
+        {
             return Err(ParseError::new(
                 start + 1,
-                "copy flag 'c' on recipe blocks is not supported yet",
+                "unwaited copy flag 'c' on recipe blocks is not supported yet; use 'cw' or 'cW'",
             ));
         }
         let (statements, next) = parse_statements(lines, index + 1, next_depth, state)?;

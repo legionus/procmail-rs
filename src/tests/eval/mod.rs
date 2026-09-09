@@ -169,6 +169,7 @@ fn head(raw: &[u8]) -> MessageHead {
 }
 
 include!("conditions_and_captures.rs");
+include!("copy_blocks.rs");
 include!("recipe_control.rs");
 include!("ordered_execution.rs");
 include!("external_commands.rs");
