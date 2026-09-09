@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+plain="$NAME"
+braced="${NAME}"
+default="${NAME:-word}"
+nested="${NAME:-${OTHER:-word}}"
+alternate="${NAME:+word}"
+assign="${NAME:=word}"
+required="${NAME:?word}"
+length="${#NAME}"
+prefix="${NAME#pattern}"
+long_prefix="${NAME##pattern}"
+suffix="${NAME%pattern}"
+long_suffix="${NAME%%pattern}"
+upper="${NAME^^[a-z]}"
+lower="${NAME,,[A-Z]}"
+single="'${NAME}`command`\\'"
+double="\"${NAME:-word}\\\"\""
+command="`printf fuzz`"
+class="[!a-z]"
+stars="********"

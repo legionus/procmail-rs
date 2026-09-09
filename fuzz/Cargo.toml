@@ -12,7 +12,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-procmail-rs = { path = ".." }
+procmail-rs = { path = "..", features = ["fuzzing"] }
 
 [[bin]]
 name = "rc"
@@ -24,6 +24,27 @@ bench = false
 [[bin]]
 name = "message"
 path = "fuzz_targets/message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shell-expression"
+path = "fuzz_targets/shell_expression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shell-pattern"
+path = "fuzz_targets/shell_pattern.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shell-condition"
+path = "fuzz_targets/shell_condition.rs"
 test = false
 doc = false
 bench = false

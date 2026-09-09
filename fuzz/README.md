@@ -13,7 +13,13 @@ Run bounded smoke sessions with nightly Rust:
 ```text
 rustup run nightly cargo fuzz run rc -- -max_total_time=30
 rustup run nightly cargo fuzz run message -- -max_total_time=30
+rustup run nightly cargo fuzz run shell-expression -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
+rustup run nightly cargo fuzz run shell-condition -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
+rustup run nightly cargo fuzz run shell-pattern -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
 ```
+
+The shell targets use deterministic variable and command results. They never
+execute command text produced by fuzz input.
 
 Longer release-candidate jobs should retain and review any generated corpus or
 crash artifact before adding it to the repository.

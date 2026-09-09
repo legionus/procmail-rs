@@ -129,8 +129,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install nightly Rust and the fuzz frontend
+      - name: Install nightly Rust, the C++ compiler, and the fuzz frontend
         run: |
+          sudo apt-get update
+          sudo apt-get install --yes g++
           rustup toolchain install nightly --profile minimal
           cargo +nightly install --locked cargo-fuzz --version 0.13.2
       # Keep the native libFuzzer dependency confined to the separate fuzz
@@ -139,8 +141,14 @@ jobs:
         run: |
           cargo +nightly fuzz build rc
           cargo +nightly fuzz build message
+          cargo +nightly fuzz build shell-expression
+          cargo +nightly fuzz build shell-condition
+          cargo +nightly fuzz build shell-pattern
           cargo +nightly fuzz run rc -- -max_total_time=15 -max_len=4096
           cargo +nightly fuzz run message -- -max_total_time=15 -max_len=4096
+          cargo +nightly fuzz run shell-expression -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/shell.dict
+          cargo +nightly fuzz run shell-condition -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/shell.dict
+          cargo +nightly fuzz run shell-pattern -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/shell.dict
 
   delivery-stress:
     name: Performance and concurrent delivery

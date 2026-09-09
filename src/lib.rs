@@ -14,6 +14,9 @@ compile_error!("procmail-rs currently supports 32-bit and 64-bit Linux and 64-bi
 
 mod bounded_bytes;
 
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
+
 pub mod config;
 pub mod delivery;
 pub mod environment;

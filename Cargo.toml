@@ -19,6 +19,9 @@ include = [
     "/tests/**",
 ]
 
+[features]
+fuzzing = []
+
 [dependencies]
 libc = { version = "0.2.189", default-features = false }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf-literal"] }
