@@ -133,9 +133,17 @@ fn branch_error_handler_recovers_before_waited_status_reaches_parent() {
 }
 
 #[test]
-fn unwaited_copy_block_remains_an_explicit_error() {
-    let error = config::parse(":0 c\n{\n}\n").unwrap_err();
+fn parser_accepts_an_unwaited_copy_block() {
+    config::parse(":0 c\n{\n}\n").unwrap();
+}
 
-    assert_eq!(error.line, 1);
-    assert!(error.message.contains("unwaited copy flag 'c'"));
+#[test]
+fn background_copy_limit_checks_both_boundaries() {
+    let budget = crate::eval::ordered::BackgroundCopyBudget::new();
+
+    for _ in 0..crate::eval::ordered::MAX_BACKGROUND_COPY_BRANCHES {
+        budget.reserve(1).unwrap();
+    }
+    let error = budget.reserve(1).unwrap_err();
+    assert!(error.to_string().contains("128 branches"));
 }

@@ -55,6 +55,12 @@ pub trait OrderedExecutionHost {
     ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<Self::Error>>;
     fn enter_copy_branch(&mut self) {}
     fn leave_copy_branch(&mut self) {}
+    fn fork_copy_branch(&mut self) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
     fn finish_background(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }

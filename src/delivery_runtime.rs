@@ -3,6 +3,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use procmail_rs::config::{self, Destination, DestinationKind, OutputEnding, RecipeOptions};
 use procmail_rs::delivery::discard::DiscardSink;
@@ -34,21 +35,49 @@ pub(super) struct DeliveryRuntime {
     publications: PublicationTracker,
 }
 
+struct SharedTrace<'a, T> {
+    inner: Arc<Mutex<&'a mut T>>,
+}
+
+impl<T> Clone for SharedTrace<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T: TraceSink> TraceSink for SharedTrace<'_, T> {
+    fn detail(&self) -> procmail_rs::trace::TraceDetail {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .detail()
+    }
+
+    fn record(&mut self, event: TraceEvent) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(event);
+    }
+}
+
 struct OrderedDeliveryHost<'a, T> {
     command_runner: CommandRunner,
     durability: Durability,
     uid: u32,
-    global_lock: &'a mut Option<LocalLock>,
+    global_lock: Option<LocalLock>,
     suspended_global_locks: Vec<Option<LocalLock>>,
-    trace: &'a mut T,
+    trace: SharedTrace<'a, T>,
 }
 
-impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
+impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T> {
     type Error = OperationalError;
-    type Trace = T;
+    type Trace = SharedTrace<'a, T>;
 
     fn trace(&mut self) -> &mut Self::Trace {
-        self.trace
+        &mut self.trace
     }
 
     fn deliver(
@@ -63,7 +92,13 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         let _local_lock = acquire_recipe_lock(lock, Some(destination), runtime, self.uid)
             .map_err(classify_execution_error)?;
         let result = if destination.supports_fanout_delivery() {
-            deliver_one_sink(destination, message, self.durability, runtime, self.trace)
+            deliver_one_sink(
+                destination,
+                message,
+                self.durability,
+                runtime,
+                &mut self.trace,
+            )
         } else {
             deliver_file_destination(
                 destination,
@@ -71,7 +106,7 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
                 output_ending,
                 self.durability,
                 runtime,
-                self.trace,
+                &mut self.trace,
             )
         };
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
@@ -145,13 +180,13 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         // Replacing LOCKFILE first releases the preceding global lock. Clear
         // its visible value on failure so later statements cannot treat an
         // unheld path as an active lock.
-        *self.global_lock = None;
+        self.global_lock = None;
         if path.is_empty() {
             return Ok(());
         }
         match acquire_configured_lock(path, runtime, self.uid) {
             Ok(lock) => {
-                *self.global_lock = Some(lock);
+                self.global_lock = Some(lock);
                 Ok(())
             }
             Err(error) => {
@@ -176,13 +211,23 @@ impl<T: TraceSink> OrderedExecutionHost for OrderedDeliveryHost<'_, T> {
         // A procmail copy branch does not own the parent's tracked locks. Keep
         // the parent lock alive off to the side while branch-local LOCKFILE
         // assignments operate on a separate slot, including in nested copies.
-        self.suspended_global_locks
-            .push(std::mem::take(self.global_lock));
+        self.suspended_global_locks.push(self.global_lock.take());
     }
 
     fn leave_copy_branch(&mut self) {
-        *self.global_lock = None;
-        *self.global_lock = self.suspended_global_locks.pop().unwrap_or_default();
+        self.global_lock = None;
+        self.global_lock = self.suspended_global_locks.pop().unwrap_or_default();
+    }
+
+    fn fork_copy_branch(&mut self) -> Option<Self> {
+        Some(Self {
+            command_runner: self.command_runner.fork(),
+            durability: self.durability,
+            uid: self.uid,
+            global_lock: None,
+            suspended_global_locks: Vec::new(),
+            trace: self.trace.clone(),
+        })
     }
 
     fn finish_background(&mut self) -> Result<(), Self::Error> {
@@ -285,7 +330,7 @@ impl DeliveryRuntime {
         self.publications.finish()
     }
 
-    pub(super) fn deliver_staged<T: TraceSink>(
+    pub(super) fn deliver_staged<T: TraceSink + Send>(
         &mut self,
         mut head: procmail_rs::message::MessageHead,
         reader: &mut impl io::BufRead,
@@ -354,9 +399,11 @@ impl DeliveryRuntime {
                 command_runner: CommandRunner::new(self.limits),
                 durability: self.durability,
                 uid: self.uid,
-                global_lock: &mut self.global_lock,
+                global_lock: self.global_lock.take(),
                 suspended_global_locks: Vec::new(),
-                trace,
+                trace: SharedTrace {
+                    inner: Arc::new(Mutex::new(trace)),
+                },
             };
             let outcome = execution
                 .execute_ordered(
@@ -372,6 +419,7 @@ impl DeliveryRuntime {
                     }
                     OrderedExecutionError::Delivery(error) => error,
                 })?;
+            check_signal()?;
             self.publications.record_outcome(outcome)?;
             return self.publications.finish();
         }

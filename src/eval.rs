@@ -169,6 +169,7 @@ enum SequenceControl {
     Continue,
     Stop,
     EndRcFile,
+    SequenceComplete,
 }
 
 impl CompiledNode {

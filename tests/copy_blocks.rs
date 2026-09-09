@@ -212,3 +212,105 @@ fn waited_copy_branch_keeps_parent_and_branch_global_locks_held() {
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn unwaited_copy_branch_overlaps_the_parent_and_continues_after_the_block() {
+    let base = temporary_case("unwaited");
+    let parent = base.join("parent");
+    let branch = base.join("branch");
+    let marker = base.join("parent-running");
+    create_maildir(&parent);
+    create_maildir(&branch);
+    let config = base.join("rules.rc");
+    write_private(
+        &config,
+        format!(
+            "MAILDIR={}\nTIMEOUT=2\nTARGET=parent\nMARKER={}\n:0 c\n{{\n:0 cw\n| while test ! -e \"$MARKER\"; do sleep 0.01; done\nTARGET=branch\n}}\n:0 c\nmaildir:$TARGET\n:0 w\n| : > \"$MARKER\"\n",
+            base.display(),
+            marker.display()
+        ),
+    );
+
+    let output = run_filter(&config);
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_count(&parent), 1);
+    assert_eq!(delivered_count(&branch), 1);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn unwaited_copy_branch_keeps_filter_changes_local() {
+    let base = temporary_case("unwaited-filter");
+    let original = base.join("original");
+    let changed = base.join("changed");
+    create_maildir(&original);
+    create_maildir(&changed);
+    let config = base.join("rules.rc");
+    write_private(
+        &config,
+        format!(
+            "MAILDIR={}\n:0 c\n{{\n:0 fw\n| sed 's/^Subject: copy branch$/Subject: changed/'\n}}\n:0 c\n* ^Subject: changed$\nmaildir:changed\n:0 c\n* ^Subject: copy branch$\nmaildir:original\n:0\n/dev/null\n",
+            base.display()
+        ),
+    );
+
+    let output = run_filter(&config);
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_count(&original), 1);
+    assert_eq!(delivered_count(&changed), 1);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn unwaited_copy_branches_load_runtime_rc_paths_from_local_variables() {
+    let base = temporary_case("unwaited-include");
+    let parent = base.join("parent");
+    let branch = base.join("branch");
+    create_maildir(&parent);
+    create_maildir(&branch);
+    write_private(&base.join("parent.rc"), "TARGET=parent\n");
+    write_private(&base.join("branch.rc"), "TARGET=branch\n");
+    let config = base.join("rules.rc");
+    write_private(
+        &config,
+        format!(
+            "MAILDIR={}\nTARGET=parent\nINCLUDE=parent.rc\n:0 c\n{{\nINCLUDE=branch.rc\n}}\nINCLUDERC=$INCLUDE\n:0 c\nmaildir:$TARGET\n:0\n/dev/null\n",
+            base.display()
+        ),
+    );
+
+    let output = run_filter(&config);
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(delivered_count(&parent), 1);
+    assert_eq!(delivered_count(&branch), 1);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn a_local_lock_makes_a_plain_copy_block_waited() {
+    let base = temporary_case("implicit-wait");
+    let branch_done = base.join("branch-done");
+    let parent_observed = base.join("parent-observed");
+    let lock = base.join("block.lock");
+    let config = base.join("rules.rc");
+    write_private(
+        &config,
+        format!(
+            "MAILDIR={}\n:0 c : {}\n{{\n:0 w\n| sleep 0.1; : > {}\n}}\n:0 cw\n| test -e {} && : > {}\n:0\n/dev/null\n",
+            base.display(),
+            lock.display(),
+            branch_done.display(),
+            branch_done.display(),
+            parent_observed.display()
+        ),
+    );
+
+    let output = run_filter(&config);
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert!(parent_observed.exists());
+    fs::remove_dir_all(base).unwrap();
+}

@@ -93,6 +93,7 @@ impl From<SequenceControl> for HeaderControl {
             SequenceControl::Continue => Self::Continue,
             SequenceControl::Stop => Self::Stop,
             SequenceControl::EndRcFile => Self::EndRcFile,
+            SequenceControl::SequenceComplete => Self::Deferred,
         }
     }
 }

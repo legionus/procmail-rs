@@ -93,7 +93,7 @@ impl Delivery for Recorder {
 fn evaluate(
     config: &Config,
     message: &Message,
-    delivery: &mut impl Delivery,
+    delivery: &mut (impl Delivery + Send),
 ) -> Result<Outcome, EvalError> {
     let plan = ExecutionPlan::compile(config, None);
     let prepared_matching = PreparedMatchingMessage::new(message, plan.needs_message_contents());

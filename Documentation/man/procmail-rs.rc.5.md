@@ -562,11 +562,22 @@ sequence.
 }
 ```
 
-The `cw` and `cW` flag combinations clone a block branch and wait for it. The
-parent skips the block and continues after it. The branch executes the block
-and also continues after it unless a delivering action stops that branch.
-Variable assignments and message changes made by the branch do not affect the
-parent. Plain unwaited `c` blocks are not yet supported.
+The `c` flag clones a block branch. The parent skips the block and continues
+after it, while the branch executes the block and then follows the same
+remaining recipes unless a delivering action stops that branch. Variable
+assignments, message changes, global locks, and runtime rc transitions remain
+local to each side. Runtime include and switch paths are resolved from the
+variables of the side which reaches them.
+
+A plain `c` branch runs concurrently with its parent. procmail-rs supervises
+and joins every branch before message processing returns. An ordinary action
+failure in that branch does not change the parent status, while configuration,
+resource-limit, and supervision failures still fail the message. At most 128
+background copy branches may be started for one message; reaching the limit
+fails evaluation.
+The `cw` and `cW` combinations wait before the parent continues and apply the
+branch status. Naming a local lock on a copy block also makes it waited, as in
+original procmail, so the lock covers the complete branch execution.
 
 ## Native header editing
 

@@ -3,6 +3,8 @@
 
 use std::io::{self, Write};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use procmail_rs::config::{ActionInput, ActionMode, OutputEnding, RecipeOptions, WriteErrorMode};
 use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
@@ -117,9 +119,30 @@ struct BackgroundCommand {
     _lock: Option<Box<dyn RecipeLockGuard>>,
 }
 
+#[derive(Default)]
+struct BackgroundCommandBudget {
+    started: AtomicUsize,
+}
+
+impl BackgroundCommandBudget {
+    fn reserve(&self) -> Result<(), String> {
+        self.started
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |started| {
+                (started < MAX_BACKGROUND_COMMANDS).then_some(started + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                format!(
+                    "background external commands exceed the hard limit of {MAX_BACKGROUND_COMMANDS} per message"
+                )
+            })
+    }
+}
+
 pub struct CommandRunner {
     limits: MessageLimits,
     background: Vec<BackgroundCommand>,
+    background_budget: Arc<BackgroundCommandBudget>,
 }
 
 impl CommandRunner {
@@ -127,6 +150,15 @@ impl CommandRunner {
         Self {
             limits,
             background: Vec::new(),
+            background_budget: Arc::new(BackgroundCommandBudget::default()),
+        }
+    }
+
+    pub fn fork(&self) -> Self {
+        Self {
+            limits: self.limits,
+            background: Vec::new(),
+            background_budget: Arc::clone(&self.background_budget),
         }
     }
 
@@ -263,12 +295,9 @@ impl CommandRunner {
         lock: Option<Box<dyn RecipeLockGuard>>,
         runtime: &mut RuntimeVariables,
     ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
-        let next_count = self
-            .background
-            .len()
-            .checked_add(1)
-            .ok_or_else(|| recoverable_error("background external command count overflows"))?;
-        check_background_command_count(next_count).map_err(recoverable_error)?;
+        self.background_budget
+            .reserve()
+            .map_err(recoverable_error)?;
         self.background.try_reserve(1).map_err(|_| {
             recoverable_error("cannot reserve background external command supervision")
         })?;
@@ -438,16 +467,6 @@ impl CommandRunner {
             stderr,
         )
         .map_err(|error| error.to_string())
-    }
-}
-
-fn check_background_command_count(count: usize) -> Result<(), String> {
-    if count > MAX_BACKGROUND_COMMANDS {
-        Err(format!(
-            "background external command count exceeds the hard limit of {MAX_BACKGROUND_COMMANDS}"
-        ))
-    } else {
-        Ok(())
     }
 }
 

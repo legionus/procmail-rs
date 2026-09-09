@@ -7,37 +7,71 @@ use crate::bounded_bytes::BoundedBytesError;
 use crate::config::shell_eval::{
     self, EvaluationContext, EvaluationDepth, UnsupportedPart, VariableValue,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct OrderedTreeExecution<'a, E, T> {
+pub(super) const MAX_BACKGROUND_COPY_BRANCHES: usize = 128;
+
+pub(super) struct BackgroundCopyBudget {
+    started: AtomicUsize,
+}
+
+impl BackgroundCopyBudget {
+    pub(super) fn new() -> Self {
+        Self {
+            started: AtomicUsize::new(0),
+        }
+    }
+
+    pub(super) fn reserve(&self, line: usize) -> Result<(), EvalError> {
+        self.started
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |started| {
+                (started < MAX_BACKGROUND_COPY_BRANCHES).then_some(started + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| EvalError::BackgroundCopyUnavailable {
+                line,
+                reason: format!(
+                    "the limit of {MAX_BACKGROUND_COPY_BRANCHES} branches per message was reached"
+                ),
+            })
+    }
+}
+
+struct OrderedTreeExecution<'a, H: OrderedExecutionHost> {
     message: CompleteMessage<'a>,
     current_message: CurrentMessage,
     runtime: &'a mut RuntimeVariables,
-    host: &'a mut dyn OrderedExecutionHost<Error = E, Trace = T>,
+    host: &'a mut H,
     published: usize,
     original_delivered: bool,
-    pending_error: Option<E>,
+    pending_error: Option<H::Error>,
     rc: RcExecutionContext<'a>,
     limits: MessageLimits,
+    copy_budget: Arc<BackgroundCopyBudget>,
 }
 
-type OrderedActionResult<E> = Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>;
+type OrderedActionResult<H> = Result<
+    (ActionExecution, SequenceControl),
+    OrderedExecutionError<<H as OrderedExecutionHost>::Error>,
+>;
 
-impl<'a, E, T> OrderedTreeExecution<'a, E, T> {
+impl<'a, H: OrderedExecutionHost + Send> OrderedTreeExecution<'a, H> {
     fn replace_message(&mut self, message: Message) {
         self.current_message.replace(message);
     }
 
-    fn action_succeeded(&mut self, control: SequenceControl) -> OrderedActionResult<E> {
+    fn action_succeeded(&mut self, control: SequenceControl) -> OrderedActionResult<H> {
         self.pending_error = None;
         Ok((ActionExecution::Succeeded, control))
     }
 
-    fn action_failed(&mut self, error: E) -> OrderedActionResult<E> {
+    fn action_failed(&mut self, error: H::Error) -> OrderedActionResult<H> {
         self.pending_error = Some(error);
         Ok((ActionExecution::Failed, SequenceControl::Continue))
     }
 
-    fn action_failed_fatally(&mut self, error: E) -> OrderedActionResult<E> {
+    fn action_failed_fatally(&mut self, error: H::Error) -> OrderedActionResult<H> {
         Err(OrderedExecutionError::Delivery(error))
     }
 
@@ -45,9 +79,10 @@ impl<'a, E, T> OrderedTreeExecution<'a, E, T> {
         &mut self,
         sequence: &CompiledSequence,
         child_context: RcExecutionContext<'a>,
-    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<H::Error>>
     where
-        T: TraceSink,
+        H::Trace: TraceSink,
+        H::Error: Send,
     {
         // The mutable execution object carries the active rc context for
         // nested actions. Restore its caller value before propagating either
@@ -61,24 +96,28 @@ impl<'a, E, T> OrderedTreeExecution<'a, E, T> {
 }
 
 impl CompiledSequence {
-    fn execute_ordered<E, T>(
+    fn execute_ordered<H>(
         &self,
-        context: &mut OrderedTreeExecution<'_, E, T>,
-    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+        context: &mut OrderedTreeExecution<'_, H>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<H::Error>>
     where
-        T: TraceSink,
+        H: OrderedExecutionHost + Send,
+        H::Error: Send,
+        H::Trace: TraceSink,
     {
         self.execute_ordered_from(0, SequenceState::default(), context)
     }
 
-    fn execute_ordered_from<E, T>(
+    fn execute_ordered_from<H>(
         &self,
         start: usize,
         mut state: SequenceState,
-        context: &mut OrderedTreeExecution<'_, E, T>,
-    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+        context: &mut OrderedTreeExecution<'_, H>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<H::Error>>
     where
-        T: TraceSink,
+        H: OrderedExecutionHost + Send,
+        H::Error: Send,
+        H::Trace: TraceSink,
     {
         let mut sequence_action = ActionExecution::Succeeded;
 
@@ -103,6 +142,8 @@ impl CompiledSequence {
                 });
                 if recipe.is_waited_copy_block() {
                     self.execute_waited_copy_block(index, state, recipe, context)?
+                } else if recipe.is_unwaited_copy_block() {
+                    self.execute_unwaited_copy_block(index, state, recipe, context)?
                 } else {
                     recipe.execute_ordered_action(context)?
                 }
@@ -131,15 +172,17 @@ impl CompiledSequence {
         Ok((sequence_action, SequenceControl::Continue))
     }
 
-    fn execute_waited_copy_block<E, T>(
+    fn execute_waited_copy_block<H>(
         &self,
         index: usize,
         mut branch_state: SequenceState,
         recipe: &CompiledNode,
-        context: &mut OrderedTreeExecution<'_, E, T>,
-    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+        context: &mut OrderedTreeExecution<'_, H>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<H::Error>>
     where
-        T: TraceSink,
+        H: OrderedExecutionHost + Send,
+        H::Error: Send,
+        H::Trace: TraceSink,
     {
         let branch_runtime = context.runtime.fork();
         let parent_runtime = std::mem::replace(context.runtime, branch_runtime);
@@ -180,23 +223,135 @@ impl CompiledSequence {
             },
         }
     }
+
+    fn execute_unwaited_copy_block<H>(
+        &self,
+        index: usize,
+        state: SequenceState,
+        recipe: &CompiledNode,
+        context: &mut OrderedTreeExecution<'_, H>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<H::Error>>
+    where
+        H: OrderedExecutionHost + Send,
+        H::Error: Send,
+        H::Trace: TraceSink,
+    {
+        context
+            .copy_budget
+            .reserve(recipe.line)
+            .map_err(OrderedExecutionError::Evaluation)?;
+        let mut branch_host = context.host.fork_copy_branch().ok_or_else(|| {
+            OrderedExecutionError::Evaluation(EvalError::BackgroundCopyUnavailable {
+                line: recipe.line,
+                reason: "the execution host cannot create an isolated branch".to_owned(),
+            })
+        })?;
+        let mut branch_runtime = context.runtime.fork();
+        let branch_message = context.current_message.clone();
+        let branch_rc = context.rc;
+        let branch_limits = context.limits;
+        let branch_budget = Arc::clone(&context.copy_budget);
+        let complete_message = context.message;
+
+        // The branch owns its variables, current message, commands, and locks,
+        // while the immutable compiled sequence and staged message are shared.
+        // A scoped thread keeps those borrows valid and forces a join before
+        // staging can disappear, including when parent evaluation fails.
+        std::thread::scope(|scope| {
+            let branch = std::thread::Builder::new()
+                .name("procmail-rs-copy".to_owned())
+                .spawn_scoped(scope, move || {
+                    let mut branch_context = OrderedTreeExecution {
+                        message: complete_message,
+                        current_message: branch_message,
+                        runtime: &mut branch_runtime,
+                        host: &mut branch_host,
+                        published: 0,
+                        original_delivered: false,
+                        pending_error: None,
+                        rc: branch_rc,
+                        limits: branch_limits,
+                        copy_budget: branch_budget,
+                    };
+                    let mut branch_state = state;
+                    let execution = recipe.execute_ordered_action(&mut branch_context).and_then(
+                        |(action, control)| {
+                            branch_state.record(recipe.control, true, action, false);
+                            if control == SequenceControl::Continue {
+                                self.execute_ordered_from(
+                                    index + 1,
+                                    branch_state,
+                                    &mut branch_context,
+                                )
+                            } else {
+                                Ok((action, control))
+                            }
+                        },
+                    );
+                    let supervision = branch_context.host.finish_background();
+                    (execution, supervision, branch_context.published)
+                })
+                .map_err(|error| {
+                    OrderedExecutionError::Evaluation(EvalError::BackgroundCopyUnavailable {
+                        line: recipe.line,
+                        reason: error.to_string(),
+                    })
+                })?;
+
+            let mut parent_state = state;
+            parent_state.record(recipe.control, true, ActionExecution::Succeeded, false);
+            let parent = self.execute_ordered_from(index + 1, parent_state, context);
+            let joined = branch.join().map_err(|_| {
+                OrderedExecutionError::Evaluation(EvalError::BackgroundCopyUnavailable {
+                    line: recipe.line,
+                    reason: "the branch worker terminated unexpectedly".to_owned(),
+                })
+            })?;
+            context.published = context.published.checked_add(joined.2).ok_or_else(|| {
+                OrderedExecutionError::Evaluation(EvalError::BackgroundCopyUnavailable {
+                    line: recipe.line,
+                    reason: "published destination count overflows".to_owned(),
+                })
+            })?;
+
+            // Plain `c` does not wait for or apply the branch action status in
+            // original procmail. We still join for resource supervision, but
+            // only a failure of that supervision changes the parent result.
+            if let Err(error) = joined.1 {
+                return Err(OrderedExecutionError::Delivery(error));
+            }
+            if let Err(OrderedExecutionError::Evaluation(error)) = joined.0 {
+                return Err(OrderedExecutionError::Evaluation(error));
+            }
+            parent.map(|(action, _)| (action, SequenceControl::SequenceComplete))
+        })
+    }
 }
 
 impl CompiledNode {
     fn is_waited_copy_block(&self) -> bool {
         matches!(self.action, CompiledAction::Block(_))
             && self.continuation == ContinuationMode::Continue
-            && self.child_status != crate::config::ChildStatusMode::Ignore
+            && (self.child_status != crate::config::ChildStatusMode::Ignore || self.lock.is_some())
+    }
+
+    fn is_unwaited_copy_block(&self) -> bool {
+        matches!(self.action, CompiledAction::Block(_))
+            && self.continuation == ContinuationMode::Continue
+            && self.child_status == crate::config::ChildStatusMode::Ignore
+            && self.lock.is_none()
     }
 }
 
 impl CompiledNode {
-    fn matches_ordered<E, T>(
+    fn matches_ordered<H>(
         &self,
-        context: &mut OrderedTreeExecution<'_, E, T>,
-    ) -> Result<bool, OrderedExecutionError<E>>
+        context: &mut OrderedTreeExecution<'_, H>,
+    ) -> Result<bool, OrderedExecutionError<H::Error>>
     where
-        T: TraceSink,
+        H: OrderedExecutionHost + Send,
+        H::Error: Send,
+        H::Trace: TraceSink,
     {
         for (index, condition) in self.conditions.iter().enumerate() {
             let message = context.current_message.view(context.message);
@@ -276,12 +431,14 @@ impl CompiledNode {
         Ok(true)
     }
 
-    fn execute_ordered_action<E, T>(
+    fn execute_ordered_action<H>(
         &self,
-        context: &mut OrderedTreeExecution<'_, E, T>,
-    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+        context: &mut OrderedTreeExecution<'_, H>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<H::Error>>
     where
-        T: TraceSink,
+        H: OrderedExecutionHost + Send,
+        H::Error: Send,
+        H::Trace: TraceSink,
     {
         match &self.action {
             CompiledAction::Capture { action, options } => {
@@ -513,18 +670,26 @@ impl CompiledNode {
                 // propagates upward. Normal completion, delivery failure,
                 // HOST/SWITCHRC control flow, and evaluation errors all leave
                 // through this scope and therefore release the same lock.
-                children.execute_ordered(context)
+                children.execute_ordered(context).map(|(action, control)| {
+                    if control == SequenceControl::SequenceComplete {
+                        (action, SequenceControl::Continue)
+                    } else {
+                        (action, control)
+                    }
+                })
             }
         }
     }
 }
 
-fn execute_statements_ordered<E, T>(
+fn execute_statements_ordered<H>(
     statements: &[CompiledStatement],
-    context: &mut OrderedTreeExecution<'_, E, T>,
-) -> Result<SequenceControl, OrderedExecutionError<E>>
+    context: &mut OrderedTreeExecution<'_, H>,
+) -> Result<SequenceControl, OrderedExecutionError<H::Error>>
 where
-    T: TraceSink,
+    H: OrderedExecutionHost + Send,
+    H::Error: Send,
+    H::Trace: TraceSink,
 {
     for statement in statements {
         match statement {
@@ -596,12 +761,13 @@ where
     Ok(SequenceControl::Continue)
 }
 
-fn execute_command_assignment<E, T>(
+fn execute_command_assignment<H>(
     assignment: &crate::config::CommandAssignment,
-    context: &mut OrderedTreeExecution<'_, E, T>,
-) -> Result<(), OrderedExecutionError<E>>
+    context: &mut OrderedTreeExecution<'_, H>,
+) -> Result<(), OrderedExecutionError<H::Error>>
 where
-    T: TraceSink,
+    H: OrderedExecutionHost,
+    H::Trace: TraceSink,
 {
     let message = context
         .current_message
@@ -805,7 +971,8 @@ impl ExecutionPlan {
         mut host: H,
     ) -> Result<DeliveryOutcome, OrderedExecutionError<H::Error>>
     where
-        H: OrderedExecutionHost,
+        H: OrderedExecutionHost + Send,
+        H::Error: Send,
     {
         let message = message
             .complete_message(self.needs_message_contents())
@@ -826,6 +993,7 @@ impl ExecutionPlan {
                 .clone()
                 .map_err(EvalError::MessageLimits)
                 .map_err(OrderedExecutionError::Evaluation)?,
+            copy_budget: Arc::new(BackgroundCopyBudget::new()),
         };
         let execution = self.root.execute_ordered(&mut context);
         let background = context.host.finish_background();

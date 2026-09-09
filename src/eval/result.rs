@@ -164,6 +164,10 @@ pub enum EvalError {
     LocalLockExecutorUnavailable {
         line: usize,
     },
+    BackgroundCopyUnavailable {
+        line: usize,
+        reason: String,
+    },
     RuntimeRc(String),
     ExternalActionUnsupported {
         line: usize,
@@ -236,6 +240,9 @@ impl fmt::Display for EvalError {
                     formatter,
                     "line {line}: recipe block requires local lock support"
                 )
+            }
+            Self::BackgroundCopyUnavailable { line, reason } => {
+                write!(formatter, "line {line}: cannot start copy branch: {reason}")
             }
             Self::RuntimeRc(message) => formatter.write_str(message),
             Self::ExternalActionUnsupported { line } => {

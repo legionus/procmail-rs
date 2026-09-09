@@ -11,6 +11,7 @@ type DeliveryExecutor<'a, E, T> = dyn FnMut(
         &mut RuntimeVariables,
         &mut T,
     ) -> Result<(), DeliveryAttemptError<E>>
+    + Send
     + 'a;
 type ExternalActionExecutor<'a, E, T> = dyn FnMut(
         &PipeAction,
@@ -20,8 +21,10 @@ type ExternalActionExecutor<'a, E, T> = dyn FnMut(
         &mut RuntimeVariables,
         &mut T,
     ) -> Result<Option<Message>, DeliveryAttemptError<E>>
+    + Send
     + 'a;
 type ExternalConditionExecutor<'a, E, T> = dyn FnMut(&str, &[u8], &mut RuntimeVariables, &mut T) -> Result<bool, DeliveryAttemptError<E>>
+    + Send
     + 'a;
 type CommandCaptureExecutor<'a, E, T> = dyn FnMut(
         &str,
@@ -32,12 +35,15 @@ type CommandCaptureExecutor<'a, E, T> = dyn FnMut(
         &mut RuntimeVariables,
         &mut T,
     ) -> Result<CapturedCommand, DeliveryAttemptError<E>>
+    + Send
     + 'a;
-type GlobalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + 'a;
+type GlobalLockExecutor<'a, E> =
+    dyn FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + Send + 'a;
 type LocalLockExecutor<'a, E> = dyn FnMut(&str, &mut RuntimeVariables) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<E>>
+    + Send
     + 'a;
 type CompletionExecutor<'a, E, T> =
-    dyn FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>) + 'a;
+    dyn FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>) + Send + 'a;
 
 pub struct ExecutionServices<'a, E, T> {
     delivery: &'a mut DeliveryExecutor<'a, E, T>,
@@ -61,6 +67,7 @@ impl<'a, E, T> ExecutionServices<'a, E, T> {
                 &mut RuntimeVariables,
                 &mut T,
             ) -> Result<(), DeliveryAttemptError<E>>
+            + Send
             + 'a,
     {
         Self {
@@ -83,6 +90,7 @@ impl<'a, E, T> ExecutionServices<'a, E, T> {
                 &mut RuntimeVariables,
                 &mut T,
             ) -> Result<bool, DeliveryAttemptError<E>>
+            + Send
             + 'a,
     {
         self.external_condition = Some(executor);
@@ -99,6 +107,7 @@ impl<'a, E, T> ExecutionServices<'a, E, T> {
                 &mut RuntimeVariables,
                 &mut T,
             ) -> Result<Option<Message>, DeliveryAttemptError<E>>
+            + Send
             + 'a,
     {
         self.external = Some(executor);
@@ -116,6 +125,7 @@ impl<'a, E, T> ExecutionServices<'a, E, T> {
                 &mut RuntimeVariables,
                 &mut T,
             ) -> Result<CapturedCommand, DeliveryAttemptError<E>>
+            + Send
             + 'a,
     {
         self.capture = Some(executor);
@@ -124,7 +134,7 @@ impl<'a, E, T> ExecutionServices<'a, E, T> {
 
     pub fn with_global_lock<G>(mut self, executor: &'a mut G) -> Self
     where
-        G: FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + 'a,
+        G: FnMut(&str, &mut RuntimeVariables) -> Result<(), E> + Send + 'a,
     {
         self.global_lock = Some(executor);
         self
@@ -136,6 +146,7 @@ impl<'a, E, T> ExecutionServices<'a, E, T> {
                 &str,
                 &mut RuntimeVariables,
             ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<E>>
+            + Send
             + 'a,
     {
         self.local_lock = Some(executor);
@@ -144,14 +155,16 @@ impl<'a, E, T> ExecutionServices<'a, E, T> {
 
     pub fn with_completion<F>(mut self, executor: &'a mut F) -> Self
     where
-        F: FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>) + 'a,
+        F: FnMut(FinalMessage<'_>, &mut RuntimeVariables, &mut T, CompletionState<'_, E>)
+            + Send
+            + 'a,
     {
         self.completion = Some(executor);
         self
     }
 }
 
-impl<E, T: TraceSink> OrderedExecutionHost for ExecutionServices<'_, E, T> {
+impl<E, T: TraceSink + Send> OrderedExecutionHost for ExecutionServices<'_, E, T> {
     type Error = E;
     type Trace = T;
 

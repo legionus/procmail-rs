@@ -639,14 +639,6 @@ fn parse_recipe(
                 "an implicit local lockfile cannot be derived for a recipe block",
             ));
         }
-        if options.continuation == ContinuationMode::Continue
-            && options.child_status == ChildStatusMode::Ignore
-        {
-            return Err(ParseError::new(
-                start + 1,
-                "unwaited copy flag 'c' on recipe blocks is not supported yet; use 'cw' or 'cW'",
-            ));
-        }
         let (statements, next) = parse_statements(lines, index + 1, next_depth, state)?;
         (RecipeAction::Block(statements), next)
     } else if action.starts_with('{') {

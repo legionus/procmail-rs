@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use std::cell::{Cell, Ref, RefCell};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::{CompiledSequence, EvalError};
 use crate::config::RcFileExpression;
@@ -13,25 +16,25 @@ pub const MAX_RUNTIME_RC_WARNINGS: usize = 128;
 
 #[derive(Debug)]
 pub(super) struct RuntimeRcState {
-    loader: RefCell<Option<RcFileLoader>>,
-    transitions: Cell<usize>,
-    dynamic_ordered_delivery: Cell<bool>,
-    dynamic_message_contents: Cell<bool>,
-    diagnostics: RefCell<Vec<String>>,
-    warning_count: Cell<usize>,
-    warnings_omitted: Cell<bool>,
+    loader: Mutex<Option<RcFileLoader>>,
+    transitions: AtomicUsize,
+    dynamic_ordered_delivery: AtomicBool,
+    dynamic_message_contents: AtomicBool,
+    diagnostics: Mutex<Vec<String>>,
+    warning_count: AtomicUsize,
+    warnings_omitted: AtomicBool,
 }
 
 impl RuntimeRcState {
     pub(super) fn new(loader: Option<RcFileLoader>) -> Self {
         Self {
-            loader: RefCell::new(loader),
-            transitions: Cell::new(0),
-            dynamic_ordered_delivery: Cell::new(false),
-            dynamic_message_contents: Cell::new(false),
-            diagnostics: RefCell::new(Vec::new()),
-            warning_count: Cell::new(0),
-            warnings_omitted: Cell::new(false),
+            loader: Mutex::new(loader),
+            transitions: AtomicUsize::new(0),
+            dynamic_ordered_delivery: AtomicBool::new(false),
+            dynamic_message_contents: AtomicBool::new(false),
+            diagnostics: Mutex::new(Vec::new()),
+            warning_count: AtomicUsize::new(0),
+            warnings_omitted: AtomicBool::new(false),
         }
     }
 
@@ -43,38 +46,43 @@ impl RuntimeRcState {
     }
 
     pub(super) fn take_diagnostics(&self) -> Vec<String> {
-        let mut diagnostics = std::mem::take(&mut *self.diagnostics.borrow_mut());
-        if self.warnings_omitted.replace(false) {
+        let mut diagnostics = std::mem::take(
+            &mut *self
+                .diagnostics
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        if self.warnings_omitted.swap(false, Ordering::Relaxed) {
             diagnostics.push("warning: additional runtime rc warnings were omitted".to_owned());
         }
-        self.warning_count.set(0);
+        self.warning_count.store(0, Ordering::Relaxed);
         diagnostics
     }
 
     pub(super) fn requires_ordered_delivery(&self) -> bool {
-        self.dynamic_ordered_delivery.get()
+        self.dynamic_ordered_delivery.load(Ordering::Relaxed)
     }
 
     pub(super) fn needs_message_contents(&self) -> bool {
-        self.dynamic_message_contents.get()
+        self.dynamic_message_contents.load(Ordering::Relaxed)
     }
 
     pub(super) fn reset_transitions(&self) {
-        self.transitions.set(0);
+        self.transitions.store(0, Ordering::Relaxed);
     }
 }
 
 #[derive(Debug)]
 pub(super) struct CompiledInclude {
     expression: RcFileExpression,
-    loaded: RefCell<LoadedRuntimeRc>,
+    loaded: Mutex<HashMap<String, Arc<LoadedRuntimeRc>>>,
 }
 
 impl CompiledInclude {
     pub(super) fn new(expression: RcFileExpression) -> Self {
         Self {
             expression,
-            loaded: RefCell::new(LoadedRuntimeRc::Unloaded),
+            loaded: Mutex::new(HashMap::new()),
         }
     }
 
@@ -86,7 +94,7 @@ impl CompiledInclude {
         &self,
         runtime: &RuntimeVariables,
         context: RcExecutionContext<'state>,
-    ) -> Result<EnteredRuntimeRc<'_, 'state>, EvalError> {
+    ) -> Result<EnteredRuntimeRc<'state>, EvalError> {
         enter_runtime_rc(
             &self.expression,
             &self.loaded,
@@ -100,14 +108,14 @@ impl CompiledInclude {
 #[derive(Debug)]
 pub(super) struct CompiledSwitch {
     expression: RcFileExpression,
-    loaded: RefCell<LoadedRuntimeRc>,
+    loaded: Mutex<HashMap<String, Arc<LoadedRuntimeRc>>>,
 }
 
 impl CompiledSwitch {
     pub(super) fn new(expression: RcFileExpression) -> Self {
         Self {
             expression,
-            loaded: RefCell::new(LoadedRuntimeRc::Unloaded),
+            loaded: Mutex::new(HashMap::new()),
         }
     }
 
@@ -119,7 +127,7 @@ impl CompiledSwitch {
         &self,
         runtime: &RuntimeVariables,
         context: RcExecutionContext<'state>,
-    ) -> Result<EnteredRuntimeRc<'_, 'state>, EvalError> {
+    ) -> Result<EnteredRuntimeRc<'state>, EvalError> {
         enter_runtime_rc(
             &self.expression,
             &self.loaded,
@@ -130,20 +138,20 @@ impl CompiledSwitch {
     }
 }
 
-pub(super) struct EnteredRuntimeRc<'loaded, 'state> {
-    loaded: Ref<'loaded, LoadedRuntimeRc>,
+pub(super) struct EnteredRuntimeRc<'state> {
+    loaded: Arc<LoadedRuntimeRc>,
     child_context: Option<RcExecutionContext<'state>>,
 }
 
-impl<'loaded, 'state> EnteredRuntimeRc<'loaded, 'state> {
+impl<'state> EnteredRuntimeRc<'state> {
     pub(super) fn is_empty(&self) -> bool {
-        matches!(&*self.loaded, LoadedRuntimeRc::Empty)
+        matches!(self.loaded.as_ref(), LoadedRuntimeRc::Empty)
     }
 
     pub(super) fn sequence(
         &self,
     ) -> Result<Option<(&CompiledSequence, RcExecutionContext<'state>)>, EvalError> {
-        match (&*self.loaded, self.child_context) {
+        match (self.loaded.as_ref(), self.child_context) {
             (LoadedRuntimeRc::Sequence(sequence), Some(context)) => Ok(Some((sequence, context))),
             (LoadedRuntimeRc::Sequence(_), None) => Err(EvalError::RuntimeRc(
                 "loaded runtime rc sequence has no child context".to_owned(),
@@ -156,7 +164,6 @@ impl<'loaded, 'state> EnteredRuntimeRc<'loaded, 'state> {
 #[derive(Debug, Default)]
 pub(super) enum LoadedRuntimeRc {
     #[default]
-    Unloaded,
     Empty,
     Failed,
     Sequence(Box<CompiledSequence>),
@@ -185,12 +192,21 @@ pub(super) struct RcExecutionContext<'a> {
 
 impl RcExecutionContext<'_> {
     fn push_warning(self, diagnostic: String) {
-        let count = self.state.warning_count.get();
-        if count < MAX_RUNTIME_RC_WARNINGS {
-            self.state.diagnostics.borrow_mut().push(diagnostic);
-            self.state.warning_count.set(count + 1);
+        let admitted = self
+            .state
+            .warning_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < MAX_RUNTIME_RC_WARNINGS).then_some(count + 1)
+            })
+            .is_ok();
+        if admitted {
+            self.state
+                .diagnostics
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(diagnostic);
         } else {
-            self.state.warnings_omitted.set(true);
+            self.state.warnings_omitted.store(true, Ordering::Relaxed);
         }
     }
 
@@ -203,52 +219,59 @@ impl RcExecutionContext<'_> {
     }
 
     fn record_transition(self) -> Result<(), EvalError> {
-        let transitions = self
-            .state
+        self.state
             .transitions
-            .get()
-            .checked_add(1)
-            .ok_or_else(|| EvalError::RuntimeRc("rc transition count overflows".to_owned()))?;
-        if transitions > MAX_RC_TRANSITIONS {
-            return Err(EvalError::RuntimeRc(format!(
-                "rc transitions exceed the hard limit of {MAX_RC_TRANSITIONS}"
-            )));
-        }
-        self.state.transitions.set(transitions);
-        Ok(())
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count
+                    .checked_add(1)
+                    .filter(|next| *next <= MAX_RC_TRANSITIONS)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                EvalError::RuntimeRc(format!(
+                    "rc transitions exceed the hard limit of {MAX_RC_TRANSITIONS}"
+                ))
+            })
     }
 }
 
 fn load_runtime_rc(
     expression: &RcFileExpression,
-    loaded_state: &RefCell<LoadedRuntimeRc>,
+    loaded_states: &Mutex<HashMap<String, Arc<LoadedRuntimeRc>>>,
     statement: RuntimeRcStatement,
     runtime: &RuntimeVariables,
     context: RcExecutionContext<'_>,
-) -> Result<(), EvalError> {
+) -> Result<Arc<LoadedRuntimeRc>, EvalError> {
     context.record_transition()?;
-    if !matches!(*loaded_state.borrow(), LoadedRuntimeRc::Unloaded) {
-        return Ok(());
+    let path = expression
+        .resolve_with(|name| runtime.get(name).map(str::to_owned))
+        .map_err(EvalError::Expansion)?;
+    let mut loaded_states = loaded_states
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(loaded) = loaded_states.get(&path) {
+        return Ok(Arc::clone(loaded));
     }
+    loaded_states
+        .try_reserve(1)
+        .map_err(|_| EvalError::RuntimeRc("cannot reserve runtime rc path cache".to_owned()))?;
     let statement_name = statement.name();
 
     // Original procmail uses SWITCHRC=/dev/null as a successful request to
     // stop the current rc file. Account it as a transition before recognizing
     // the exact resolved path, but never open the device or weaken the regular
     // file checks used by INCLUDERC and other switch targets.
-    if matches!(statement, RuntimeRcStatement::Switch)
-        && expression
-            .resolve_with(|name| runtime.get(name).map(str::to_owned))
-            .is_ok_and(|path| path == "/dev/null")
-    {
-        *loaded_state.borrow_mut() = LoadedRuntimeRc::Empty;
-        return Ok(());
+    if matches!(statement, RuntimeRcStatement::Switch) && path == "/dev/null" {
+        let loaded = Arc::new(LoadedRuntimeRc::Empty);
+        loaded_states.insert(path, Arc::clone(&loaded));
+        return Ok(loaded);
     }
     let child_context = context.descend()?;
     let loaded = context
         .state
         .loader
-        .borrow_mut()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_mut()
         .ok_or(EvalError::RuntimeRcLoaderUnavailable {
             line: expression.line,
@@ -271,14 +294,21 @@ fn load_runtime_rc(
                 error.safe_message()
             );
             truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
-            context.state.diagnostics.borrow_mut().push(diagnostic);
-            *loaded_state.borrow_mut() = LoadedRuntimeRc::Failed;
-            return Ok(());
+            context
+                .state
+                .diagnostics
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(diagnostic);
+            let loaded = Arc::new(LoadedRuntimeRc::Failed);
+            loaded_states.insert(path, Arc::clone(&loaded));
+            return Ok(loaded);
         }
     };
     let Some(loaded) = loaded else {
-        *loaded_state.borrow_mut() = LoadedRuntimeRc::Empty;
-        return Ok(());
+        let loaded = Arc::new(LoadedRuntimeRc::Empty);
+        loaded_states.insert(path, Arc::clone(&loaded));
+        return Ok(loaded);
     };
     loaded
         .config()
@@ -294,24 +324,30 @@ fn load_runtime_rc(
     let sequence = CompiledSequence::compile(&loaded.into_config().statements, &mut preceding);
     let requirements = sequence.requirements();
     if requirements.needs_body_contents {
-        context.state.dynamic_message_contents.set(true);
+        context
+            .state
+            .dynamic_message_contents
+            .store(true, Ordering::Relaxed);
     }
     if sequence.requires_ordered_delivery() {
-        context.state.dynamic_ordered_delivery.set(true);
+        context
+            .state
+            .dynamic_ordered_delivery
+            .store(true, Ordering::Relaxed);
     }
-    *loaded_state.borrow_mut() = LoadedRuntimeRc::Sequence(Box::new(sequence));
-    Ok(())
+    let loaded = Arc::new(LoadedRuntimeRc::Sequence(Box::new(sequence)));
+    loaded_states.insert(path, Arc::clone(&loaded));
+    Ok(loaded)
 }
 
-fn enter_runtime_rc<'loaded, 'state>(
+fn enter_runtime_rc<'state>(
     expression: &RcFileExpression,
-    loaded_state: &'loaded RefCell<LoadedRuntimeRc>,
+    loaded_states: &Mutex<HashMap<String, Arc<LoadedRuntimeRc>>>,
     statement: RuntimeRcStatement,
     runtime: &RuntimeVariables,
     context: RcExecutionContext<'state>,
-) -> Result<EnteredRuntimeRc<'loaded, 'state>, EvalError> {
-    load_runtime_rc(expression, loaded_state, statement, runtime, context)?;
-    let loaded = loaded_state.borrow();
+) -> Result<EnteredRuntimeRc<'state>, EvalError> {
+    let loaded = load_runtime_rc(expression, loaded_states, statement, runtime, context)?;
 
     // Compute the child context at the same boundary that owns the loaded
     // tree. This keeps depth checking identical in every evaluation mode and
