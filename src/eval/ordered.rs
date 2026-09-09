@@ -68,13 +68,25 @@ impl CompiledSequence {
     where
         T: TraceSink,
     {
-        let mut state = SequenceState::default();
+        self.execute_ordered_from(0, SequenceState::default(), context)
+    }
+
+    fn execute_ordered_from<E, T>(
+        &self,
+        start: usize,
+        mut state: SequenceState,
+        context: &mut OrderedTreeExecution<'_, E, T>,
+    ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<E>>
+    where
+        T: TraceSink,
+    {
         let mut sequence_action = ActionExecution::Succeeded;
 
-        // A block reports its latest attempted child action to its parent.
-        // An unhandled copy failure therefore escapes the block, while a
-        // successful child error handler replaces that failure.
-        for recipe in &self.recipes {
+        // A copy-block branch resumes this same loop after its block while the
+        // parent also advances to that recipe independently. Keeping the
+        // cursor and chain state explicit prevents the two paths from gaining
+        // subtly different handling for statements, A/a/E/e, or termination.
+        for recipe in &self.recipes[start..] {
             let statement_control =
                 execute_statements_ordered(&recipe.preceding_statements, context)?;
             if statement_control != SequenceControl::Continue {
