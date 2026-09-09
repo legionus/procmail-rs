@@ -162,7 +162,7 @@ fn command_assignments_cross_runtime_include_and_switch_boundaries() {
     fs::write(
         &path,
         format!(
-            "MAILDIR={}\nBASE={}\nOUT={}\n:0 hW\nRC_NAME=| printf include\nINCLUDERC=$BASE/$RC_NAME.rc\n:0\nmbox:$OUT-wrong\n",
+            "MAILDIR={}\nBASE={}\nOUT={}\n:0 hW\nRC_NAME=| {{ cat >/dev/null; printf include; }}\nINCLUDERC=$BASE/$RC_NAME.rc\n:0\nmbox:$OUT-wrong\n",
             directory.display(),
             directory.display(),
             output.display()
@@ -171,7 +171,7 @@ fn command_assignments_cross_runtime_include_and_switch_boundaries() {
     .unwrap();
     fs::write(
         &include,
-        "SWITCH_NAME=`printf 'switched\\n\\n'`\nSWITCHRC=$BASE/$SWITCH_NAME.rc\n",
+        "SWITCH_NAME=`cat >/dev/null; printf 'switched\\n\\n'`\nSWITCHRC=$BASE/$SWITCH_NAME.rc\n",
     )
     .unwrap();
     fs::write(

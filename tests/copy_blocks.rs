@@ -225,7 +225,7 @@ fn unwaited_copy_branch_overlaps_the_parent_and_continues_after_the_block() {
     write_private(
         &config,
         format!(
-            "MAILDIR={}\nTIMEOUT=2\nTARGET=parent\nMARKER={}\n:0 c\n{{\n:0 cw\n| while test ! -e \"$MARKER\"; do sleep 0.01; done\nTARGET=branch\n}}\n:0 c\nmaildir:$TARGET\n:0 w\n| : > \"$MARKER\"\n",
+            "MAILDIR={}\nTIMEOUT=2\nTARGET=parent\nMARKER={}\n:0 c\n{{\n:0 cw\n| while test ! -e \"$MARKER\"; do sleep 0.01; done; cat >/dev/null\nTARGET=branch\n}}\n:0 c\nmaildir:$TARGET\n:0 w\n| cat >/dev/null; : > \"$MARKER\"\n",
             base.display(),
             marker.display()
         ),
