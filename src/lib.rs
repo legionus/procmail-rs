@@ -25,11 +25,14 @@ pub mod rc_file;
 pub mod runtime;
 pub mod trace;
 
+// SAFETY-AUDIT: blocks=3 expressions=10
 #[allow(unsafe_code)]
 mod mapped_file;
 
+// SAFETY-AUDIT: blocks=1 expressions=25
 #[allow(unsafe_code)]
 pub mod signal_state;
 
+// SAFETY-AUDIT: blocks=3 expressions=8
 #[allow(unsafe_code)]
 pub mod user_identity;

@@ -81,15 +81,13 @@ jobs:
         run: |
           cargo +stable audit
           cargo +stable deny check
-      # Check both the project total reported by geiger and the source block
-      # ceilings. This catches growth hidden inside either reviewed module.
+      # Keep the policy in one checked-in parser and consume geiger's machine
+      # output so presentation-only changes cannot weaken or break the check.
       - name: Check unsafe ceilings
         run: |
           cargo +stable geiger --locked --forbid-only
-          cargo +stable geiger --locked --output-format GitHubMarkdown | tee geiger.md
-          grep -Eq '18/18.*procmail-rs ' geiger.md
-          test "$(grep -Ec 'unsafe[[:space:]]*\{' src/mapped_file.rs)" -eq 3
-          test "$(grep -Ec 'unsafe[[:space:]]*\{' src/user_identity.rs)" -eq 3
+          cargo +stable geiger --locked --quiet --output-format Json > "${RUNNER_TEMP}/geiger.json"
+          python3 .github/scripts/check-unsafe.py "${RUNNER_TEMP}/geiger.json"
 
   fuzz:
     name: Nightly fuzz smoke tests
