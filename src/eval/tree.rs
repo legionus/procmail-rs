@@ -356,6 +356,16 @@ impl CompiledNode {
             RecipeAction::Headers(action) => CompiledAction::Headers(action.clone()),
         };
         let mut properties = action_properties(&action);
+        if matches!(action, CompiledAction::Block(_))
+            && recipe.options.continuation == ContinuationMode::Continue
+        {
+            // A block copy must preserve two independent continuations after
+            // the block. The header planner models a single continuation, so
+            // defer before it can execute either path or leak branch changes
+            // into the parent.
+            properties.requires_ordered_delivery = true;
+            properties.requires_preemptive_ordered_delivery = true;
+        }
         properties = conditions.iter().fold(properties, |properties, condition| {
             properties.union(condition.properties())
         });

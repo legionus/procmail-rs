@@ -72,6 +72,27 @@ fn delivery_inside_waited_copy_block_stops_only_the_branch() {
 }
 
 #[test]
+fn delivery_after_waited_copy_block_runs_in_both_branches() {
+    let source = ":0 cw\n{\nVALUE=copy\n}\n:0\nmaildir:after\n";
+    let (outcome, recorder) = evaluate_config(source, b"Subject: test\n\nbody\n");
+
+    assert_eq!(
+        outcome,
+        Outcome::Delivered {
+            deliveries: 2
+        }
+    );
+    assert_eq!(
+        recorder
+            .destinations
+            .iter()
+            .map(Destination::path)
+            .collect::<Vec<_>>(),
+        ["after", "after"]
+    );
+}
+
+#[test]
 fn waited_copy_block_preserves_parent_and_branch_chain_state() {
     let source = ":0 cw\n{\n:0 c\nmaildir:inside\n}\n:0 Ac\nmaildir:after-a-upper\n:0 ac\nmaildir:after-a-lower\n:0 Ec\nmaildir:never-else\n";
     let (outcome, recorder) = evaluate_config(source, b"Subject: test\n\nbody\n");
