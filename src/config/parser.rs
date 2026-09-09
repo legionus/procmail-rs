@@ -1301,63 +1301,7 @@ fn parse_condition(
     } else {
         budget.check_regex(recipe_regexes, line)?;
         let (target, pattern) = condition_regex_target(input, line)?;
-        if pattern.len() > MAX_REGEX_PATTERN_LEN {
-            return Err(ParseError::new(
-                line,
-                format!(
-                    "regular expression exceeds the hard limit of {MAX_REGEX_PATTERN_LEN} bytes"
-                ),
-            ));
-        }
-
-        // LINEBUF has already bounded the rc source line. Macro text belongs
-        // to this implementation rather than to the user, so constrain its
-        // generated size only with the regex expansion and compilation limits.
-        let (compiled_pattern, marker_count, force_case_insensitive) =
-            prepare_condition_regex(pattern, line)?;
-        let compiled = build_regex(&compiled_pattern, case_sensitive && !force_case_insensitive)
-            .map_err(|error| {
-                ParseError::new(line, format!("invalid regular expression: {error}"))
-            })?;
-        let match_captures = (0..marker_count)
-            .map(|marker| {
-                let wanted = match_marker_name(marker);
-                compiled
-                    .capture_names()
-                    .enumerate()
-                    .find_map(|(index, name)| (name == Some(wanted.as_str())).then_some(index))
-                    .ok_or_else(|| {
-                        ParseError::new(line, "internal MATCH marker capture is missing")
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if compiled
-            .capture_names()
-            .enumerate()
-            .any(|(index, name)| name.is_some() && !match_captures.contains(&index))
-        {
-            return Err(ParseError::new(
-                line,
-                "named regular expression groups are not supported",
-            ));
-        }
-        let capture_indexes = (1..compiled.captures_len())
-            .filter(|index| !match_captures.contains(index))
-            .collect::<Vec<_>>();
-        if capture_indexes.len() > MAX_REGEX_CAPTURES {
-            return Err(ParseError::new(
-                line,
-                format!(
-                    "regular expression capture count exceeds the hard limit of {MAX_REGEX_CAPTURES}"
-                ),
-            ));
-        }
-        let regex = RegexCondition {
-            pattern: pattern.to_owned(),
-            compiled,
-            match_captures,
-            capture_indexes,
-        };
+        let regex = compile_condition_regex(pattern, line, case_sensitive)?;
         match target {
             Some(ConditionRegexTarget::Variable(name)) => {
                 (ConditionKind::VariableRegex { name, regex }, true)
@@ -1377,6 +1321,84 @@ fn parse_condition(
         },
         is_regex,
     ))
+}
+
+fn compile_condition_regex(
+    pattern: &str,
+    line: usize,
+    case_sensitive: bool,
+) -> Result<RegexCondition, ParseError> {
+    if pattern.len() > MAX_REGEX_PATTERN_LEN {
+        return Err(ParseError::new(
+            line,
+            format!("regular expression exceeds the hard limit of {MAX_REGEX_PATTERN_LEN} bytes"),
+        ));
+    }
+
+    // LINEBUF has already bounded patterns coming from an rc source line.
+    // Macro text belongs to this implementation, so generated expressions
+    // are governed by the separate expansion and compilation limits here.
+    let (compiled_pattern, marker_count, force_case_insensitive) =
+        prepare_condition_regex(pattern, line)?;
+    let compiled = build_regex(&compiled_pattern, case_sensitive && !force_case_insensitive)
+        .map_err(|error| ParseError::new(line, format!("invalid regular expression: {error}")))?;
+    let match_captures = (0..marker_count)
+        .map(|marker| {
+            let wanted = match_marker_name(marker);
+            compiled
+                .capture_names()
+                .enumerate()
+                .find_map(|(index, name)| (name == Some(wanted.as_str())).then_some(index))
+                .ok_or_else(|| ParseError::new(line, "internal MATCH marker capture is missing"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if compiled
+        .capture_names()
+        .enumerate()
+        .any(|(index, name)| name.is_some() && !match_captures.contains(&index))
+    {
+        return Err(ParseError::new(
+            line,
+            "named regular expression groups are not supported",
+        ));
+    }
+    let capture_indexes = (1..compiled.captures_len())
+        .filter(|index| !match_captures.contains(index))
+        .collect::<Vec<_>>();
+    if capture_indexes.len() > MAX_REGEX_CAPTURES {
+        return Err(ParseError::new(
+            line,
+            format!(
+                "regular expression capture count exceeds the hard limit of {MAX_REGEX_CAPTURES}"
+            ),
+        ));
+    }
+    Ok(RegexCondition {
+        pattern: pattern.to_owned(),
+        compiled,
+        match_captures,
+        capture_indexes,
+    })
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn exercise_condition_regex(pattern: &str, input: &[u8], case_sensitive: bool) {
+    let Ok(regex) = compile_condition_regex(pattern, 1, case_sensitive) else {
+        return;
+    };
+    let Some(captures) = regex.compiled.captures(input) else {
+        return;
+    };
+
+    // Touch every index produced by the frontend. This makes malformed AST
+    // edits or capture bookkeeping observable to the fuzzer without copying
+    // evaluation logic into the fuzz-only interface.
+    for index in regex.match_captures.iter().chain(&regex.capture_indexes) {
+        assert!(*index < captures.len());
+        if let Some(matched) = captures.get(*index) {
+            assert!(input.get(matched.start()..matched.end()).is_some());
+        }
+    }
 }
 
 pub(crate) fn parse_reparsed_condition(

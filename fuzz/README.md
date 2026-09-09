@@ -16,6 +16,7 @@ rustup run nightly cargo fuzz run message -- -max_total_time=30
 rustup run nightly cargo fuzz run shell-expression -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
 rustup run nightly cargo fuzz run shell-condition -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
 rustup run nightly cargo fuzz run shell-pattern -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
+rustup run nightly cargo fuzz run regex -- -max_total_time=30 -dict=fuzz/dictionaries/regex.dict
 ```
 
 The shell targets use deterministic variable and command results. They never

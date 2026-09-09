@@ -12,6 +12,8 @@ use std::fmt;
 use regex::bytes::Regex;
 
 pub use expand::ExpansionError;
+#[cfg(feature = "fuzzing")]
+pub(crate) use parser::exercise_condition_regex;
 pub use parser::parse;
 pub(crate) use parser::{parse_reparsed_condition, parse_with_state};
 pub(crate) use variables::AssignmentPath;

@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+separator="\x00"
+start="^"
+end="$"
+absolute="^^"
+match="\\/"
+word_start="\\<"
+word_end="\\>"
+to="^TO"
+to_address="^TO_"
+from_daemon="^FROM_DAEMON"
+from_mailer="^FROM_MAILER"
+capture="(value)"
+named="(?P<name>value)"
+alternation="(left|right)"
+class="[^a-zA-Z0-9_]"
+repeat="{1,64}"

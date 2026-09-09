@@ -85,6 +85,22 @@ pub fn shell_pattern(data: &[u8]) {
     }
 }
 
+pub fn regex(data: &[u8]) {
+    let Some((&selector, rest)) = data.split_first() else {
+        return;
+    };
+    let (pattern, input) = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or((rest, &[][..]), |separator| {
+            (&rest[..separator], &rest[separator + 1..])
+        });
+    let Ok(pattern) = std::str::from_utf8(pattern) else {
+        return;
+    };
+    crate::config::exercise_condition_regex(pattern, input, selector & 1 != 0);
+}
+
 fn split_expression_input(data: &[u8]) -> Option<(u8, usize, &[u8])> {
     let (&selector, rest) = data.split_first()?;
     let (&limit_byte, source) = rest.split_first()?;
