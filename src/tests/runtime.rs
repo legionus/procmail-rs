@@ -26,6 +26,27 @@ fn default_runtime_uses_the_procmail_lock_extension() {
 }
 
 #[test]
+fn fork_keeps_later_assignments_and_removals_branch_local() {
+    let mut parent = RuntimeVariables::default();
+    parent.set("SHARED", "before");
+    parent.set("PARENT_ONLY", "visible-before-fork");
+
+    let mut branch = parent.fork();
+    branch.set("SHARED", "branch");
+    branch.remove("PARENT_ONLY");
+    branch.set_bytes("BINARY", b"branch\xff".to_vec());
+    parent.set("SHARED", "parent");
+    parent.set("PARENT_ONLY", "parent");
+
+    assert_eq!(parent.get("SHARED"), Some("parent"));
+    assert_eq!(parent.get("PARENT_ONLY"), Some("parent"));
+    assert_eq!(parent.get_bytes("BINARY"), None);
+    assert_eq!(branch.get("SHARED"), Some("branch"));
+    assert_eq!(branch.get("PARENT_ONLY"), None);
+    assert_eq!(branch.get_bytes("BINARY"), Some(&b"branch\xff"[..]));
+}
+
+#[test]
 fn preserves_binary_values_and_replaces_the_previous_representation() {
     let mut runtime = RuntimeVariables::default();
     runtime.set_bytes("VALUE", vec![b'a', 0xff, b'z']);

@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::delivery::{CommitError, CommitReport, PublishedDelivery};
 use crate::trace::{
@@ -44,9 +45,22 @@ impl<'a> PublicationResult<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeVariables {
-    values: BTreeMap<String, String>,
-    byte_values: BTreeMap<String, Vec<u8>>,
+    parent: Option<Arc<RuntimeLayer>>,
+    values: BTreeMap<String, RuntimeValue>,
     system_hostname: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeLayer {
+    parent: Option<Arc<RuntimeLayer>>,
+    values: BTreeMap<String, RuntimeValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeValue {
+    Text(String),
+    Bytes(Vec<u8>),
+    Removed,
 }
 
 impl Default for RuntimeVariables {
@@ -54,25 +68,27 @@ impl Default for RuntimeVariables {
         let mut values = BTreeMap::new();
         values.insert(
             "LINEBUF".to_owned(),
-            crate::config::DEFAULT_LINEBUF.to_string(),
+            RuntimeValue::Text(crate::config::DEFAULT_LINEBUF.to_string()),
         );
         values.insert(
             "TIMEOUT".to_owned(),
-            crate::external_process::DEFAULT_PROCESS_TIMEOUT
-                .as_secs()
-                .to_string(),
+            RuntimeValue::Text(
+                crate::external_process::DEFAULT_PROCESS_TIMEOUT
+                    .as_secs()
+                    .to_string(),
+            ),
         );
         values.insert(
             "UMASK".to_owned(),
-            format!("{:03o}", crate::config::DEFAULT_UMASK),
+            RuntimeValue::Text(format!("{:03o}", crate::config::DEFAULT_UMASK)),
         );
         values.insert(
             "LOCKEXT".to_owned(),
-            crate::config::DEFAULT_LOCK_EXT.to_owned(),
+            RuntimeValue::Text(crate::config::DEFAULT_LOCK_EXT.to_owned()),
         );
         Self {
+            parent: None,
             values,
-            byte_values: BTreeMap::new(),
             system_hostname: None,
         }
     }
@@ -86,24 +102,35 @@ impl RuntimeVariables {
     pub(crate) fn system_hostname(&self) -> Option<&str> {
         self.system_hostname.as_deref()
     }
+
+    pub fn fork(&mut self) -> Self {
+        // Freeze the current delta once and let both execution branches point
+        // at it. Later assignments stay in branch-local maps, avoiding an
+        // eager copy of every bounded value when a copy block is selected.
+        let shared = Arc::new(RuntimeLayer {
+            parent: self.parent.take(),
+            values: std::mem::take(&mut self.values),
+        });
+        self.parent = Some(Arc::clone(&shared));
+        Self {
+            parent: Some(shared),
+            values: BTreeMap::new(),
+            system_hostname: self.system_hostname.clone(),
+        }
+    }
+
     pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        let name = name.into();
-        self.byte_values.remove(&name);
-        self.values.insert(name, value.into());
+        self.values
+            .insert(name.into(), RuntimeValue::Text(value.into()));
     }
 
     pub fn set_bytes(&mut self, name: impl Into<String>, value: Vec<u8>) {
         let name = name.into();
-        match String::from_utf8(value) {
-            Ok(value) => {
-                self.byte_values.remove(&name);
-                self.values.insert(name, value);
-            }
-            Err(error) => {
-                self.values.remove(&name);
-                self.byte_values.insert(name, error.into_bytes());
-            }
-        }
+        let value = match String::from_utf8(value) {
+            Ok(value) => RuntimeValue::Text(value),
+            Err(error) => RuntimeValue::Bytes(error.into_bytes()),
+        };
+        self.values.insert(name, value);
     }
 
     pub(crate) fn set_bytes_with_trace(
@@ -156,14 +183,18 @@ impl RuntimeVariables {
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(String::as_str)
+        match self.find(name)? {
+            RuntimeValue::Text(value) => Some(value),
+            RuntimeValue::Bytes(_) | RuntimeValue::Removed => None,
+        }
     }
 
     pub fn get_bytes(&self, name: &str) -> Option<&[u8]> {
-        self.byte_values
-            .get(name)
-            .map(Vec::as_slice)
-            .or_else(|| self.values.get(name).map(String::as_bytes))
+        match self.find(name)? {
+            RuntimeValue::Text(value) => Some(value.as_bytes()),
+            RuntimeValue::Bytes(value) => Some(value),
+            RuntimeValue::Removed => None,
+        }
     }
 
     pub fn expand_bytes(
@@ -178,25 +209,32 @@ impl RuntimeVariables {
     }
 
     pub(crate) fn remove(&mut self, name: &str) {
-        self.values.remove(name);
-        self.byte_values.remove(name);
+        self.values.insert(name.to_owned(), RuntimeValue::Removed);
     }
 
     pub(crate) fn values(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.values
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
+        self.visible_values()
+            .into_iter()
+            .filter_map(|(name, value)| {
+                if let RuntimeValue::Text(value) = value {
+                    Some((name, value.as_str()))
+                } else {
+                    None
+                }
+            })
     }
 
     pub(crate) fn byte_values(&self) -> impl Iterator<Item = (&str, &[u8])> {
-        self.values
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_bytes()))
-            .chain(
-                self.byte_values
-                    .iter()
-                    .map(|(name, value)| (name.as_str(), value.as_slice())),
-            )
+        self.visible_values()
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let value = match value {
+                    RuntimeValue::Text(value) => value.as_bytes(),
+                    RuntimeValue::Bytes(value) => value.as_slice(),
+                    RuntimeValue::Removed => return None,
+                };
+                Some((name, value))
+            })
     }
 
     pub(crate) fn clear_match_values(&mut self) {
@@ -205,20 +243,23 @@ impl RuntimeVariables {
     }
 
     pub(crate) fn clear_numbered_match_values(&mut self) {
-        self.values.retain(|name, _| {
-            !name.strip_prefix("MATCH").is_some_and(|suffix| {
-                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        let names = self
+            .visible_values()
+            .into_keys()
+            .filter(|name| {
+                name.strip_prefix("MATCH").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                })
             })
-        });
-        self.byte_values.retain(|name, _| {
-            !name.strip_prefix("MATCH").is_some_and(|suffix| {
-                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-            })
-        });
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for name in names {
+            self.remove(&name);
+        }
     }
 
     pub(crate) fn set_match_value(&mut self, name: String, value: String) {
-        self.values.insert(name, value);
+        self.values.insert(name, RuntimeValue::Text(value));
     }
 
     pub fn record_publication(
@@ -235,10 +276,41 @@ impl RuntimeVariables {
                 path.display()
             )
         })?;
-        self.values
-            .insert("LASTFOLDER".to_owned(), value.to_owned());
+        self.values.insert(
+            "LASTFOLDER".to_owned(),
+            RuntimeValue::Text(value.to_owned()),
+        );
         trace.record(TraceEvent::LastFolderUpdated);
         Ok(())
+    }
+
+    fn find(&self, name: &str) -> Option<&RuntimeValue> {
+        if let Some(value) = self.values.get(name) {
+            return Some(value);
+        }
+        let mut layer = self.parent.as_deref();
+        while let Some(current) = layer {
+            if let Some(value) = current.values.get(name) {
+                return Some(value);
+            }
+            layer = current.parent.as_deref();
+        }
+        None
+    }
+
+    fn visible_values(&self) -> BTreeMap<&str, &RuntimeValue> {
+        let mut visible = BTreeMap::new();
+        for (name, value) in &self.values {
+            visible.insert(name.as_str(), value);
+        }
+        let mut layer = self.parent.as_deref();
+        while let Some(current) = layer {
+            for (name, value) in &current.values {
+                visible.entry(name.as_str()).or_insert(value);
+            }
+            layer = current.parent.as_deref();
+        }
+        visible
     }
 }
 
