@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+separator="\x00"
+remove="remove Subject"
+set="set Subject: changed"
+add="add X-Test: value"
+prepend="prepend Delivered-To: user@example.test"
+rename="rename List-Id to X-List-Id"
+extract_raw="extract raw Subject into VALUE"
+extract_unfolded="extract unfolded Subject into VALUE"
+lf_message="\x00Subject: old\x0a\x0abody"
+crlf_message="\x00Subject: old\x0d\x0a\x0d\x0abody"
+folded="\x00Subject: first\x0a continued\x0a\x0abody"
+binary="\x00X-Binary: \xff\x00value\x0a\x0abody\x00\xff"

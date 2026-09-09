@@ -56,5 +56,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "header-edit"
+path = "fuzz_targets/header_edit.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

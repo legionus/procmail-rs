@@ -9,6 +9,10 @@ use crate::config::shell_eval::{
     self, EvaluationContext, EvaluationDepth, UnsupportedPart, VariableValue,
 };
 use crate::config::shell_pattern::{self, Edge, PatternError, Selection};
+use crate::config::{RecipeAction, Statement};
+use crate::limits::MessageLimits;
+use crate::message::Message;
+use std::io::{BufReader, Cursor};
 
 const MAX_FUZZ_OUTPUT: usize = 4096;
 
@@ -99,6 +103,73 @@ pub fn regex(data: &[u8]) {
         return;
     };
     crate::config::exercise_condition_regex(pattern, input, selector & 1 != 0);
+}
+
+pub fn header_edit(data: &[u8]) {
+    let Some(separator) = data.iter().position(|byte| *byte == 0) else {
+        return;
+    };
+    let Ok(operations) = std::str::from_utf8(&data[..separator]) else {
+        return;
+    };
+    let message_bytes = &data[separator + 1..];
+    let source = format!(":0\nheaders {{\n{operations}\n}}\n");
+    let Ok(config) = crate::config::parse(&source) else {
+        return;
+    };
+    let Some(Statement::Recipe(recipe)) = config.statements.first() else {
+        return;
+    };
+    let RecipeAction::Headers(action) = &recipe.action else {
+        return;
+    };
+    let limits = fuzz_message_limits(message_bytes);
+    let Ok(message) = Message::read_from(&mut BufReader::new(Cursor::new(message_bytes)), limits)
+    else {
+        return;
+    };
+    let Ok(applied) = crate::header_edit::apply_header_action(
+        message.header(),
+        message.body().len(),
+        action,
+        limits,
+    ) else {
+        return;
+    };
+    let (edited, extractions) = applied.into_parts();
+    let replacement = Message::from_edited_header(edited, message.body())
+        .expect("a validated header edit must form a bounded message");
+
+    // Reparse the serialized result through bounded ingestion. This checks
+    // that a successful edit preserved message framing and did not conceal a
+    // limit violation that only the normal input path would detect.
+    let reparsed = Message::read_from(
+        &mut BufReader::new(Cursor::new(replacement.as_bytes())),
+        limits,
+    )
+    .expect("a validated edited message must pass the same input limits");
+    assert_eq!(reparsed.as_bytes(), replacement.as_bytes());
+    assert_eq!(reparsed.body(), message.body());
+    assert!(
+        extractions
+            .iter()
+            .all(|extraction| extraction.value.len() <= crate::config::MAX_ASSIGNMENT_VALUE_LEN)
+    );
+}
+
+fn fuzz_message_limits(data: &[u8]) -> MessageLimits {
+    let limit = |index: usize| {
+        data.get(index)
+            .copied()
+            .map_or(0, |byte| usize::from(byte) * 32)
+    };
+    MessageLimits {
+        message_size: limit(0),
+        headers_size: limit(1),
+        body_size: limit(2),
+        header_line_size: limit(3),
+        header_field_size: limit(4),
+    }
 }
 
 fn split_expression_input(data: &[u8]) -> Option<(u8, usize, &[u8])> {

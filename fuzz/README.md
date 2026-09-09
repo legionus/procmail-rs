@@ -17,10 +17,14 @@ rustup run nightly cargo fuzz run shell-expression -- -max_total_time=30 -dict=f
 rustup run nightly cargo fuzz run shell-condition -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
 rustup run nightly cargo fuzz run shell-pattern -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
 rustup run nightly cargo fuzz run regex -- -max_total_time=30 -dict=fuzz/dictionaries/regex.dict
+rustup run nightly cargo fuzz run header-edit -- -max_total_time=30 -dict=fuzz/dictionaries/header-edit.dict
 ```
 
 The shell targets use deterministic variable and command results. They never
 execute command text produced by fuzz input.
+
+The header-edit target parses its operation text as a real `headers` action,
+applies it to a separately bounded byte message, and reparses successful output.
 
 Longer release-candidate jobs should retain and review any generated corpus or
 crash artifact before adding it to the repository.
