@@ -23,6 +23,11 @@ rustup run nightly cargo fuzz run header-edit -- -max_total_time=30 -dict=fuzz/d
 The shell targets use deterministic variable and command results. They never
 execute command text produced by fuzz input.
 
+The message target treats its first ten bytes as five little-endian limit
+selectors and the remainder as the message. It tests each selected limit at
+the neighboring values below, at, and above the selector while leaving the
+other four limits at their defaults.
+
 The header-edit target parses its operation text as a real `headers` action,
 applies it to a separately bounded byte message, and reparses successful output.
 

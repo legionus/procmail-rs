@@ -15,6 +15,7 @@ use crate::message::Message;
 use std::io::{BufReader, Cursor};
 
 const MAX_FUZZ_OUTPUT: usize = 4096;
+const MESSAGE_LIMIT_COUNT: usize = 5;
 
 pub struct ShellEvaluationSummary {
     pub limit: usize,
@@ -192,19 +193,58 @@ pub fn rc_configuration(data: &[u8]) {
     let _ = plan.explain();
 }
 
+pub fn message(data: &[u8]) {
+    const CONTROL_SIZE: usize = MESSAGE_LIMIT_COUNT * size_of::<u16>();
+
+    let (control, message) = if data.len() >= CONTROL_SIZE {
+        data.split_at(CONTROL_SIZE)
+    } else {
+        (&[][..], data)
+    };
+
+    // Test one independently selected limit at each neighboring value. This
+    // keeps every allocation bounded by the fuzz input while making rejection
+    // edges much denser than five unrelated, freely varying limits would be.
+    for selected in 0..MESSAGE_LIMIT_COUNT {
+        let encoded = control
+            .get(selected * 2..selected * 2 + 2)
+            .map_or(0, |bytes| u16::from_le_bytes([bytes[0], bytes[1]]));
+        let pivot = usize::from(encoded) % message.len().saturating_add(2);
+        for limit in [pivot.saturating_sub(1), pivot, pivot.saturating_add(1)] {
+            let mut limits = MessageLimits::default();
+            set_message_limit(&mut limits, selected, limit);
+            let result = Message::read_from(&mut BufReader::new(Cursor::new(message)), limits);
+            if let Ok(parsed) = result {
+                assert!(parsed.len() <= limits.message_size);
+                assert!(parsed.header().len() <= limits.headers_size);
+                assert!(parsed.body().len() <= limits.body_size);
+            }
+        }
+    }
+}
+
+fn set_message_limit(limits: &mut MessageLimits, selected: usize, value: usize) {
+    match selected {
+        0 => limits.message_size = value,
+        1 => limits.headers_size = value,
+        2 => limits.body_size = value,
+        3 => limits.header_line_size = value,
+        4 => limits.header_field_size = value,
+        _ => unreachable!("the caller selects one of the five message limits"),
+    }
+}
+
 fn fuzz_message_limits(data: &[u8]) -> MessageLimits {
     let limit = |index: usize| {
         data.get(index)
             .copied()
             .map_or(0, |byte| usize::from(byte) * 32)
     };
-    MessageLimits {
-        message_size: limit(0),
-        headers_size: limit(1),
-        body_size: limit(2),
-        header_line_size: limit(3),
-        header_field_size: limit(4),
+    let mut limits = MessageLimits::default();
+    for selected in 0..MESSAGE_LIMIT_COUNT {
+        set_message_limit(&mut limits, selected, limit(selected));
     }
+    limits
 }
 
 fn split_expression_input(data: &[u8]) -> Option<(u8, usize, &[u8])> {
