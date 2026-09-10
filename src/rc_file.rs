@@ -53,6 +53,15 @@ pub struct RcFileError {
     resource_limit: bool,
 }
 
+pub(crate) trait RuntimeRcLoader: Send + fmt::Debug {
+    fn load_runtime_config(
+        &mut self,
+        expression: &RcFileExpression,
+        runtime: &RuntimeVariables,
+        depth: usize,
+    ) -> Result<Option<LoadedRcConfig>, RcFileError>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeRcPreparation {
     Expand,
@@ -376,6 +385,17 @@ impl RcFileLoader {
     }
 }
 
+impl RuntimeRcLoader for RcFileLoader {
+    fn load_runtime_config(
+        &mut self,
+        expression: &RcFileExpression,
+        runtime: &RuntimeVariables,
+        depth: usize,
+    ) -> Result<Option<LoadedRcConfig>, RcFileError> {
+        self.load_config(expression, runtime, depth)
+    }
+}
+
 #[derive(Default)]
 struct RcCheckWarnings {
     messages: Vec<String>,
@@ -468,6 +488,11 @@ impl LoadedRcFile {
 }
 
 impl LoadedRcConfig {
+    #[cfg(feature = "fuzzing")]
+    pub(crate) fn from_config(path: PathBuf, config: Config) -> Self {
+        Self { path, config }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

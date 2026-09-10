@@ -18,6 +18,7 @@ rustup run nightly cargo fuzz run shell-condition -- -max_total_time=30 -dict=fu
 rustup run nightly cargo fuzz run shell-pattern -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
 rustup run nightly cargo fuzz run regex -- -max_total_time=30 -dict=fuzz/dictionaries/regex.dict
 rustup run nightly cargo fuzz run header-edit -- -max_total_time=30 -dict=fuzz/dictionaries/header-edit.dict
+rustup run nightly cargo fuzz run ordered-evaluation -- -max_total_time=30 -dict=fuzz/dictionaries/ordered-evaluation.dict
 ```
 
 The shell targets use deterministic variable and command results. They never
@@ -30,6 +31,10 @@ other four limits at their defaults.
 
 The header-edit target parses its operation text as a real `headers` action,
 applies it to a separately bounded byte message, and reparses successful output.
+
+The ordered-evaluation target separates a UTF-8 rc file from arbitrary message
+bytes with a NUL byte. It uses deterministic, bounded in-memory replacements
+for commands, runtime rc loading, delivery, locking, and trace collection.
 
 Longer release-candidate jobs should retain and review any generated corpus or
 crash artifact before adding it to the repository.

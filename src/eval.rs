@@ -9,7 +9,7 @@ use crate::limits::MessageLimits;
 #[cfg(test)]
 use crate::message::StreamedMessage;
 use crate::message::{Message, MessageHead};
-use crate::rc_file::RcFileLoader;
+use crate::rc_file::{RcFileLoader, RuntimeRcLoader};
 use crate::runtime::{RuntimeSettingError, RuntimeSettings, RuntimeVariables};
 #[cfg(test)]
 use crate::trace::NoTrace;
@@ -296,6 +296,13 @@ fn execute_host_assignment(
 
 impl ExecutionPlan {
     pub fn compile(config: &Config, loader: Option<RcFileLoader>) -> Self {
+        Self::compile_with_loader(
+            config,
+            loader.map(|loader| Box::new(loader) as Box<dyn RuntimeRcLoader>),
+        )
+    }
+
+    fn compile_with_loader(config: &Config, loader: Option<Box<dyn RuntimeRcLoader>>) -> Self {
         let mut initial_statements = config
             .initial_variables()
             .iter()
@@ -330,6 +337,14 @@ impl ExecutionPlan {
             message_limits: MessageLimits::from_config(config).map_err(|error| error.to_string()),
             runtime_rc: RuntimeRcState::new(loader),
         }
+    }
+
+    #[cfg(feature = "fuzzing")]
+    pub(crate) fn compile_for_fuzzing(
+        config: &Config,
+        loader: impl RuntimeRcLoader + 'static,
+    ) -> Self {
+        Self::compile_with_loader(config, Some(Box::new(loader)))
     }
 
     fn rc_context(&self) -> RcExecutionContext<'_> {

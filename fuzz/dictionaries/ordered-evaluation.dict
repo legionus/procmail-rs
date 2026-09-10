@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+separator="\x00"
+discard="\x01:0\x0a/dev/null\x0a\x00Subject: fuzz\x0a\x0abody"
+copy=":0 c\x0a/dev/null\x0a"
+block=":0\x0a{\x0a:0\x0a/dev/null\x0a}\x0a"
+include="INCLUDERC=fuzz.rc\x0a"
+switch="SWITCHRC=fuzz.rc\x0a"
+pipe=":0 w\x0a| fuzz-command\x0a"
+condition=":0\x0a* ? fuzz-condition\x0a/dev/null\x0a"
+capture="VALUE=`fuzz-capture`\x0a"
+lock=":0 : fuzz.lock\x0a/dev/null\x0a"
+header="Subject: fuzz\x0a\x0a"
+body="fuzz body\x00\xff"

@@ -63,5 +63,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "ordered-evaluation"
+path = "fuzz_targets/ordered_evaluation.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::{CompiledSequence, EvalError};
 use crate::config::RcFileExpression;
-use crate::rc_file::{MAX_RC_TRANSITIONS, RcFileLoader};
+use crate::rc_file::{MAX_RC_TRANSITIONS, RuntimeRcLoader};
 use crate::runtime::RuntimeVariables;
 
 const MAX_RC_DIAGNOSTIC_LEN: usize = 1024;
@@ -16,7 +16,7 @@ pub const MAX_RUNTIME_RC_WARNINGS: usize = 128;
 
 #[derive(Debug)]
 pub(super) struct RuntimeRcState {
-    loader: Mutex<Option<RcFileLoader>>,
+    loader: Mutex<Option<Box<dyn RuntimeRcLoader>>>,
     transitions: AtomicUsize,
     dynamic_ordered_delivery: AtomicBool,
     dynamic_message_contents: AtomicBool,
@@ -26,7 +26,7 @@ pub(super) struct RuntimeRcState {
 }
 
 impl RuntimeRcState {
-    pub(super) fn new(loader: Option<RcFileLoader>) -> Self {
+    pub(super) fn new(loader: Option<Box<dyn RuntimeRcLoader>>) -> Self {
         Self {
             loader: Mutex::new(loader),
             transitions: AtomicUsize::new(0),
@@ -277,7 +277,7 @@ fn load_runtime_rc(
             line: expression.line,
             statement: statement_name,
         })?
-        .load_config(expression, runtime, child_context.depth);
+        .load_runtime_config(expression, runtime, child_context.depth);
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(error) if error.is_resource_limit() => {
