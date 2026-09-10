@@ -1399,7 +1399,7 @@ fn compile_condition_regex(
     })
 }
 
-#[cfg(feature = "fuzzing")]
+#[cfg(any(feature = "fuzzing", test))]
 pub(crate) fn exercise_condition_regex(pattern: &str, input: &[u8], case_sensitive: bool) {
     let Ok(regex) = compile_condition_regex(pattern, 1, case_sensitive) else {
         return;

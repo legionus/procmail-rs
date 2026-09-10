@@ -488,7 +488,7 @@ impl LoadedRcFile {
 }
 
 impl LoadedRcConfig {
-    #[cfg(feature = "fuzzing")]
+    #[cfg(any(feature = "fuzzing", test))]
     pub(crate) fn from_config(path: PathBuf, config: Config) -> Self {
         Self { path, config }
     }

@@ -13,7 +13,7 @@ use std::fmt;
 use regex::bytes::Regex;
 
 pub use expand::ExpansionError;
-#[cfg(feature = "fuzzing")]
+#[cfg(any(feature = "fuzzing", test))]
 pub(crate) use parser::exercise_condition_regex;
 pub use parser::parse;
 pub(crate) use parser::{parse_reparsed_condition, parse_with_state};

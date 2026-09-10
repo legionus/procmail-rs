@@ -339,7 +339,7 @@ impl ExecutionPlan {
         }
     }
 
-    #[cfg(feature = "fuzzing")]
+    #[cfg(any(feature = "fuzzing", test))]
     pub(crate) fn compile_for_fuzzing(
         config: &Config,
         loader: impl RuntimeRcLoader + 'static,

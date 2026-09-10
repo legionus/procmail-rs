@@ -220,7 +220,7 @@ pub(crate) fn apply_header_action(
     let mut result = Vec::with_capacity(size);
     for field in edited {
         if !result.is_empty() && !result.ends_with(b"\n") {
-            result.extend_from_slice(line_ending);
+            result.extend_from_slice(joining_line_ending(&result, line_ending));
         }
         result.extend_from_slice(field.bytes());
     }
@@ -327,20 +327,32 @@ fn serialized_size(
     line_ending: &[u8],
 ) -> Result<usize, HeaderEditError> {
     let mut size = 0usize;
-    let mut previous_terminated = true;
+    let mut previous = None;
     for field in fields {
-        if size != 0 && !previous_terminated {
+        if let Some(previous) = previous.filter(|bytes: &&[u8]| !bytes.ends_with(b"\n")) {
             size = size
-                .checked_add(line_ending.len())
+                .checked_add(joining_line_ending(previous, line_ending).len())
                 .ok_or(HeaderEditError::SizeOverflow)?;
         }
         size = size
             .checked_add(field.bytes().len())
             .ok_or(HeaderEditError::SizeOverflow)?;
-        previous_terminated = field.bytes().ends_with(b"\n");
+        previous = Some(field.bytes());
     }
     size.checked_add(separator.len())
         .ok_or(HeaderEditError::SizeOverflow)
+}
+
+fn joining_line_ending<'a>(previous: &[u8], preferred: &'a [u8]) -> &'a [u8] {
+    // A lone CR at the end of hostile input is header data, but appending LF
+    // would turn it into an empty CRLF line and move following fields into the
+    // body. Insert a complete CRLF delimiter so the old CR remains non-empty
+    // header data and editing cannot change the message boundary.
+    if previous.ends_with(b"\r") && preferred == b"\n" {
+        b"\r\n"
+    } else {
+        preferred
+    }
 }
 
 fn validate_aggregate_size(

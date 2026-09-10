@@ -649,3 +649,7 @@ impl EvaluationContext for FuzzContext<'_> {
     ) -> Self::Error {
     }
 }
+
+#[cfg(test)]
+#[path = "tests/fuzzing.rs"]
+mod tests;
