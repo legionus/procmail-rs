@@ -138,25 +138,7 @@ jobs:
       # Keep the native libFuzzer dependency confined to the separate fuzz
       # package; neither command changes the production dependency graph.
       - name: Build and run bounded fuzz sessions
-        run: |
-          cargo +nightly fuzz build rc
-          cargo +nightly fuzz build message
-          cargo +nightly fuzz build shell-expression
-          cargo +nightly fuzz build shell-condition
-          cargo +nightly fuzz build shell-pattern
-          cargo +nightly fuzz build regex
-          cargo +nightly fuzz build header-edit
-          cargo +nightly fuzz build ordered-evaluation
-          cargo +nightly fuzz build destination-path
-          cargo +nightly fuzz run rc -- -max_total_time=15 -max_len=4096
-          cargo +nightly fuzz run message -- -max_total_time=15 -max_len=4096
-          cargo +nightly fuzz run shell-expression -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/shell.dict
-          cargo +nightly fuzz run shell-condition -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/shell.dict
-          cargo +nightly fuzz run regex -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/regex.dict
-          cargo +nightly fuzz run header-edit -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/header-edit.dict
-          cargo +nightly fuzz run ordered-evaluation -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/ordered-evaluation.dict
-          cargo +nightly fuzz run destination-path -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/destination-path.dict
-          cargo +nightly fuzz run shell-pattern -- -max_total_time=15 -max_len=4096 -dict=fuzz/dictionaries/shell.dict
+        run: .github/scripts/run-fuzzer.sh
 
   delivery-stress:
     name: Performance and concurrent delivery

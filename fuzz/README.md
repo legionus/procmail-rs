@@ -11,8 +11,8 @@ bindings, so it is accepted only as a development tool and is never linked into
 Run bounded smoke sessions with nightly Rust:
 
 ```text
-rustup run nightly cargo fuzz run rc -- -max_total_time=30
-rustup run nightly cargo fuzz run message -- -max_total_time=30
+rustup run nightly cargo fuzz run rc -- -max_total_time=30 -dict=fuzz/dictionaries/rc.dict
+rustup run nightly cargo fuzz run message -- -max_total_time=30 -dict=fuzz/dictionaries/message.dict
 rustup run nightly cargo fuzz run shell-expression -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
 rustup run nightly cargo fuzz run shell-condition -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
 rustup run nightly cargo fuzz run shell-pattern -- -max_total_time=30 -dict=fuzz/dictionaries/shell.dict
