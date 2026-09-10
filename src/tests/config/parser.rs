@@ -1783,7 +1783,7 @@ fn config_with_conditions(mut count: usize) -> String {
 #[test]
 fn parses_typed_header_action_operations() {
     let config = parse(
-        ":0\nheaders {\n remove X-Old\n set X-State: ready\n add X-State: later\n prepend X-First: yes\n rename X-Legacy to X-Current\n extract unfolded Subject into SUBJECT\n}\n",
+        ":0\nheaders {\n remove X-Old\n set X-State ready\n add X-State later\n prepend X-First yes\n rename X-Legacy to X-Current\n extract unfolded Subject into SUBJECT\n}\n",
     )
     .unwrap();
     let Statement::Recipe(recipe) = &config.statements[0] else {
@@ -1885,8 +1885,8 @@ fn reports_unknown_header_operation_at_its_source_line() {
 }
 
 #[test]
-fn header_value_uses_only_the_first_colon_as_a_separator() {
-    let config = parse(":0\nheaders {\n add X-URI: scheme:value:part\n}\n").unwrap();
+fn header_value_retains_colons() {
+    let config = parse(":0\nheaders {\n add X-URI scheme:value:part\n}\n").unwrap();
     let Statement::Recipe(recipe) = &config.statements[0] else {
         panic!("expected recipe");
     };
@@ -1902,20 +1902,53 @@ fn header_value_uses_only_the_first_colon_as_a_separator() {
 }
 
 #[test]
+fn header_value_operations_allow_an_empty_value() {
+    for operation in ["set", "add", "prepend"] {
+        let config = parse(&format!(":0\nheaders {{\n {operation} X-Empty\n}}\n")).unwrap();
+        let Statement::Recipe(recipe) = &config.statements[0] else {
+            panic!("expected recipe");
+        };
+        let RecipeAction::Headers(action) = &recipe.action else {
+            panic!("expected headers action");
+        };
+        let value = match &action.operations[0] {
+            HeaderOperation::Set { value, .. }
+            | HeaderOperation::Add { value, .. }
+            | HeaderOperation::Prepend { value, .. } => value,
+            _ => panic!("expected value operation"),
+        };
+        assert!(value.source.is_empty(), "{operation}");
+    }
+}
+
+#[test]
+fn rejects_colon_after_header_name_in_value_operations() {
+    for operation in ["set", "add", "prepend"] {
+        let error =
+            parse(&format!(":0\nheaders {{\n {operation} X-Test: value\n}}\n")).unwrap_err();
+        assert_eq!(error.line, 3, "{operation}");
+        assert_eq!(
+            error.message, "header name must contain only printable ASCII except ':'",
+            "{operation}"
+        );
+    }
+}
+
+#[test]
 fn validates_header_names_and_rejects_folding_syntax() {
-    assert!(parse(":0\nheaders {\n add X_Test!#$%&'*+.^`|~: value\n}\n").is_ok());
+    assert!(parse(":0\nheaders {\n add X_Test!#$%&'*+.^`|~ value\n}\n").is_ok());
 
     for (source, message) in [
         (
-            ":0\nheaders {\n add Bad Name: value\n}\n",
+            ":0\nheaders {\n add Bad:Name value\n}\n",
             "header name must contain only printable ASCII except ':'",
         ),
         (
-            ":0\nheaders {\n add X-Test: value\\\n}\n",
+            ":0\nheaders {\n add X-Test value\\\n}\n",
             "folded header values are not supported",
         ),
         (
-            ":0\nheaders {\n add X-Test: value\0tail\n}\n",
+            ":0\nheaders {\n add X-Test value\0tail\n}\n",
             "header value contains a forbidden byte",
         ),
     ] {

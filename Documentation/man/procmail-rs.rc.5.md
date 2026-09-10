@@ -624,7 +624,7 @@ headers {
 }
 ```
 
-`set NAME: VALUE`
+`set NAME [VALUE]`
 
 : Replace the first matching field at its existing position and remove every
   later duplicate. If no match exists, append one new field. The emitted name
@@ -633,12 +633,12 @@ headers {
 
 ```
 headers {
-    set X-Spam-Status: checked
-    set X-Empty:
+    set X-Spam-Status checked
+    set X-Empty
 }
 ```
 
-`add NAME: VALUE`
+`add NAME [VALUE]`
 
 : Append one field after all fields currently present. Existing fields with
   that name are retained, so repeated `add` operations deliberately create
@@ -646,20 +646,20 @@ headers {
 
 ```
 headers {
-    add Received: by first-filter
-    add Received: by second-filter
+    add Received by first-filter
+    add Received by second-filter
 }
 ```
 
-`prepend NAME: VALUE`
+`prepend NAME [VALUE]`
 
 : Insert one field before every field currently present. Consequently, a later
   `prepend` appears before an earlier `prepend`.
 
 ```
 headers {
-    prepend X-Processed-By: first
-    prepend X-Processed-By: second
+    prepend X-Processed-By first
+    prepend X-Processed-By second
 }
 ```
 
@@ -705,17 +705,18 @@ files may use them. A later failure in the same action publishes none of its
 extractions. Repeated extraction into one variable follows operation order,
 with the last value winning.
 
-`NAME` must be non-empty printable ASCII without whitespace or colon. Punctuation
-allowed by RFC-style field names is preserved. The first colon separates name
-and value; later colons belong to `VALUE`:
+`NAME` must be non-empty printable ASCII without whitespace or colon, matching
+the `1*ftext` field-name syntax from RFC 5322. Punctuation allowed by that
+syntax is preserved. The first ASCII whitespace separates `NAME` from `VALUE`;
+colons in `VALUE` are ordinary data:
 
 ```
 headers {
-    set X-Source-URI: imap://mail.example/inbox
+    set X-Source-URI imap://mail.example/inbox
 }
 ```
 
-Leading whitespace after the separating colon is removed by the rc parser.
+Leading whitespace before `VALUE` is removed by the rc parser.
 New fields are serialized as `NAME: VALUE` followed by the line ending chosen
 from the first physical input header line. If the input has no such line, the
 header/body separator selects CRLF or LF; LF is the final fallback. Existing
@@ -731,7 +732,7 @@ earlier assignments may be used:
 :0
 * ^List-Id:.*<\/([^.>]+)\.example>
 headers {
-    set X-List-Name: $MATCH1
+    set X-List-Name $MATCH1
 }
 ```
 
@@ -767,9 +768,9 @@ without copying the message through a child:
 :0
 headers {
     remove X-Spam-Status
-    set X-Filter: checked
-    add X-Filter-Result: clean
-    prepend X-Processed-By: procmail-rs
+    set X-Filter checked
+    add X-Filter-Result clean
+    prepend X-Processed-By procmail-rs
 }
 ```
 

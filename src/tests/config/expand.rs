@@ -1140,7 +1140,7 @@ fn parameter_assignment_is_rejected_where_ordered_evaluation_is_unavailable() {
         "INCLUDERC=${FILE:=child.rc}\n",
         ":0:${LOCK:=mail.lock}\nmbox:mail\n",
         ":0\n* $^Subject: ${VALUE:=text}\nmbox:mail\n",
-        ":0\nheaders {\nset X-Test: ${VALUE:=text}\n}\n",
+        ":0\nheaders {\nset X-Test ${VALUE:=text}\n}\n",
     ] {
         let error = parse(source).unwrap().expand(&[]).unwrap_err();
         assert!(

@@ -41,7 +41,7 @@ fn waited_copy_block_continues_branch_and_parent_with_local_variables() {
 
 #[test]
 fn waited_copy_block_keeps_header_edits_in_the_branch() {
-    let source = ":0 cw\n{\n:0\nheaders {\n set X-Branch: copy\n}\n}\n:0 c\n* ^X-Branch: copy$\nmaildir:changed\n:0 c\n* ! ^X-Branch: copy$\nmaildir:original\n";
+    let source = ":0 cw\n{\n:0\nheaders {\n set X-Branch copy\n}\n}\n:0 c\n* ^X-Branch: copy$\nmaildir:changed\n:0 c\n* ! ^X-Branch: copy$\nmaildir:original\n";
     let (outcome, recorder) = evaluate_config(source, b"Subject: test\n\nbody\n");
 
     assert_eq!(outcome, Outcome::Undelivered { copies: 2 });

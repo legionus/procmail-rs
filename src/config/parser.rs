@@ -916,15 +916,10 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
         ));
     }
 
-    let (name, value) = arguments.split_once(':').ok_or_else(|| {
-        ParseError::new(
-            line,
-            format!("header operation '{operation}' requires NAME: VALUE"),
-        )
-    })?;
-    let name = name.trim();
+    let (name, value) = arguments
+        .split_once(char::is_whitespace)
+        .map_or((arguments, ""), |(name, value)| (name, value.trim_start()));
     validate_header_name(name, line)?;
-    let value = value.trim_start();
     if value.ends_with('\\') {
         return Err(ParseError::new(
             line,

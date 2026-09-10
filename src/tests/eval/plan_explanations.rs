@@ -164,7 +164,7 @@ fn rendered_default_trace_excludes_message_and_configuration_values() {
 #[test]
 fn rendered_trace_excludes_edited_header_names_and_values() {
     let config = config::parse(
-        ":0\nheaders {\n add X-Private-Edited-Name: private-edited-value\n}\n:0\nmaildir:selected\n",
+        ":0\nheaders {\n add X-Private-Edited-Name private-edited-value\n}\n:0\nmaildir:selected\n",
     )
     .unwrap()
     .expand(&[])
@@ -245,7 +245,7 @@ fn explains_plan_shape_without_private_configuration_values() {
 #[test]
 fn explains_header_operation_kinds_without_private_fields() {
     let config = config::parse(
-        ":0\nheaders {\n remove X-Secret-Remove\n set X-Secret-Set: secret-set-value\n add X-Secret-Add: secret-add-value\n add X-Other-Add: other-add-value\n prepend X-Secret-Prepend: secret-prepend-value\n rename X-Secret-Old to X-Secret-New\n extract raw X-Secret-Value into PRIVATE_VALUE\n}\n",
+        ":0\nheaders {\n remove X-Secret-Remove\n set X-Secret-Set secret-set-value\n add X-Secret-Add secret-add-value\n add X-Other-Add other-add-value\n prepend X-Secret-Prepend secret-prepend-value\n rename X-Secret-Old to X-Secret-New\n extract raw X-Secret-Value into PRIVATE_VALUE\n}\n",
     )
     .unwrap()
     .expand(&[])

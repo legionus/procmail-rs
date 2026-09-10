@@ -496,7 +496,7 @@ fn check_and_explain_accept_pipe_actions_without_executing_them() {
 #[test]
 fn check_and_explain_accept_header_actions_without_reading_stdin() {
     let path = config_file(
-        ":0\nheaders {\n remove X-Private-Remove\n set X-Private-Set: private-set-value\n add X-Private-Add: private-add-value\n prepend X-Private-Prepend: private-prepend-value\n}\n",
+        ":0\nheaders {\n remove X-Private-Remove\n set X-Private-Set private-set-value\n add X-Private-Add private-add-value\n prepend X-Private-Prepend private-prepend-value\n}\n",
     );
     let input_path = path.parent().unwrap().join("message.eml");
     fs::write(&input_path, b"Subject: stdin-secret\n\nbody").unwrap();
@@ -1356,7 +1356,7 @@ fn runtime_include_header_edit_updates_following_parent_recipe() {
     let child_rc = mailbase.join("header.rc");
     fs::write(
         &child_rc,
-        ":0\nheaders {\n set X-Runtime-State: selected\n}\n",
+        ":0\nheaders {\n set X-Runtime-State selected\n}\n",
     )
     .unwrap();
     fs::set_permissions(&child_rc, fs::Permissions::from_mode(0o600)).unwrap();
@@ -3605,7 +3605,7 @@ fn filter_streams_edited_headers_with_binary_and_empty_bodies() {
         fs::write(
             &path,
             format!(
-                ":0\nheaders {{\n set X-State: new\n}}\n:0\nmaildir:{}\n",
+                ":0\nheaders {{\n set X-State new\n}}\n:0\nmaildir:{}\n",
                 maildir.display()
             ),
         )
@@ -3640,7 +3640,7 @@ fn filter_streams_edited_message_larger_than_its_address_space_limit() {
     fs::write(
         &path,
         format!(
-            "LIMIT_MSG_SIZE=96M\nLIMIT_MSG_BODY=96M\n:0\nheaders {{\n set X-State: new\n}}\n:0\nmaildir:{}\n",
+            "LIMIT_MSG_SIZE=96M\nLIMIT_MSG_BODY=96M\n:0\nheaders {{\n set X-State new\n}}\n:0\nmaildir:{}\n",
             maildir.display()
         ),
     )

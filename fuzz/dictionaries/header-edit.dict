@@ -3,9 +3,9 @@
 
 separator="\x00"
 remove="remove Subject"
-set="set Subject: changed"
-add="add X-Test: value"
-prepend="prepend Delivered-To: user@example.test"
+set="set Subject changed"
+add="add X-Test value"
+prepend="prepend Delivered-To user@example.test"
 rename="rename List-Id to X-List-Id"
 extract_raw="extract raw Subject into VALUE"
 extract_unfolded="extract unfolded Subject into VALUE"

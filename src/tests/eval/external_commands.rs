@@ -3,7 +3,7 @@
 
 #[test]
 fn external_action_observes_edited_headers() {
-    let config = config::parse(":0\nheaders {\n set X-State: new\n}\n:0 w\n| consume\n")
+    let config = config::parse(":0\nheaders {\n set X-State new\n}\n:0 w\n| consume\n")
         .unwrap()
         .expand(&[])
         .unwrap();

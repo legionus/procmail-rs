@@ -4,7 +4,7 @@
 #[test]
 fn header_edit_updates_following_header_rules_without_buffering_body() {
     let config = config::parse(
-        ":0\nheaders {\n set X-State: new\n}\n:0\n* ^X-State: new$\nmaildir:selected\n",
+        ":0\nheaders {\n set X-State new\n}\n:0\n* ^X-State: new$\nmaildir:selected\n",
     )
     .unwrap()
     .expand(&[])
@@ -28,7 +28,7 @@ fn header_edit_updates_following_header_rules_without_buffering_body() {
 #[test]
 fn ordered_header_edit_updates_later_delivery_bytes() {
     let config = config::parse(
-        ":0 B\n* needle\nheaders {\n add X-Body-Matched: yes\n}\n:0\n* ^X-Body-Matched: yes$\nmaildir:selected\n",
+        ":0 B\n* needle\nheaders {\n add X-Body-Matched yes\n}\n:0\n* ^X-Body-Matched: yes$\nmaildir:selected\n",
     )
     .unwrap()
     .expand(&[])

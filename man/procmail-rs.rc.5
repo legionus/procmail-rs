@@ -730,7 +730,7 @@ headers {
 }
 .EE
 .TP
-\f[CR]set NAME: VALUE\f[R]
+\f[CR]set NAME [VALUE]\f[R]
 Replace the first matching field at its existing position and remove
 every later duplicate.
 If no match exists, append one new field.
@@ -740,32 +740,32 @@ it replaces a field with different capitalization.
 .IP
 .EX
 headers {
-    set X\-Spam\-Status: checked
-    set X\-Empty:
+    set X\-Spam\-Status checked
+    set X\-Empty
 }
 .EE
 .TP
-\f[CR]add NAME: VALUE\f[R]
+\f[CR]add NAME [VALUE]\f[R]
 Append one field after all fields currently present.
 Existing fields with that name are retained, so repeated \f[CR]add\f[R]
 operations deliberately create repeated fields in source order.
 .IP
 .EX
 headers {
-    add Received: by first\-filter
-    add Received: by second\-filter
+    add Received by first\-filter
+    add Received by second\-filter
 }
 .EE
 .TP
-\f[CR]prepend NAME: VALUE\f[R]
+\f[CR]prepend NAME [VALUE]\f[R]
 Insert one field before every field currently present.
 Consequently, a later \f[CR]prepend\f[R] appears before an earlier
 \f[CR]prepend\f[R].
 .IP
 .EX
 headers {
-    prepend X\-Processed\-By: first
-    prepend X\-Processed\-By: second
+    prepend X\-Processed\-By first
+    prepend X\-Processed\-By second
 }
 .EE
 .PP
@@ -815,19 +815,18 @@ Repeated extraction into one variable follows operation order, with the
 last value winning.
 .PP
 \f[CR]NAME\f[R] must be non\-empty printable ASCII without whitespace or
-colon.
-Punctuation allowed by RFC\-style field names is preserved.
-The first colon separates name and value; later colons belong to
-\f[CR]VALUE\f[R]:
+colon, matching the \f[CR]1*ftext\f[R] field\-name syntax from RFC 5322.
+Punctuation allowed by that syntax is preserved.
+The first ASCII whitespace separates \f[CR]NAME\f[R] from
+\f[CR]VALUE\f[R]; colons in \f[CR]VALUE\f[R] are ordinary data:
 .IP
 .EX
 headers {
-    set X\-Source\-URI: imap://mail.example/inbox
+    set X\-Source\-URI imap://mail.example/inbox
 }
 .EE
 .PP
-Leading whitespace after the separating colon is removed by the rc
-parser.
+Leading whitespace before \f[CR]VALUE\f[R] is removed by the rc parser.
 New fields are serialized as \f[CR]NAME: VALUE\f[R] followed by the line
 ending chosen from the first physical input header line.
 If the input has no such line, the header/body separator selects CRLF or
@@ -845,7 +844,7 @@ used:
 :0
 * \(haList\-Id:.*<\(rs/([\(ha.>]+)\(rs.example>
 headers {
-    set X\-List\-Name: $MATCH1
+    set X\-List\-Name $MATCH1
 }
 .EE
 .PP
@@ -890,9 +889,9 @@ can be expressed without copying the message through a child:
 :0
 headers {
     remove X\-Spam\-Status
-    set X\-Filter: checked
-    add X\-Filter\-Result: clean
-    prepend X\-Processed\-By: procmail\-rs
+    set X\-Filter checked
+    add X\-Filter\-Result clean
+    prepend X\-Processed\-By procmail\-rs
 }
 .EE
 .PP
