@@ -669,7 +669,7 @@ Here the resulting order is `second`, then `first`, then the original fields.
 
 : Rename every matching field without changing its value, continuation lines,
   position, or line endings. Matching `OLD-NAME` ignores ASCII case, and all
-  renamed fields use the exact `NEW-NAME` spelling.
+  renamed fields use the stable ASCII title case described below.
 
 ```
 headers {
@@ -691,11 +691,37 @@ headers {
   space. It does not decode MIME words, parse addresses, or interpret the
   resulting bytes as UTF-8.
 
+`extract decoded NAME into VARIABLE`
+
+: Unfold the first matching value and decode RFC 2047 `B` and `Q`
+  encoded-words. Adjacent encoded-words are joined without their separating
+  whitespace. `UTF-8`, `US-ASCII`, and `ISO-8859-1` charset names are accepted
+  without regard to ASCII case; every other charset is rejected. Plain text
+  and the final result must be valid UTF-8. A malformed encoded-word,
+  unsupported transfer encoding, control character, or result exceeding
+  `MAX_ASSIGNMENT_VALUE_LEN` fails the complete `headers` action. Decoding is
+  performed once and the result is not interpreted as rc syntax.
+
 ```
 headers {
     extract unfolded To into MSG_TO
+    extract decoded Subject into MSG_SUBJECT
     extract raw X-Original into ORIGINAL_RAW
 }
+```
+
+The decoded value can be matched explicitly without changing the raw header
+matching behavior:
+
+```
+:0
+headers {
+    extract decoded Subject into MSG_SUBJECT
+}
+
+:0
+* MSG_SUBJECT ?? Scholar.*
+maildir:scholar/
 ```
 
 Extraction can assign only an ordinary user variable; message data cannot
@@ -717,6 +743,35 @@ headers {
 ```
 
 Leading whitespace before `VALUE` is removed by the rc parser.
+Names emitted by `set`, `add`, `prepend`, and `rename` use stable ASCII title
+case: the first letter and each letter after `-` is uppercase, while other
+ASCII letters are lowercase. Thus `x-SPAM-status` is emitted as
+`X-Spam-Status`. Existing fields that are not replaced or renamed retain their
+original spelling.
+
+Printable US-ASCII, space, and horizontal tab in `VALUE` are emitted without
+encoding. If `VALUE` contains non-ASCII Unicode, procmail-rs encodes the whole
+value as one or more RFC 2047 `UTF-8/B` encoded-words, splits only at UTF-8
+character boundaries, and folds between words. This is intended primarily for
+unstructured fields such as `Subject`:
+
+```
+headers {
+    set Subject Привет
+}
+```
+
+becomes `Subject: =?UTF-8?B?0J/RgNC40LLQtdGC?=`. Automatic encoding is a
+deliberate convenience compromise: RFC 2047 encoded-words are not valid in
+every position of every structured field. The action does not classify field
+types, so the configuration author remains responsible for choosing a field
+where encoded-words are permitted. An already encoded ASCII value is emitted
+unchanged. NUL and other control characters are rejected rather than encoded.
+
+An unencoded generated physical field line may not exceed 998 bytes excluding
+its line ending. RFC 2047 encoded-words are limited to 75 characters and lines
+containing them to 76 characters.
+
 New fields are serialized as `NAME: VALUE` followed by the line ending chosen
 from the first physical input header line. If the input has no such line, the
 header/body separator selects CRLF or LF; LF is the final fallback. Existing

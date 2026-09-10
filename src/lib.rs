@@ -25,6 +25,7 @@ pub mod eval;
 pub mod external_command;
 pub mod external_process;
 pub(crate) mod header_edit;
+pub(crate) mod header_value;
 pub mod hostname;
 pub mod limits;
 pub mod message;

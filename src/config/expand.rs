@@ -15,6 +15,7 @@ use super::{
     RecipeAction, ShellExpandedCondition, ShellExpression, ShellPart, Statement, SuppliedVariable,
     VariablePolicy, VariableSource, variable_policy,
 };
+use crate::header_value::validate_generated_header_value;
 
 #[derive(Debug, Clone)]
 struct ExpandedValue {
@@ -249,6 +250,7 @@ impl HeaderValue {
     pub(crate) fn resolve_with(
         &self,
         line: usize,
+        name: &str,
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<String, ExpansionError> {
         let parsed;
@@ -260,7 +262,7 @@ impl HeaderValue {
         };
         let value =
             evaluate_with_linebuf(expression, line, MAX_ASSIGNMENT_VALUE_LEN, &mut lookup)?.text;
-        validate_header_value(&value, line)?;
+        validate_header_value(name, &value, line)?;
         Ok(value)
     }
 }
@@ -272,15 +274,15 @@ impl HeaderAction {
     ) -> Result<Self, ExpansionError> {
         let mut resolved = self.clone();
         for operation in &mut resolved.operations {
-            let (line, value) = match operation {
+            let (line, name, value) = match operation {
                 HeaderOperation::Remove { .. }
                 | HeaderOperation::Rename { .. }
                 | HeaderOperation::Extract { .. } => continue,
-                HeaderOperation::Set { line, value, .. }
-                | HeaderOperation::Add { line, value, .. }
-                | HeaderOperation::Prepend { line, value, .. } => (*line, value),
+                HeaderOperation::Set { line, name, value }
+                | HeaderOperation::Add { line, name, value }
+                | HeaderOperation::Prepend { line, name, value } => (*line, name.as_str(), value),
             };
-            value.source = value.resolve_with(line, &mut lookup)?;
+            value.source = value.resolve_with(line, name, &mut lookup)?;
             value.expansion = None;
         }
         Ok(resolved)
@@ -1136,13 +1138,13 @@ fn prepare_header_action(
     dynamic: &BTreeSet<String>,
 ) -> Result<(), ExpansionError> {
     for operation in &mut action.operations {
-        let (line, value) = match operation {
+        let (line, name, value) = match operation {
             HeaderOperation::Remove { .. }
             | HeaderOperation::Rename { .. }
             | HeaderOperation::Extract { .. } => continue,
-            HeaderOperation::Set { line, value, .. }
-            | HeaderOperation::Add { line, value, .. }
-            | HeaderOperation::Prepend { line, value, .. } => (*line, value),
+            HeaderOperation::Set { line, name, value }
+            | HeaderOperation::Add { line, name, value }
+            | HeaderOperation::Prepend { line, name, value } => (*line, name.as_str(), value),
         };
         let expression = parse_expression(&value.source, line)?;
         reject_parameter_assignments(&expression, line, "native header value")?;
@@ -1159,18 +1161,18 @@ fn prepare_header_action(
                     known.get(name).map(|item| item.text.clone())
                 })?
                 .text;
-            validate_header_value(&expanded, line)?;
+            validate_header_value(name, &expanded, line)?;
         }
         value.expansion = Some(expression);
     }
     Ok(())
 }
 
-fn validate_header_value(value: &str, line: usize) -> Result<(), ExpansionError> {
-    if value.bytes().any(|byte| matches!(byte, 0 | b'\r' | b'\n')) {
+fn validate_header_value(name: &str, value: &str, line: usize) -> Result<(), ExpansionError> {
+    if let Err(reason) = validate_generated_header_value(name, value) {
         return Err(ExpansionError::new(
             line,
-            "expanded header value contains NUL, CR, or LF",
+            format!("expanded header value {}", reason.reason()),
         ));
     }
     Ok(())

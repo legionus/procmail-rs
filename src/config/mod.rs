@@ -412,6 +412,7 @@ pub enum HeaderOperation {
 pub enum HeaderExtractionMode {
     Raw,
     Unfolded,
+    Decoded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

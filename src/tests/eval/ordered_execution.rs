@@ -26,6 +26,29 @@ fn header_edit_updates_following_header_rules_without_buffering_body() {
 }
 
 #[test]
+fn decoded_header_extraction_drives_a_following_variable_condition() {
+    let config = config::parse(
+        ":0\nheaders {\n extract decoded Subject into MSG_SUBJECT\n}\n:0\n* MSG_SUBJECT ?? ^Scholar.*\nmaildir:selected\n",
+    )
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    let mut head = head(b"Subject: =?US-ASCII?Q?Scholar_alert?=\n\nbody");
+    let mut runtime = RuntimeVariables::default();
+
+    assert!(!plan.requirements().needs_end_of_message);
+    let result = plan.evaluate_headers_editing_with_trace(&mut head, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected a header-only decision");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+}
+
+#[test]
 fn ordered_header_edit_updates_later_delivery_bytes() {
     let config = config::parse(
         ":0 B\n* needle\nheaders {\n add X-Body-Matched yes\n}\n:0\n* ^X-Body-Matched: yes$\nmaildir:selected\n",
@@ -335,4 +358,3 @@ fn resume_does_not_repeat_the_header_prefix_trace() {
         1
     );
 }
-

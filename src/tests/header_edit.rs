@@ -48,8 +48,64 @@ fn operations_run_in_order_and_match_names_without_ascii_case() {
 
     assert_eq!(
         apply(header, 0, &action).as_bytes(),
-        b"First: yes\nA: one\nx-test: new\nZ: last\nX-Test: added\n\n"
+        b"First: yes\nA: one\nX-Test: new\nZ: last\nX-Test: added\n\n"
     );
+}
+
+#[test]
+fn generated_field_names_use_stable_ascii_casing() {
+    let header = b"legacy-ID: one\n\n";
+    let action = action(vec![
+        HeaderOperation::Rename {
+            line: 1,
+            from: "legacy-id".into(),
+            to: "MESSAGE-id".into(),
+        },
+        HeaderOperation::Add {
+            line: 2,
+            name: "x-SPAM-status".into(),
+            value: value("yes"),
+        },
+    ]);
+
+    assert_eq!(
+        apply(header, 0, &action).as_bytes(),
+        b"Message-Id: one\nX-Spam-Status: yes\n\n"
+    );
+}
+
+#[test]
+fn generated_fields_encode_non_ascii_values_and_reject_overlong_ascii_lines() {
+    let non_ascii = action(vec![HeaderOperation::Add {
+        line: 1,
+        name: "Subject".into(),
+        value: value("\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}"),
+    }]);
+    assert_eq!(
+        apply(b"\n", 0, &non_ascii).as_bytes(),
+        b"Subject: =?UTF-8?B?0J/RgNC40LLQtdGC?=\n\n"
+    );
+
+    let name = "X";
+    let maximum_value = RFC5322_HEADER_LINE_LIMIT - "X: ".len();
+    for size in [maximum_value - 1, maximum_value, maximum_value + 1] {
+        let operation = action(vec![HeaderOperation::Add {
+            line: 1,
+            name: name.into(),
+            value: value(&"x".repeat(size)),
+        }]);
+        let result = apply_header_action(b"\n", 0, &operation, MessageLimits::default());
+        if size <= maximum_value {
+            assert!(result.is_ok(), "size {size}");
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                HeaderEditError::GeneratedLineTooLong {
+                    limit: RFC5322_HEADER_LINE_LIMIT,
+                }
+            );
+        }
+    }
 }
 
 #[test]
@@ -122,6 +178,25 @@ fn extraction_reads_the_first_field_after_preceding_edits() {
                 value: Vec::new(),
             },
         ]
+    );
+}
+
+#[test]
+fn decoded_extraction_unfolds_and_decodes_adjacent_words() {
+    let header = b"Subject: =?UTF-8?B?0J/RgNC4?=\r\n =?UTF-8?B?0LLQtdGC?=\r\n\r\n";
+    let action = action(vec![HeaderOperation::Extract {
+        line: 1,
+        name: "Subject".into(),
+        target: "SUBJECT".into(),
+        mode: HeaderExtractionMode::Decoded,
+    }]);
+
+    let (_, extracted) = apply_header_action(header, 0, &action, MessageLimits::default())
+        .unwrap()
+        .into_parts();
+    assert_eq!(
+        extracted[0].value,
+        "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}".as_bytes()
     );
 }
 

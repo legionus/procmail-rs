@@ -1839,15 +1839,35 @@ fn parses_typed_header_action_operations() {
 }
 
 #[test]
+fn parses_decoded_header_extraction() {
+    let config = parse(":0\nheaders {\n extract decoded Subject into MSG_SUBJECT\n}\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let RecipeAction::Headers(action) = &recipe.action else {
+        panic!("expected headers action");
+    };
+    assert!(matches!(
+        &action.operations[0],
+        HeaderOperation::Extract {
+            name,
+            target,
+            mode: HeaderExtractionMode::Decoded,
+            ..
+        } if name == "Subject" && target == "MSG_SUBJECT"
+    ));
+}
+
+#[test]
 fn rejects_malformed_or_privileged_header_extraction() {
     for (operation, message) in [
         (
-            "extract decoded Subject into VALUE",
-            "header extraction mode must be 'raw' or 'unfolded'",
+            "extract mime Subject into VALUE",
+            "header extraction mode must be 'raw', 'unfolded', or 'decoded'",
         ),
         (
             "extract raw Subject as VALUE",
-            "header operation 'extract' requires raw|unfolded NAME into VARIABLE",
+            "header operation 'extract' requires raw|unfolded|decoded NAME into VARIABLE",
         ),
         (
             "extract raw Subject into MAILDIR",

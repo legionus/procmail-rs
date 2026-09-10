@@ -391,7 +391,8 @@ fn parse_wide(input: &str) -> Result<Config, super::super::ParseError> {
     state.set_linebuf(super::super::MAX_LINEBUF);
     super::super::parse_with_state(input, &mut state)
 }
-use crate::config::{ConditionKind, DEFAULT_LINEBUF, MAX_SHELL_SETTING_LEN, parse};
+use crate::config::{ConditionKind, MAX_SHELL_SETTING_LEN, parse};
+use crate::header_value::RFC5322_HEADER_LINE_LIMIT;
 
 fn prepared_header_value(source: &str, known_value: &str) -> Result<String, ExpansionError> {
     let mut action = HeaderAction {
@@ -415,7 +416,9 @@ fn prepared_header_value(source: &str, known_value: &str) -> Result<String, Expa
     let HeaderOperation::Set { value, .. } = &action.operations[0] else {
         panic!("expected set operation");
     };
-    value.resolve_with(9, |name| known.get(name).map(|item| item.text.clone()))
+    value.resolve_with(9, "X-Test", |name| {
+        known.get(name).map(|item| item.text.clone())
+    })
 }
 
 #[test]
@@ -439,24 +442,28 @@ fn rejects_invalid_or_unsafe_expanded_header_values() {
     assert_eq!(error.line, 9);
     assert_eq!(
         error.message,
-        "expanded header value contains NUL, CR, or LF"
+        "expanded header value contains a control character that cannot be represented in a header field"
+    );
+
+    assert_eq!(
+        prepared_header_value("$VALUE", "non-ASCII: \u{e9}").unwrap(),
+        "non-ASCII: \u{e9}"
     );
 }
 
 #[test]
-fn bounds_expanded_header_values_at_linebuf() {
-    for size in [DEFAULT_LINEBUF - 1, DEFAULT_LINEBUF, DEFAULT_LINEBUF + 1] {
+fn bounds_generated_header_lines_at_the_rfc5322_limit() {
+    let maximum_value = RFC5322_HEADER_LINE_LIMIT - "X-Test: ".len();
+    for size in [maximum_value - 1, maximum_value, maximum_value + 1] {
         let result = prepared_header_value("$VALUE", &"x".repeat(size));
-        if size <= DEFAULT_LINEBUF {
+        if size <= maximum_value {
             assert_eq!(result.unwrap().len(), size);
         } else {
             let error = result.unwrap_err();
             assert_eq!(error.line, 9);
             assert_eq!(
                 error.message,
-                format!(
-                    "expanded value exceeds the active LINEBUF limit of {DEFAULT_LINEBUF} bytes"
-                )
+                "expanded header value would exceed the RFC 5322 limit of 998 bytes per line"
             );
         }
     }
@@ -480,7 +487,9 @@ fn keeps_runtime_header_references_structured() {
         panic!("expected add operation");
     };
     assert_eq!(
-        value.resolve_with(7, |name| (name == "MATCH").then(|| "selected".into())),
+        value.resolve_with(7, "X-Match", |name| {
+            (name == "MATCH").then(|| "selected".into())
+        }),
         Ok("selected".into())
     );
 }

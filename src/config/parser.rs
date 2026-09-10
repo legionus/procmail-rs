@@ -886,16 +886,17 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
         ) else {
             return Err(ParseError::new(
                 line,
-                "header operation 'extract' requires raw|unfolded NAME into VARIABLE",
+                "header operation 'extract' requires raw|unfolded|decoded NAME into VARIABLE",
             ));
         };
         let mode = match mode {
             "raw" => HeaderExtractionMode::Raw,
             "unfolded" => HeaderExtractionMode::Unfolded,
+            "decoded" => HeaderExtractionMode::Decoded,
             _ => {
                 return Err(ParseError::new(
                     line,
-                    "header extraction mode must be 'raw' or 'unfolded'",
+                    "header extraction mode must be 'raw', 'unfolded', or 'decoded'",
                 ));
             }
         };

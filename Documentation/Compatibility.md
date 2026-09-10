@@ -276,14 +276,28 @@ follows:
 | `rename OLD-NAME to NEW-NAME` | Renames every matching field while preserving values, folding, ordering, and line endings. |
 | `extract raw NAME into VARIABLE` | Assigns the first field value without its name, colon, or final line ending while preserving leading whitespace and folds. |
 | `extract unfolded NAME into VARIABLE` | Assigns the first field value after removing leading horizontal whitespace from each physical line and joining folds with one space. |
+| `extract decoded NAME into VARIABLE` | Unfolds the first value and strictly decodes RFC 2047 `B` or `Q` encoded-words using UTF-8, US-ASCII, or ISO-8859-1. Unknown charsets, malformed words, invalid text, and oversized output fail the action. |
 
 `NAME` must follow RFC 5322 `1*ftext`: non-empty ASCII `33..=126` without
-`:`, which also excludes whitespace. `VALUE` uses the
-documented bounded parameter forms when the action executes. NUL, CR, LF, and
-requested folded continuations are rejected.
+`:`, which also excludes whitespace. Generated names use stable ASCII title
+case at hyphen boundaries; unchanged input names retain their original
+spelling. `VALUE` uses the documented bounded parameter forms when the action
+executes. Printable US-ASCII, space, and tab are emitted directly. A value
+containing non-ASCII Unicode is automatically encoded as bounded RFC 2047
+`UTF-8/B` encoded-words without splitting a UTF-8 character. This convenience
+does not classify structured fields, so configurations remain responsible for
+using automatic encoded-words only where RFC 2047 permits them. Control
+characters are rejected. Unencoded generated lines are limited to the RFC 5322
+maximum of 998 bytes excluding their endings; encoded-words and their lines use
+the RFC 2047 limits of 75 and 76 characters. Requested folded continuations are
+rejected.
+
 Inserted values are not reparsed as shell text. Existing fields and the body
-remain byte-for-byte unchanged. New fields use the first physical header
-line's LF or CRLF ending, or the separator's ending when the header is empty.
+remain byte-for-byte unchanged. New fields use the first physical header line's
+LF or CRLF ending, or the separator's ending when the header is empty.
+Ordinary `H` conditions continue to match the byte-preserved raw header view;
+decoded matching is deliberately explicit through `extract decoded` and a
+following variable condition.
 
 The condition and control flags `H`, `B`, `D`, `c`, `A`, `a`, `E`, and `e` are
 accepted with their usual meanings. The action always continues after a

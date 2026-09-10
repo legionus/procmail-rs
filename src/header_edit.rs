@@ -7,6 +7,10 @@ use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use crate::config::{
     HeaderAction, HeaderExtractionMode, HeaderOperation, MAX_ASSIGNMENT_VALUE_LEN,
 };
+use crate::header_value::{
+    DecodedHeaderError, GeneratedHeaderError, RFC5322_HEADER_LINE_LIMIT,
+    append_canonical_header_name, decode_rfc2047, serialize_generated_header,
+};
 use crate::limits::MessageLimits;
 use crate::message::MessageLimit;
 
@@ -55,6 +59,9 @@ impl EditedHeader {
 pub(crate) enum HeaderEditError {
     SizeOverflow,
     LimitExceeded { kind: MessageLimit, limit: usize },
+    InvalidGeneratedValue,
+    GeneratedLineTooLong { limit: usize },
+    Decode(DecodedHeaderError),
     ExtractedValueTooLong { limit: usize },
 }
 
@@ -65,6 +72,16 @@ impl fmt::Display for HeaderEditError {
             Self::LimitExceeded { kind, limit } => {
                 write!(formatter, "edited message exceeds {kind} ({limit} bytes)")
             }
+            Self::InvalidGeneratedValue => formatter.write_str(
+                "generated header value contains a control character that cannot be represented",
+            ),
+            Self::GeneratedLineTooLong { limit } => {
+                write!(
+                    formatter,
+                    "generated header line exceeds RFC 5322 limit ({limit} bytes)"
+                )
+            }
+            Self::Decode(error) => formatter.write_str(error.description()),
             Self::ExtractedValueTooLong { limit } => {
                 write!(
                     formatter,
@@ -229,7 +246,7 @@ fn rename_field(field: &[u8], name: &str) -> Result<Vec<u8>, HeaderEditError> {
         .checked_add(suffix.len())
         .ok_or(HeaderEditError::SizeOverflow)?;
     let mut renamed = Vec::with_capacity(size);
-    renamed.extend_from_slice(name.as_bytes());
+    append_canonical_header_name(&mut renamed, name);
     renamed.extend_from_slice(suffix);
     Ok(renamed)
 }
@@ -258,6 +275,10 @@ fn extract_value(field: &[u8], mode: HeaderExtractionMode) -> Result<Vec<u8>, He
             Ok(value.to_vec())
         }
         HeaderExtractionMode::Unfolded => unfold_value(value),
+        HeaderExtractionMode::Decoded => {
+            let unfolded = unfold_value(value)?;
+            decode_rfc2047(&unfolded, MAX_ASSIGNMENT_VALUE_LEN).map_err(HeaderEditError::Decode)
+        }
     }
 }
 
@@ -391,18 +412,13 @@ fn check_limit(size: usize, limit: usize, kind: MessageLimit) -> Result<(), Head
 }
 
 fn make_field(name: &str, value: &str, line_ending: &[u8]) -> Result<Vec<u8>, HeaderEditError> {
-    let size = name
-        .len()
-        .checked_add(2)
-        .and_then(|size| size.checked_add(value.len()))
-        .and_then(|size| size.checked_add(line_ending.len()))
-        .ok_or(HeaderEditError::SizeOverflow)?;
-    let mut field = Vec::with_capacity(size);
-    field.extend_from_slice(name.as_bytes());
-    field.extend_from_slice(b": ");
-    field.extend_from_slice(value.as_bytes());
-    field.extend_from_slice(line_ending);
-    Ok(field)
+    serialize_generated_header(name, value, line_ending).map_err(|error| match error {
+        GeneratedHeaderError::InvalidValue => HeaderEditError::InvalidGeneratedValue,
+        GeneratedHeaderError::LineTooLong => HeaderEditError::GeneratedLineTooLong {
+            limit: RFC5322_HEADER_LINE_LIMIT,
+        },
+        GeneratedHeaderError::SizeOverflow => HeaderEditError::SizeOverflow,
+    })
 }
 
 fn split_fields(header: &[u8]) -> (Vec<Field<'_>>, &[u8], &[u8]) {

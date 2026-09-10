@@ -776,7 +776,7 @@ then the original fields.
 Rename every matching field without changing its value, continuation
 lines, position, or line endings.
 Matching \f[CR]OLD\-NAME\f[R] ignores ASCII case, and all renamed fields
-use the exact \f[CR]NEW\-NAME\f[R] spelling.
+use the stable ASCII title case described below.
 .IP
 .EX
 headers {
@@ -798,12 +798,41 @@ from each physical value line and joining continuation lines with one
 ASCII space.
 It does not decode MIME words, parse addresses, or interpret the
 resulting bytes as UTF\-8.
+.TP
+\f[CR]extract decoded NAME into VARIABLE\f[R]
+Unfold the first matching value and decode RFC 2047 \f[CR]B\f[R] and
+\f[CR]Q\f[R] encoded\-words.
+Adjacent encoded\-words are joined without their separating whitespace.
+\f[CR]UTF\-8\f[R], \f[CR]US\-ASCII\f[R], and \f[CR]ISO\-8859\-1\f[R]
+charset names are accepted without regard to ASCII case; every other
+charset is rejected.
+Plain text and the final result must be valid UTF\-8.
+A malformed encoded\-word, unsupported transfer encoding, control
+character, or result exceeding \f[CR]MAX_ASSIGNMENT_VALUE_LEN\f[R] fails
+the complete \f[CR]headers\f[R] action.
+Decoding is performed once and the result is not interpreted as rc
+syntax.
 .IP
 .EX
 headers {
     extract unfolded To into MSG_TO
+    extract decoded Subject into MSG_SUBJECT
     extract raw X\-Original into ORIGINAL_RAW
 }
+.EE
+.PP
+The decoded value can be matched explicitly without changing the raw
+header matching behavior:
+.IP
+.EX
+:0
+headers {
+    extract decoded Subject into MSG_SUBJECT
+}
+
+:0
+* MSG_SUBJECT ?? Scholar.*
+maildir:scholar/
 .EE
 .PP
 Extraction can assign only an ordinary user variable; message data
@@ -827,6 +856,45 @@ headers {
 .EE
 .PP
 Leading whitespace before \f[CR]VALUE\f[R] is removed by the rc parser.
+Names emitted by \f[CR]set\f[R], \f[CR]add\f[R], \f[CR]prepend\f[R], and
+\f[CR]rename\f[R] use stable ASCII title case: the first letter and each
+letter after \f[CR]\-\f[R] is uppercase, while other ASCII letters are
+lowercase.
+Thus \f[CR]x\-SPAM\-status\f[R] is emitted as
+\f[CR]X\-Spam\-Status\f[R].
+Existing fields that are not replaced or renamed retain their original
+spelling.
+.PP
+Printable US\-ASCII, space, and horizontal tab in \f[CR]VALUE\f[R] are
+emitted without encoding.
+If \f[CR]VALUE\f[R] contains non\-ASCII Unicode, procmail\-rs encodes
+the whole value as one or more RFC 2047 \f[CR]UTF\-8/B\f[R]
+encoded\-words, splits only at UTF\-8 character boundaries, and folds
+between words.
+This is intended primarily for unstructured fields such as
+\f[CR]Subject\f[R]:
+.IP
+.EX
+headers {
+    set Subject Привет
+}
+.EE
+.PP
+becomes \f[CR]Subject: =?UTF\-8?B?0J/RgNC40LLQtdGC?=\f[R].
+Automatic encoding is a deliberate convenience compromise: RFC 2047
+encoded\-words are not valid in every position of every structured
+field.
+The action does not classify field types, so the configuration author
+remains responsible for choosing a field where encoded\-words are
+permitted.
+An already encoded ASCII value is emitted unchanged.
+NUL and other control characters are rejected rather than encoded.
+.PP
+An unencoded generated physical field line may not exceed 998 bytes
+excluding its line ending.
+RFC 2047 encoded\-words are limited to 75 characters and lines
+containing them to 76 characters.
+.PP
 New fields are serialized as \f[CR]NAME: VALUE\f[R] followed by the line
 ending chosen from the first physical input header line.
 If the input has no such line, the header/body separator selects CRLF or
