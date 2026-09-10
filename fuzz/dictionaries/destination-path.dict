@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
+
+separator="\x00"
+variable="$FUZZ_VALUE"
+braced="${FUZZ_VALUE}"
+default="${FUZZ_VALUE:-fallback}"
+command="`fuzz-command`"
+maildir="maildir:"
+mbox="mbox:"
+discard="/dev/null"
+parent="../"
+current="./"
+repeated="//"
+absolute="/var/mail/fuzz"
+relative="relative/path"

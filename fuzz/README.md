@@ -19,6 +19,7 @@ rustup run nightly cargo fuzz run shell-pattern -- -max_total_time=30 -dict=fuzz
 rustup run nightly cargo fuzz run regex -- -max_total_time=30 -dict=fuzz/dictionaries/regex.dict
 rustup run nightly cargo fuzz run header-edit -- -max_total_time=30 -dict=fuzz/dictionaries/header-edit.dict
 rustup run nightly cargo fuzz run ordered-evaluation -- -max_total_time=30 -dict=fuzz/dictionaries/ordered-evaluation.dict
+rustup run nightly cargo fuzz run destination-path -- -max_total_time=30 -dict=fuzz/dictionaries/destination-path.dict
 ```
 
 The shell targets use deterministic variable and command results. They never
@@ -35,6 +36,11 @@ applies it to a separately bounded byte message, and reparses successful output.
 The ordered-evaluation target separates a UTF-8 rc file from arbitrary message
 bytes with a NUL byte. It uses deterministic, bounded in-memory replacements
 for commands, runtime rc loading, delivery, locking, and trace collection.
+
+The destination-path target uses two NUL separators to split a destination
+expression, variable value, and `MAILDIR` base. It exercises explicit and
+implicit backends, runtime expansion, command output, and path validation
+without inspecting or modifying the filesystem.
 
 Longer release-candidate jobs should retain and review any generated corpus or
 crash artifact before adding it to the repository.

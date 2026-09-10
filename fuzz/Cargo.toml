@@ -70,5 +70,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "destination-path"
+path = "fuzz_targets/destination_path.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

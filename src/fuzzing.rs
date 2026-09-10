@@ -287,6 +287,95 @@ pub fn ordered_evaluation(data: &[u8]) {
     let _ = plan.take_rc_diagnostics();
 }
 
+pub fn destination_path(data: &[u8]) {
+    let Some((&selector, input)) = data.split_first() else {
+        return;
+    };
+    let mut parts = input.splitn(3, |byte| *byte == 0);
+    let (Some(expression), Some(value), Some(base)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return;
+    };
+    let (Ok(expression), Ok(value), Ok(base)) = (
+        std::str::from_utf8(expression),
+        std::str::from_utf8(value),
+        std::str::from_utf8(base),
+    ) else {
+        return;
+    };
+    let action = match selector & 3 {
+        0 => format!("maildir:{expression}"),
+        1 => format!("mbox:{expression}"),
+        2 => expression.to_owned(),
+        _ => format!("{expression}/"),
+    };
+    let source = format!(":0\n{action}\n");
+    let mut supplied = fuzz_supplied_variables().to_vec();
+    let Ok(variable) = crate::config::SuppliedVariable::parse(format!("FUZZ_VALUE={value}")) else {
+        return;
+    };
+    supplied.push(variable);
+    if selector & 4 != 0 {
+        let Ok(maildir) = crate::config::SuppliedVariable::parse(format!("MAILDIR={base}")) else {
+            return;
+        };
+        supplied.push(maildir);
+    }
+    let Ok(config) = crate::config::parse(&source) else {
+        return;
+    };
+    let Ok(config) = config.expand(&supplied) else {
+        return;
+    };
+
+    // Resolve every nested destination through the production API. Command
+    // output is evaluated in memory and admitted only as UTF-8, matching the
+    // filesystem-path boundary without running a shell or opening any path.
+    exercise_destination_statements(&config.statements, selector, value, base, data);
+}
+
+fn exercise_destination_statements(
+    statements: &[Statement],
+    selector: u8,
+    value: &str,
+    base: &str,
+    data: &[u8],
+) {
+    for statement in statements {
+        let Statement::Recipe(recipe) = statement else {
+            continue;
+        };
+        match &recipe.action {
+            RecipeAction::Deliver(destination) => {
+                let lookup = |name: &str| match name {
+                    "FUZZ_VALUE" => Some(value.to_owned()),
+                    "MAILDIR" if selector & 4 != 0 => Some(base.to_owned()),
+                    _ => None,
+                };
+                if let Some(expression) = destination.command_expression() {
+                    let mut context = FuzzContext { selector, data };
+                    if let Ok(evaluated) = shell_eval::evaluate(
+                        expression,
+                        crate::config::MAX_PATH_EXPRESSION_LEN,
+                        &mut context,
+                    ) {
+                        if let Ok(path) = String::from_utf8(evaluated.bytes) {
+                            let runtime_base = (selector & 4 != 0).then_some(base);
+                            let _ = destination.resolve_ordered_output(path, runtime_base);
+                        }
+                    }
+                } else {
+                    let _ = destination.resolve_with(lookup);
+                }
+            }
+            RecipeAction::Block(children) => {
+                exercise_destination_statements(children, selector, value, base, data);
+            }
+            RecipeAction::Pipe(_) | RecipeAction::Capture(_) | RecipeAction::Headers(_) => {}
+        }
+    }
+}
+
 fn fuzz_supplied_variables() -> [crate::config::SuppliedVariable; 4] {
     [
         crate::config::SuppliedVariable::from_environment("HOME", "/fuzz/home".to_owned())
