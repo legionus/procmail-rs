@@ -7,6 +7,7 @@ use regex_syntax::ast::parse::ParserBuilder as AstParserBuilder;
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 
+use super::syntax_cursor::SyntaxCursor;
 use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaptureAction, CaseMode,
     ChildStatusMode, CommandAssignment, Condition, ConditionInput, ConditionKind, Config,
@@ -843,24 +844,39 @@ fn validate_header_action_recipe(
 }
 
 fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, ParseError> {
-    let (operation, arguments) = text.split_once(char::is_whitespace).ok_or_else(|| {
-        ParseError::new(line, format!("header operation '{text}' has no arguments"))
-    })?;
-    let arguments = arguments.trim_start();
+    let mut syntax = SyntaxCursor::new(text);
+    let operation = syntax
+        .word()
+        .ok_or_else(|| ParseError::new(line, "empty headers operation"))?;
+    if syntax.is_end() {
+        return Err(ParseError::new(
+            line,
+            format!("header operation '{text}' has no arguments"),
+        ));
+    }
 
     if operation == "remove" {
-        validate_header_name(arguments, line)?;
+        let name = syntax
+            .word()
+            .ok_or_else(|| ParseError::new(line, "header operation 'remove' requires NAME"))?;
+        if !syntax.is_end() {
+            return Err(ParseError::new(
+                line,
+                "header operation 'remove' requires NAME",
+            ));
+        }
+        validate_header_name(name, line)?;
         return Ok(HeaderOperation::Remove {
             line,
-            name: arguments.to_owned(),
+            name: name.to_owned(),
         });
     }
 
     if operation == "rename" {
-        let mut parts = arguments.split_ascii_whitespace();
-        if let (Some(from), Some("to"), Some(to), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        {
+        let from = syntax.word();
+        let separator = syntax.keyword("to");
+        let to = syntax.word();
+        if let (Some(from), true, Some(to), true) = (from, separator, to, syntax.is_end()) {
             validate_header_name(from, line)?;
             validate_header_name(to, line)?;
             return Ok(HeaderOperation::Rename {
@@ -876,14 +892,13 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
     }
 
     if operation == "extract" {
-        let mut parts = arguments.split_ascii_whitespace();
-        let (Some(mode), Some(name), Some("into"), Some(target), None) = (
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-        ) else {
+        let mode = syntax.word();
+        let name = syntax.word();
+        let separator = syntax.keyword("into");
+        let target = syntax.word();
+        let (Some(mode), Some(name), true, Some(target), true) =
+            (mode, name, separator, target, syntax.is_end())
+        else {
             return Err(ParseError::new(
                 line,
                 "header operation 'extract' requires raw|unfolded|decoded NAME into VARIABLE",
@@ -917,9 +932,16 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
         ));
     }
 
-    let (name, value) = arguments
-        .split_once(char::is_whitespace)
-        .map_or((arguments, ""), |(name, value)| (name, value.trim_start()));
+    // Header values belong to the shell-expression parser. Consume only the
+    // command name and field name here so whitespace and quoting in the value
+    // reach that parser unchanged.
+    let name = syntax.word().ok_or_else(|| {
+        ParseError::new(
+            line,
+            format!("header operation '{operation}' requires NAME [VALUE]"),
+        )
+    })?;
+    let value = syntax.remainder();
     validate_header_name(name, line)?;
     if value.ends_with('\\') {
         return Err(ParseError::new(

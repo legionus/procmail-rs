@@ -1897,6 +1897,37 @@ fn rejects_malformed_header_rename() {
 }
 
 #[test]
+fn header_operation_keywords_are_separate_tokens() {
+    for operation in [
+        "rename X-Old today X-New",
+        "rename X-Old toX-New",
+        "extract raw Subject intoVALUE",
+        "extract raw Subject into VALUE trailing",
+        "remove X-Test trailing",
+    ] {
+        let error = parse(&format!(":0\nheaders {{\n {operation}\n}}\n")).unwrap_err();
+        assert_eq!(error.line, 3, "{operation}");
+    }
+}
+
+#[test]
+fn header_value_is_preserved_as_an_opaque_remainder() {
+    let config =
+        parse(":0\nheaders {\n set Subject\t\"${PREFIX}:  two  spaces and:colons\"\n}\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    let RecipeAction::Headers(action) = &recipe.action else {
+        panic!("expected headers action");
+    };
+    let HeaderOperation::Set { value, .. } = &action.operations[0] else {
+        panic!("expected set operation");
+    };
+
+    assert_eq!(value.source, "\"${PREFIX}:  two  spaces and:colons\"");
+}
+
+#[test]
 fn reports_unknown_header_operation_at_its_source_line() {
     let error = parse(":0\nheaders {\n replace X-Test: value\n}\n").unwrap_err();
 

@@ -5,6 +5,7 @@ pub(crate) mod expand;
 mod parser;
 pub(crate) mod shell_eval;
 pub(crate) mod shell_pattern;
+mod syntax_cursor;
 mod variables;
 
 use std::fmt;
