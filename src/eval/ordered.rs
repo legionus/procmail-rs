@@ -24,10 +24,16 @@ impl BackgroundCopyBudget {
     }
 
     pub(super) fn reserve(&self, line: usize) -> Result<(), EvalError> {
-        self.started
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |started| {
-                (started < MAX_BACKGROUND_COPY_BRANCHES).then_some(started + 1)
-            })
+        // Rust newer than the supported 1.85 release renamed this operation
+        // to `try_update`. Keep the older spelling until the minimum compiler
+        // can provide the replacement.
+        #[allow(deprecated)]
+        let reservation =
+            self.started
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |started| {
+                    (started < MAX_BACKGROUND_COPY_BRANCHES).then_some(started + 1)
+                });
+        reservation
             .map(|_| ())
             .map_err(|_| EvalError::BackgroundCopyUnavailable {
                 line,

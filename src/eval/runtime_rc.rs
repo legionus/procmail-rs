@@ -192,13 +192,17 @@ pub(super) struct RcExecutionContext<'a> {
 
 impl RcExecutionContext<'_> {
     fn push_warning(self, diagnostic: String) {
-        let admitted = self
-            .state
-            .warning_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                (count < MAX_RUNTIME_RC_WARNINGS).then_some(count + 1)
-            })
-            .is_ok();
+        // Rust newer than the supported 1.85 release renamed this operation
+        // to `try_update`. Keep the older spelling until the minimum compiler
+        // can provide the replacement.
+        #[allow(deprecated)]
+        let admitted =
+            self.state
+                .warning_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    (count < MAX_RUNTIME_RC_WARNINGS).then_some(count + 1)
+                });
+        let admitted = admitted.is_ok();
         if admitted {
             self.state
                 .diagnostics
@@ -219,19 +223,23 @@ impl RcExecutionContext<'_> {
     }
 
     fn record_transition(self) -> Result<(), EvalError> {
-        self.state
-            .transitions
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                count
-                    .checked_add(1)
-                    .filter(|next| *next <= MAX_RC_TRANSITIONS)
-            })
-            .map(|_| ())
-            .map_err(|_| {
-                EvalError::RuntimeRc(format!(
-                    "rc transitions exceed the hard limit of {MAX_RC_TRANSITIONS}"
-                ))
-            })
+        // Rust newer than the supported 1.85 release renamed this operation
+        // to `try_update`. Keep the older spelling until the minimum compiler
+        // can provide the replacement.
+        #[allow(deprecated)]
+        let transition =
+            self.state
+                .transitions
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    count
+                        .checked_add(1)
+                        .filter(|next| *next <= MAX_RC_TRANSITIONS)
+                });
+        transition.map(|_| ()).map_err(|_| {
+            EvalError::RuntimeRc(format!(
+                "rc transitions exceed the hard limit of {MAX_RC_TRANSITIONS}"
+            ))
+        })
     }
 }
 
