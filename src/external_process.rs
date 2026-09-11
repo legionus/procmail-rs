@@ -294,7 +294,8 @@ impl ChildLifecycle {
         let invocation = policy
             .authorize(environment)
             .map_err(|error| process_error(error.to_string()))?;
-        let mut child = Command::new(invocation.path())
+        let mut child = Command::new(invocation.path());
+        child
             .arg(invocation.flags())
             .arg(command)
             .env_clear()
@@ -302,7 +303,17 @@ impl ChildLifecycle {
             .stdin(Stdio::piped())
             .stdout(stdout)
             .stderr(stderr)
-            .process_group(0)
+            .process_group(0);
+
+        // Original procmail makes MAILDIR the current directory for commands.
+        // Set it on the child instead of changing this process directory: copy
+        // branches and unwaited recipes may spawn concurrently, so a global
+        // directory change could make one branch execute in another branch's
+        // MAILDIR.
+        if let Some(maildir) = environment.get("MAILDIR").filter(|path| !path.is_empty()) {
+            child.current_dir(maildir);
+        }
+        let mut child = child
             .spawn()
             .map_err(|error| process_error(format!("cannot start external command: {error}")))?;
         let stdin = child.stdin.take().ok_or_else(|| {

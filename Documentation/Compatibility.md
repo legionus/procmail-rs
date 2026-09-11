@@ -119,7 +119,11 @@ Shell command text is passed to the selected trusted shell. Shell parsing,
 environment-prefix assignments, quoting, expansion, redirection, and pipelines
 therefore follow that shell rather than an internal command tokenizer. Rc
 variable expansion remains the limited syntax listed above and does not become
-general shell evaluation.
+general shell evaluation. A child shell uses the active non-empty `MAILDIR` as
+its working directory, matching the paths visible to commands under original
+procmail. Procmail-rs applies that directory to each child instead of changing
+the parent process directory, so concurrent copy branches cannot affect one
+another.
 
 ## Shell-expanded conditions
 

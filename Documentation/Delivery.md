@@ -23,6 +23,10 @@ recipe is selected, so values such as `$MATCH` and `$LASTFOLDER` can participate
 in runtime selection. Empty paths, NUL, `.` or `..` components, repeated
 separators, and an unexpected trailing separator are rejected.
 
+External commands likewise start in the active non-empty `MAILDIR`. This is
+applied to the child process rather than through a process-wide directory
+change, allowing concurrent copy branches to use their own runtime values.
+
 All Maildir components, including `tmp`, `new`, and `cur`, are opened relative
 to an already opened directory with symlink following disabled. The three
 directories must already exist. Mbox parent components and the final regular

@@ -889,8 +889,10 @@ statement order.
 
 : Base directory for following relative destination, staging, lock, include,
   switch, and log paths. It has no implicit default; when unset or empty,
-  relative paths use the process working directory. Assignment does not change
-  the process working directory.
+  relative paths use the process working directory. Every external command is
+  started with the active non-empty `MAILDIR` as its working directory. The
+  parent process directory is left unchanged so concurrent copy branches can
+  use different values safely.
 
 `DURABILITY`
 
