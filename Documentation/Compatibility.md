@@ -35,7 +35,7 @@ a supported regex, assignment value, or destination.
 | Syntax area | Supported forms |
 | --- | --- |
 | Statements | `NAME=value`, assignments containing backquoted commands, `INCLUDERC=expression`, `SWITCHRC=expression`, recipes, and nested recipe blocks |
-| Variable references | `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`, `${NAME+word}`, and `${NAME:+word}` with bounded nesting and lazy selection; assignment values may concatenate unquoted, single-quoted literal, and double-quoted fragments into one word |
+| Variable references | `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`, `${NAME+word}`, `${NAME:+word}`, `${NAME:=word}`, `${NAME:?word}`, `${#NAME}`, pattern removal with `#`, `##`, `%`, and `%%`, and ASCII case forms with `^`, `^^`, `,`, and `,,`; assignment values may concatenate unquoted, single-quoted literal, and double-quoted fragments into one word |
 | Recipe header | `:0` followed by flags and an optional `: lockfile` |
 | Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
@@ -45,7 +45,7 @@ a supported regex, assignment value, or destination.
 | Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
 | Root rc discovery | An omitted `--config` searches the passwd-derived `HOME` for `.config/procmail-rs/config` and then `.procmailrc`. | Ambient `HOME` and `XDG_CONFIG_HOME` values are ignored. A preferred file which exists but cannot be loaded is an error rather than a reason to fall back. |
 | External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
-| Logging | `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, and `LOGDETAIL=values`; metadata mode omits sensitive values by default |
+| Logging | `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, and `LOGDETAIL=values`; text and JSON formats include session boundaries, recipe decisions, native header operations, and delivery outcomes |
 | Process settings | `SHELL`, `SHELLFLAGS`, `PATH`, `TIMEOUT`, `TRAP`, `EXITCODE`, and `UMASK` |
 | Delivery settings | `MAILDIR`, `DURABILITY`, `LOCKMETHOD`, `LOCKFILE`, `LOCKEXT`, `LOCKSLEEP`, and `LOCKTIMEOUT` |
 
@@ -124,6 +124,13 @@ its working directory, matching the paths visible to commands under original
 procmail. Procmail-rs applies that directory to each child instead of changing
 the parent process directory, so concurrent copy branches cannot affect one
 another.
+
+When `VERBOSE` is enabled, text traces begin with a PID and timestamp and
+report successful destinations as `Delivered to ...`. Destination paths and
+command text are shown only with `LOGDETAIL=values`; JSON uses one object per
+line and carries the same detail policy. Native header operations identify
+field names and source lines, but never expose header values. Values extracted
+from headers remain hidden even in detailed mode.
 
 ## Shell-expanded conditions
 

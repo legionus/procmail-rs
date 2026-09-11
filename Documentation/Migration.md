@@ -24,6 +24,8 @@ differences in regular expressions, trust checks, locking, and error handling.
 4. Run `procmail-rs explain --config PATH` and inspect the value-free execution
    plan. Then replay representative copied messages into separate test
    destinations and compare results, exit statuses, and metadata-only logs.
+   Use `filter --dry-run --format=text --detail=values` when you need the
+   human-readable execution trace without publishing a test delivery.
 
 Rc files are trusted code because pipe actions, program conditions, command
 substitutions, and `TRAP` invoke the configured shell. Test using copies of

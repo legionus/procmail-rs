@@ -11,6 +11,14 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
 
 - Add bounded procmail-style rc parsing and byte-oriented message filtering.
 - Add explicit Maildir and mboxrd delivery with selectable durability.
-- Add trusted external filters, runtime rc files, trace logging, and bounded
-  configuration controls.
-- Support 32-bit and 64-bit Linux targets.
+- Add trusted external filters, command substitutions, runtime rc files, and
+  bounded configuration controls.
+- Add native header editing with `set`, `add`, `prepend`, `remove`, `rename`,
+  and `extract` operations.
+- Add human-readable and JSON trace formats, session-start records, resolved
+  delivery paths, and detailed logging controls.
+- Add `filter --dry-run` for evaluating recipes without publishing delivery
+  destinations, acquiring locks, or running `TRAP`.
+- Start external commands in the active `MAILDIR` without changing the parent
+  process directory.
+- Support 32-bit and 64-bit Linux targets and 64-bit FreeBSD.

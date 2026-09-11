@@ -84,12 +84,30 @@ validated message without opening the device.
 ```text
 procmail-rs check   [--config PATH] [--set NAME=VALUE]...
 procmail-rs explain [--config PATH] [--set NAME=VALUE]...
-procmail-rs filter  [--config PATH] [--set NAME=VALUE]...
+procmail-rs filter  [--dry-run] [--format text|json]
+                    [--detail metadata|values]
+                    [--config PATH] [--set NAME=VALUE]...
 ```
 
 `check` validates the configuration without reading a message. `explain`
 additionally prints a value-free description of the execution plan. `filter`
 reads one message from standard input and attempts the selected deliveries.
+
+`filter --dry-run` evaluates the complete message and all reachable runtime
+rules without publishing Maildir, mbox, file, discard, or pipe deliveries. It
+also skips locks and `TRAP`, while trusted conditions, filters, and command
+substitutions still execute. This makes it suitable for diagnosing recipe
+selection, but it does not sandbox commands from the rc file.
+
+Filtering uses human-readable procmail-style trace records by default when
+logging is enabled. Use `--format=json` for one JSON object per line. The
+default metadata detail hides variable values, header values, destination
+paths, and command text; `--detail=values` enables bounded variable and
+command-text prefixes for diagnosis. Header operation names are logged, but
+header values and values extracted from headers remain hidden in both modes.
+Successful deliveries are reported as `Delivered to ...` records, including
+the resolved path in values detail. Each filtering session begins with a PID
+and timestamp record.
 
 Without `--config`, the program first tries
 `~/.config/procmail-rs/config`, then `~/.procmailrc`. The home directory comes
@@ -235,6 +253,10 @@ argument before the command text. The child receives a fresh bounded
 environment made from rc variables rather than the ambient process
 environment. Its stderr goes to `LOGFILE`, or to procmail-rs stderr when no
 log is selected.
+
+External commands start in the active non-empty `MAILDIR`, matching original
+procmail's relative-path behavior. The parent process directory is not changed,
+so concurrent copy branches remain independent.
 
 Raw stdout is limited to the smaller of the active `LINEBUF` and the fixed
 ceiling for the assigned variable. Overflow and `TIMEOUT` fail the assignment
