@@ -88,6 +88,8 @@ pub enum ConditionKindExplanation {
     BodyRegex,
     MessageRegex,
     VariableRegex,
+    Address,
+    Identifier,
     Program,
     SmallerThan,
     LargerThan,

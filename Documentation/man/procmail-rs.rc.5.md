@@ -344,6 +344,44 @@ byte value of a variable.
 urgent-body/
 ```
 
+## Structured address and identifier conditions
+
+The **procmail-rs** `address` condition extracts mailbox addresses from one or
+more address-bearing fields and applies `REGEX` separately to every resulting
+address:
+
+```
+:0
+* address From,Sender,Reply-To ?? ^alerts(?:\+[^@]+)?@example\.org$
+alerts/
+```
+
+Its syntax is `address FIELD[,FIELD...] ?? REGEX`. The supported field names
+are `From`, `To`, `Cc`, `Sender`, and `Reply-To`; names are ASCII
+case-insensitive and repetitions are rejected. Display names, comments,
+groups, angle brackets, folding whitespace, and separators are not presented
+to the regex. The local part retains its spelling and case, while ASCII domain
+letters are converted to lowercase. A quoted local part remains quoted.
+Malformed mailbox elements are ignored, so text resembling an address in a
+display name cannot accidentally become the match input. At most 4096 valid
+mailboxes from the selected fields are tested for one condition.
+
+`List-Id` is not a mailbox field. Use the separate syntax
+`identifier List-Id ?? REGEX`; the regex receives only the identifier between
+angle brackets, with ASCII letters converted to lowercase:
+
+```
+:0
+* identifier List-Id ?? ^linux-kernel\.vger\.kernel\.org$
+lists/linux-kernel/
+```
+
+Both forms require only the header section and stop at the first matching
+value. Their regex groups and `\/` marker update `MATCH`, `MATCH1`, and later
+numbered values in the same way as other regex conditions. The leading
+keywords do not reserve variable names: `address ?? REGEX` and
+`identifier ?? REGEX` remain ordinary variable conditions.
+
 The ordinary operators are:
 
 `literal`

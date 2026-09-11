@@ -79,6 +79,11 @@ An unmarked recipe path selects mboxrd, while a trailing `/` selects Maildir.
 The conventional unmarked `/dev/null` destination explicitly discards a fully
 validated message without opening the device.
 
+The rc language also provides bounded structured conditions for common mail
+fields. `address From,To,Cc ?? REGEX` tests normalized mailbox addresses
+without display names or comments, and `identifier List-Id ?? REGEX` tests the
+normalized list identifier. See the rc manual for their exact syntax.
+
 ## Commands
 
 ```text

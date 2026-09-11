@@ -40,6 +40,30 @@ fn static_shell_condition_escapes_variable_text_and_stays_header_only() {
 }
 
 #[test]
+fn structured_header_conditions_match_normalized_values_and_set_captures() {
+    let source = ":0\n* address From,To,Cc ?? ^([^@]+)@example\\.org$\n* identifier List-Id ?? ^project\\.example$\nmaildir:selected\n";
+    let config = config::parse(source).unwrap().expand(&[]).unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    assert!(plan.requirements().needs_headers);
+    assert!(!plan.requirements().needs_body_contents);
+    let mut message = head(
+        b"From: \"decoy@invalid.example\" <Local(Comment)@Example.ORG>\r\n\
+List-Id: Discussion <Project.Example>\r\n\r\nbody",
+    );
+    let mut runtime = RuntimeVariables::default();
+    let result =
+        plan.evaluate_headers_editing_with_trace(&mut message, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected headers-only decision");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+    assert_eq!(runtime.get("MATCH1"), Some("Local"));
+}
+
+#[test]
 fn runtime_shell_condition_reparses_match_as_a_size_test() {
     let config =
         config::parse(":0 c\n* ^X-Condition: \\/(.*)$\nmbox:first\n:0\n* $$MATCH\nmbox:second\n")

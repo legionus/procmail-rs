@@ -107,6 +107,7 @@ transition even though neither reads another rc file.
 | Expansion nesting | 32 |
 | Regex source / compiled program | 64 KiB / 8 MiB |
 | Regex captures / one captured value | 64 / 64 KiB |
+| Structured values tested by one condition | 4096 |
 | `--set` entries | 256 |
 | Child environment | 512 entries and 256 KiB |
 | Pending delivery sinks | 256 |

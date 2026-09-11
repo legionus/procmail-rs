@@ -15,6 +15,8 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
   bounded configuration controls.
 - Add native header editing with `set`, `add`, `prepend`, `remove`, `rename`,
   and `extract` operations.
+- Add bounded `address` and `identifier` conditions for matching normalized
+  mailbox addresses and `List-Id` values without external header parsers.
 - Add human-readable and JSON trace formats, session-start records, resolved
   delivery paths, and detailed logging controls.
 - Add `filter --dry-run` for evaluating recipes without publishing delivery

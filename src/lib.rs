@@ -31,6 +31,7 @@ pub mod limits;
 pub mod message;
 pub mod rc_file;
 pub mod runtime;
+pub(crate) mod structured_header;
 pub mod trace;
 
 // SAFETY-AUDIT: blocks=3 expressions=10

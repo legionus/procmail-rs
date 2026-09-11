@@ -2,7 +2,7 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use super::*;
-use crate::config::ParameterOperation;
+use crate::config::{AddressField, IdentifierField, ParameterOperation};
 
 fn parse_wide(input: &str) -> Result<Config, ParseError> {
     let mut state = ParseBudget::default();
@@ -1061,6 +1061,54 @@ fn parses_variable_regex_condition() {
 
     assert_eq!(name, "CATEGORY");
     assert_eq!(regex.pattern(), "^alerts$");
+}
+
+#[test]
+fn parses_structured_header_conditions_without_confusing_variables() {
+    let config = parse(
+        ":0\n* address From, To, Cc ?? ^user@example\\.org$\n* identifier List-Id ?? ^project\\.example$\nmaildir:matched\n",
+    )
+    .unwrap();
+    let [Statement::Recipe(recipe)] = config.statements.as_slice() else {
+        panic!("expected one recipe");
+    };
+    let ConditionKind::AddressRegex { fields, regex } = &recipe.conditions[0].kind else {
+        panic!("expected an address condition");
+    };
+    assert_eq!(
+        fields,
+        &[AddressField::From, AddressField::To, AddressField::Cc]
+    );
+    assert_eq!(regex.pattern(), "^user@example\\.org$");
+    assert!(matches!(
+        recipe.conditions[1].kind,
+        ConditionKind::IdentifierRegex {
+            field: IdentifierField::ListId,
+            ..
+        }
+    ));
+
+    let config = parse(":0\n* identifier ?? ^ordinary-variable$\nmaildir:matched\n").unwrap();
+    let Statement::Recipe(recipe) = &config.statements[0] else {
+        panic!("expected recipe");
+    };
+    assert!(matches!(
+        recipe.conditions[0].kind,
+        ConditionKind::VariableRegex { .. }
+    ));
+}
+
+#[test]
+fn rejects_unknown_or_repeated_structured_header_fields() {
+    for condition in [
+        "address Bcc ?? value",
+        "address From,from ?? value",
+        "identifier Message-Id ?? value",
+    ] {
+        let error = parse(&format!(":0\n* {condition}\nmaildir:matched\n")).unwrap_err();
+        assert_eq!(error.line, 2, "{condition}");
+        assert!(error.message.contains("condition"), "{condition}: {error}");
+    }
 }
 
 #[test]

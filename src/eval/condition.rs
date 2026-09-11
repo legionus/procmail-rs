@@ -8,10 +8,12 @@ use super::{
     ConditionExplanation, ConditionKindExplanation, EvalError, InputRequirements, PlanProperties,
 };
 use crate::config::{
-    CaseMode, Condition, ConditionInput, ConditionKind, Recipe, ShellExpandedCondition,
+    AddressField, CaseMode, Condition, ConditionInput, ConditionKind, IdentifierField, Recipe,
+    ShellExpandedCondition,
 };
 use crate::message::MessageHead;
 use crate::runtime::RuntimeVariables;
+use crate::structured_header::{self, StructuredVisitError};
 use crate::trace::{ConditionKind as TraceConditionKind, TraceEvent, TraceSink};
 
 #[derive(Debug, Clone)]
@@ -36,6 +38,14 @@ enum CompiledConditionKind {
     MessageRegex(Regex),
     VariableRegex {
         name: String,
+        regex: Regex,
+    },
+    AddressRegex {
+        fields: Vec<AddressField>,
+        regex: Regex,
+    },
+    IdentifierRegex {
+        field: IdentifierField,
         regex: Regex,
     },
     Program {
@@ -78,6 +88,18 @@ fn compile_condition(
         ConditionKind::VariableRegex { name, regex } => {
             format!("{name} ?? {}", regex.pattern())
         }
+        ConditionKind::AddressRegex { fields, regex } => format!(
+            "address {} ?? {}",
+            fields
+                .iter()
+                .map(|field| field.name())
+                .collect::<Vec<_>>()
+                .join(","),
+            regex.pattern()
+        ),
+        ConditionKind::IdentifierRegex { field, regex } => {
+            format!("identifier {} ?? {}", field.name(), regex.pattern())
+        }
         ConditionKind::Program(command) => command.clone(),
         ConditionKind::SmallerThan(size) => format!("< {size}"),
         ConditionKind::LargerThan(size) => format!("> {size}"),
@@ -85,7 +107,9 @@ fn compile_condition(
     let regex_condition = match &condition.kind {
         ConditionKind::Regex(regex)
         | ConditionKind::AreaRegex { regex, .. }
-        | ConditionKind::VariableRegex { regex, .. } => Some(regex),
+        | ConditionKind::VariableRegex { regex, .. }
+        | ConditionKind::AddressRegex { regex, .. }
+        | ConditionKind::IdentifierRegex { regex, .. } => Some(regex),
         ConditionKind::ShellExpanded(_)
         | ConditionKind::Program(_)
         | ConditionKind::SmallerThan(_)
@@ -121,6 +145,14 @@ fn compile_condition(
         }
         ConditionKind::VariableRegex { name, regex } => CompiledConditionKind::VariableRegex {
             name: name.clone(),
+            regex: regex.compiled().clone(),
+        },
+        ConditionKind::AddressRegex { fields, regex } => CompiledConditionKind::AddressRegex {
+            fields: fields.clone(),
+            regex: regex.compiled().clone(),
+        },
+        ConditionKind::IdentifierRegex { field, regex } => CompiledConditionKind::IdentifierRegex {
+            field: *field,
             regex: regex.compiled().clone(),
         },
         ConditionKind::Program(command) => CompiledConditionKind::Program {
@@ -159,7 +191,9 @@ impl CompiledCondition {
                 true,
                 true,
             ),
-            CompiledConditionKind::HeaderRegex(_) => (
+            CompiledConditionKind::HeaderRegex(_)
+            | CompiledConditionKind::AddressRegex { .. }
+            | CompiledConditionKind::IdentifierRegex { .. } => (
                 InputRequirements {
                     needs_headers: true,
                     ..InputRequirements::default()
@@ -317,6 +351,8 @@ impl CompiledCondition {
         let kind = match &self.kind {
             CompiledConditionKind::ShellExpanded { .. } => TraceConditionKind::ShellExpanded,
             CompiledConditionKind::HeaderRegex(_) => TraceConditionKind::HeaderRegex,
+            CompiledConditionKind::AddressRegex { .. } => TraceConditionKind::Address,
+            CompiledConditionKind::IdentifierRegex { .. } => TraceConditionKind::Identifier,
             CompiledConditionKind::BodyRegex(_) => TraceConditionKind::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => TraceConditionKind::MessageRegex,
             CompiledConditionKind::VariableRegex { .. } => TraceConditionKind::VariableRegex,
@@ -343,6 +379,8 @@ impl CompiledCondition {
         let kind = match &self.kind {
             CompiledConditionKind::ShellExpanded { .. } => ConditionKindExplanation::ShellExpanded,
             CompiledConditionKind::HeaderRegex(_) => ConditionKindExplanation::HeaderRegex,
+            CompiledConditionKind::AddressRegex { .. } => ConditionKindExplanation::Address,
+            CompiledConditionKind::IdentifierRegex { .. } => ConditionKindExplanation::Identifier,
             CompiledConditionKind::BodyRegex(_) => ConditionKindExplanation::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => ConditionKindExplanation::MessageRegex,
             CompiledConditionKind::VariableRegex { .. } => ConditionKindExplanation::VariableRegex,
@@ -365,6 +403,12 @@ impl CompiledCondition {
             CompiledConditionKind::ShellExpanded { .. } => return Ok(PartialMatch::Deferred),
             CompiledConditionKind::HeaderRegex(regex) => {
                 self.regex_matches(regex, head.matching_header(), runtime)?
+            }
+            CompiledConditionKind::AddressRegex { fields, regex } => {
+                self.matches_addresses(head.as_bytes(), fields, regex, runtime)?
+            }
+            CompiledConditionKind::IdentifierRegex { field, regex } => {
+                self.matches_identifier(head.as_bytes(), *field, regex, runtime)?
             }
             CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
                 return Ok(PartialMatch::Deferred);
@@ -420,6 +464,12 @@ impl CompiledCondition {
                     .ok_or(EvalError::BodyWasNotBuffered)?,
                 runtime,
             )?,
+            CompiledConditionKind::AddressRegex { fields, regex } => {
+                self.matches_addresses(message.raw_header(), fields, regex, runtime)?
+            }
+            CompiledConditionKind::IdentifierRegex { field, regex } => {
+                self.matches_identifier(message.raw_header(), *field, regex, runtime)?
+            }
             CompiledConditionKind::BodyRegex(regex) => self.regex_matches(
                 regex,
                 message
@@ -451,6 +501,50 @@ impl CompiledCondition {
             CompiledConditionKind::LargerThan(size) => message.len() > *size,
         };
         Ok(self.apply_negation(matched))
+    }
+
+    fn matches_addresses(
+        &self,
+        header: &[u8],
+        fields: &[AddressField],
+        regex: &Regex,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<bool, EvalError> {
+        let matched = structured_header::any_address(header, fields, |address| {
+            self.regex_matches(regex, address, runtime)
+        })
+        .map_err(|error| self.structured_header_error(error))?;
+        if !matched && (!self.match_captures.is_empty() || !self.capture_indexes.is_empty()) {
+            runtime.clear_match_values();
+        }
+        Ok(matched)
+    }
+
+    fn matches_identifier(
+        &self,
+        header: &[u8],
+        field: IdentifierField,
+        regex: &Regex,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<bool, EvalError> {
+        let matched = structured_header::any_identifier(header, field, |identifier| {
+            self.regex_matches(regex, identifier, runtime)
+        })
+        .map_err(|error| self.structured_header_error(error))?;
+        if !matched && (!self.match_captures.is_empty() || !self.capture_indexes.is_empty()) {
+            runtime.clear_match_values();
+        }
+        Ok(matched)
+    }
+
+    fn structured_header_error(&self, error: StructuredVisitError<EvalError>) -> EvalError {
+        match error {
+            StructuredVisitError::Header(error) => EvalError::StructuredHeader {
+                line: self.line,
+                message: error.to_string(),
+            },
+            StructuredVisitError::Visitor(error) => error,
+        }
     }
 
     fn regex_matches(

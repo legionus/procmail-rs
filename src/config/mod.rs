@@ -446,9 +446,51 @@ pub enum ConditionKind {
         name: String,
         regex: RegexCondition,
     },
+    AddressRegex {
+        fields: Vec<AddressField>,
+        regex: RegexCondition,
+    },
+    IdentifierRegex {
+        field: IdentifierField,
+        regex: RegexCondition,
+    },
     Program(String),
     SmallerThan(usize),
     LargerThan(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressField {
+    From,
+    To,
+    Cc,
+    Sender,
+    ReplyTo,
+}
+
+impl AddressField {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::From => "From",
+            Self::To => "To",
+            Self::Cc => "Cc",
+            Self::Sender => "Sender",
+            Self::ReplyTo => "Reply-To",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierField {
+    ListId,
+}
+
+impl IdentifierField {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::ListId => "List-Id",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

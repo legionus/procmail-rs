@@ -1318,7 +1318,12 @@ fn parse_condition(
         (ConditionKind::Program(command.to_owned()), false)
     } else {
         budget.check_regex(recipe_regexes, line)?;
-        let (target, pattern) = condition_regex_target(input, line)?;
+        let structured = structured_condition_target(input, line)?;
+        let (target, pattern) = if let Some((target, pattern)) = structured {
+            (Some(target), pattern)
+        } else {
+            condition_regex_target(input, line)?
+        };
         let regex = compile_condition_regex(pattern, line, case_sensitive)?;
         match target {
             Some(ConditionRegexTarget::Variable(name)) => {
@@ -1326,6 +1331,12 @@ fn parse_condition(
             }
             Some(ConditionRegexTarget::Area(area)) => {
                 (ConditionKind::AreaRegex { area, regex }, true)
+            }
+            Some(ConditionRegexTarget::Address(fields)) => {
+                (ConditionKind::AddressRegex { fields, regex }, true)
+            }
+            Some(ConditionRegexTarget::Identifier(field)) => {
+                (ConditionKind::IdentifierRegex { field, regex }, true)
             }
             None => (ConditionKind::Regex(regex), true),
         }
@@ -1749,6 +1760,81 @@ fn push_regex_bytes(output: &mut Vec<u8>, value: &[u8], line: usize) -> Result<(
 enum ConditionRegexTarget {
     Variable(String),
     Area(ConditionInput),
+    Address(Vec<super::AddressField>),
+    Identifier(super::IdentifierField),
+}
+
+fn structured_condition_target(
+    input: &str,
+    line: usize,
+) -> Result<Option<(ConditionRegexTarget, &str)>, ParseError> {
+    if let Some(rest) = input.strip_prefix("address").and_then(|rest| {
+        rest.as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_whitespace)
+            .then_some(rest.trim_start())
+    }) {
+        let (field_text, pattern) = rest.split_once("??").ok_or_else(|| {
+            ParseError::new(line, "address condition requires FIELD-LIST ?? REGEX")
+        })?;
+        let field_text = field_text.trim();
+        if field_text.is_empty() {
+            return Ok(None);
+        }
+        let mut fields = Vec::new();
+        for name in field_text.split(',') {
+            let name = name.trim();
+            let field = match name.to_ascii_lowercase().as_str() {
+                "from" => super::AddressField::From,
+                "to" => super::AddressField::To,
+                "cc" => super::AddressField::Cc,
+                "sender" => super::AddressField::Sender,
+                "reply-to" => super::AddressField::ReplyTo,
+                _ => {
+                    return Err(ParseError::new(
+                        line,
+                        format!("address condition does not support field '{name}'"),
+                    ));
+                }
+            };
+            if fields.contains(&field) {
+                return Err(ParseError::new(
+                    line,
+                    format!("address condition repeats field '{name}'"),
+                ));
+            }
+            fields.push(field);
+        }
+        return Ok(Some((
+            ConditionRegexTarget::Address(fields),
+            pattern.trim_start(),
+        )));
+    }
+    if let Some(rest) = input.strip_prefix("identifier").and_then(|rest| {
+        rest.as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_whitespace)
+            .then_some(rest.trim_start())
+    }) {
+        let (field, pattern) = rest
+            .split_once("??")
+            .ok_or_else(|| ParseError::new(line, "identifier condition requires FIELD ?? REGEX"))?;
+        let field = field.trim();
+        if field.is_empty() {
+            return Ok(None);
+        }
+        if !field.eq_ignore_ascii_case("List-Id") {
+            return Err(ParseError::new(
+                line,
+                format!("identifier condition does not support field '{field}'"),
+            ));
+        }
+        return Ok(Some((
+            ConditionRegexTarget::Identifier(super::IdentifierField::ListId),
+            pattern.trim_start(),
+        )));
+    }
+    Ok(None)
 }
 
 fn condition_regex_target(

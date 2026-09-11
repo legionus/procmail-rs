@@ -519,6 +519,8 @@ fn write_plan_explanation(
                 ConditionKindExplanation::BodyRegex => "body-regex",
                 ConditionKindExplanation::MessageRegex => "message-regex",
                 ConditionKindExplanation::VariableRegex => "variable-regex",
+                ConditionKindExplanation::Address => "address",
+                ConditionKindExplanation::Identifier => "identifier",
                 ConditionKindExplanation::Program => "program",
                 ConditionKindExplanation::SmallerThan => "smaller-than",
                 ConditionKindExplanation::LargerThan => "larger-than",

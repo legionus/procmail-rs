@@ -437,6 +437,50 @@ condition.
 * urgent
 urgent\-body/
 .EE
+.SS Structured address and identifier conditions
+The \f[B]procmail\-rs\f[R] \f[CR]address\f[R] condition extracts mailbox
+addresses from one or more address\-bearing fields and applies
+\f[CR]REGEX\f[R] separately to every resulting address:
+.IP
+.EX
+:0
+* address From,Sender,Reply\-To ?? \(haalerts(?:\(rs+[\(ha\(at]+)?\(atexample\(rs.org$
+alerts/
+.EE
+.PP
+Its syntax is \f[CR]address FIELD[,FIELD...] ?? REGEX\f[R].
+The supported field names are \f[CR]From\f[R], \f[CR]To\f[R],
+\f[CR]Cc\f[R], \f[CR]Sender\f[R], and \f[CR]Reply\-To\f[R]; names are
+ASCII case\-insensitive and repetitions are rejected.
+Display names, comments, groups, angle brackets, folding whitespace, and
+separators are not presented to the regex.
+The local part retains its spelling and case, while ASCII domain letters
+are converted to lowercase.
+A quoted local part remains quoted.
+Malformed mailbox elements are ignored, so text resembling an address in
+a display name cannot accidentally become the match input.
+At most 4096 valid mailboxes from the selected fields are tested for one
+condition.
+.PP
+\f[CR]List\-Id\f[R] is not a mailbox field.
+Use the separate syntax \f[CR]identifier List\-Id ?? REGEX\f[R]; the
+regex receives only the identifier between angle brackets, with ASCII
+letters converted to lowercase:
+.IP
+.EX
+:0
+* identifier List\-Id ?? \(halinux\-kernel\(rs.vger\(rs.kernel\(rs.org$
+lists/linux\-kernel/
+.EE
+.PP
+Both forms require only the header section and stop at the first
+matching value.
+Their regex groups and \f[CR]\(rs/\f[R] marker update \f[CR]MATCH\f[R],
+\f[CR]MATCH1\f[R], and later numbered values in the same way as other
+regex conditions.
+The leading keywords do not reserve variable names:
+\f[CR]address ?? REGEX\f[R] and \f[CR]identifier ?? REGEX\f[R] remain
+ordinary variable conditions.
 .PP
 The ordinary operators are:
 .TP

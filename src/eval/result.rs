@@ -149,6 +149,10 @@ pub enum EvalError {
         line: usize,
         message: String,
     },
+    StructuredHeader {
+        line: usize,
+        message: String,
+    },
     MatchValuesTooLarge {
         size: usize,
     },
@@ -217,6 +221,12 @@ impl fmt::Display for EvalError {
                 write!(
                     formatter,
                     "line {line}: cannot reparse expanded condition: {message}"
+                )
+            }
+            Self::StructuredHeader { line, message } => {
+                write!(
+                    formatter,
+                    "line {line}: cannot inspect structured header: {message}"
                 )
             }
             Self::MatchValuesTooLarge { size } => write!(
