@@ -242,6 +242,14 @@ fn bounded_text_rejects_a_record_before_partial_growth() {
 }
 
 #[test]
+fn formats_the_session_start_timestamp_without_locale_state() {
+    assert_eq!(
+        format_session_timestamp(std::time::SystemTime::UNIX_EPOCH),
+        "Thu Jan  1 00:00:00 1970"
+    );
+}
+
+#[test]
 fn reads_procmail_style_trace_controls_in_statement_order() {
     let config = crate::config::parse(
             "MAILDIR=/mail\nVERBOSE=off\nLOGFILE=logs/first\nLOGDETAIL=metadata\nVERBOSE=YesPlease\nLOGFILE=$MAILDIR/log\nLOGDETAIL=values\n",

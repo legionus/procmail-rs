@@ -188,6 +188,14 @@ pub fn record_external_command(line: usize, command: &str, trace: &mut impl Trac
     trace.record(TraceEvent::ExternalCommandExecuting { line, command });
 }
 
+pub fn record_session_start(trace: &mut impl TraceSink) {
+    let timestamp = format_session_timestamp(std::time::SystemTime::now());
+    trace.record(TraceEvent::SessionStarted {
+        pid: std::process::id(),
+        timestamp,
+    });
+}
+
 pub fn record_header_action(action: &HeaderAction, trace: &mut impl TraceSink) {
     for operation in &action.operations {
         let (line, kind, name, argument, extraction_mode) = match operation {
@@ -423,6 +431,14 @@ impl fmt::Write for BoundedText {
 
 fn render_json_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
     match event {
+        TraceEvent::SessionStarted { pid, timestamp } => {
+            write!(
+                output,
+                "{{\"event\":\"session-start\",\"pid\":{pid},\"timestamp\":"
+            )?;
+            render_json_string(output, timestamp.as_bytes())?;
+            output.write_char('}')
+        }
         TraceEvent::VariableAssigned {
             line,
             name,
@@ -562,6 +578,9 @@ fn render_json_string(output: &mut impl fmt::Write, value: &[u8]) -> fmt::Result
 
 fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
     match event {
+        TraceEvent::SessionStarted { pid, timestamp } => {
+            write!(output, "procmail-rs: [{pid}] {timestamp}")
+        }
         TraceEvent::VariableAssigned {
             line, name, value, ..
         } => {
@@ -650,11 +669,17 @@ fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::
                 "procmail-rs: Recipe at line {recipe_line}: preparing {} delivery",
                 human_destination_kind(*destination)
             ),
-            DeliveryStage::Published => write!(
-                output,
-                "procmail-rs: Recipe at line {recipe_line}: completed {} delivery",
-                human_destination_kind(*destination)
-            ),
+            DeliveryStage::Published => {
+                write!(
+                    output,
+                    "procmail-rs: Delivered to {}",
+                    human_destination_kind(*destination)
+                )?;
+                if let Some(path) = path {
+                    write!(output, " \"{}\"", EscapedBytes::new(path.as_bytes()))?;
+                }
+                write!(output, " (recipe at line {recipe_line})")
+            }
             DeliveryStage::Failed(class) => write!(
                 output,
                 "procmail-rs: Recipe at line {recipe_line}: {} delivery failed ({})",
@@ -869,6 +894,10 @@ impl TraceSink for MemoryTrace {
 /// hostile or sensitive values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceEvent {
+    SessionStarted {
+        pid: u32,
+        timestamp: String,
+    },
     VariableAssigned {
         line: Option<usize>,
         name: TraceName,
@@ -910,6 +939,47 @@ pub enum TraceEvent {
         argument: Option<TraceName>,
         extraction_mode: Option<HeaderExtractionMode>,
     },
+}
+
+fn format_session_timestamp(time: std::time::SystemTime) -> String {
+    let seconds = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let days = seconds / 86_400;
+    let day_seconds = seconds % 86_400;
+    let (year, month, day) = civil_date_from_days(days as i64);
+    let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][(days % 7) as usize];
+    let month_name = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][month as usize - 1];
+    format!(
+        "{weekday} {month_name} {day:2} {:02}:{:02}:{:02} {year}",
+        day_seconds / 3600,
+        (day_seconds / 60) % 60,
+        day_seconds % 60
+    )
+}
+
+// Convert days since 1970-01-01 to a Gregorian date without libc or locale
+// state. Trace output must remain available in the executable's restricted
+// environment, and a small deterministic formatter is sufficient here.
+fn civil_date_from_days(days: i64) -> (i32, u32, u32) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted / 146_097
+    } else {
+        (shifted - 146_096) / 146_097
+    };
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

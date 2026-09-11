@@ -746,7 +746,10 @@ fn apply_publication(
                 "published destination has no matching delivery plan entry".to_owned(),
             ))
         })?;
-        record_delivery(destination, DeliveryStage::Published, trace);
+        let resolved = destination
+            .resolve_with(|name| runtime.get(name).map(str::to_owned))
+            .unwrap_or_else(|_| destination.clone());
+        record_delivery(&resolved, DeliveryStage::Published, trace);
     }
     if let Some(result) = attempt.published {
         runtime

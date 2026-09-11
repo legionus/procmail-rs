@@ -63,6 +63,8 @@ fn verbose_filter_writes_text_trace_to_logfile() {
 
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert!(trace.starts_with("procmail-rs: ["));
+    assert!(trace.lines().next().unwrap().contains(" 20"));
     assert!(trace.contains("procmail-rs: Assigning at line 5 \"BOX=selected\""));
     assert!(trace.contains("procmail-rs: Setting header \"Subject\" at line 8"));
     assert!(trace.contains("procmail-rs: Adding header \"X-Added\" at line 9"));
@@ -73,7 +75,8 @@ fn verbose_filter_writes_text_trace_to_logfile() {
     ));
     assert!(trace.contains("procmail-rs: Removing header \"X-Prepended\" at line 13"));
     assert!(trace.contains("Assigning at line 12 \"EXTRACTED\" (value hidden)"));
-    assert!(trace.contains("completed Maildir delivery"));
+    assert!(trace.contains("procmail-rs: Delivered to Maildir"));
+    assert!(trace.contains(&format!("Delivered to Maildir \"{}/", selected.display())));
     for value in [
         "header-value-sentinel",
         "added-value-sentinel",
@@ -124,6 +127,7 @@ fn json_format_emits_json_lines_with_requested_detail() {
     for line in trace.lines() {
         assert!(line.starts_with('{') && line.ends_with('}'), "{line}");
     }
+    assert!(trace.starts_with("{\"event\":\"session-start\","));
     assert!(trace.contains(
         "{\"event\":\"variable-assigned\",\"line\":1,\"name\":\"BOX\",\"source\":\"rc-file\",\"value\":\"selected\",\"value_truncated\":false}"
     ));

@@ -302,6 +302,7 @@ fn run() -> Result<u8, OperationalError> {
                 trace_detail,
                 &settings.trace,
             );
+            procmail_rs::trace::record_session_start(&mut trace);
             let stdin = io::stdin().lock();
             let mut stdin = InterruptibleReader::new(stdin);
             let mut head = Message::read_headers(&mut stdin, limits).map_err(|error| {
