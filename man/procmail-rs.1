@@ -4,14 +4,14 @@
 .SH NAME
 procmail\-rs \- bounded procmail\-compatible mail filtering
 .SH SYNOPSIS
-\f[B]procmail\-rs\f[R] \f[B]check\f[R] \f[B]\(enconfig\f[R]
-\f[I]PATH\f[R] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+\f[B]procmail\-rs\f[R] \f[B]check\f[R] [\f[B]\(enconfig\f[R]
+\f[I]PATH\f[R]] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
 .PP
-\f[B]procmail\-rs\f[R] \f[B]explain\f[R] \f[B]\(enconfig\f[R]
-\f[I]PATH\f[R] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+\f[B]procmail\-rs\f[R] \f[B]explain\f[R] [\f[B]\(enconfig\f[R]
+\f[I]PATH\f[R]] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
 .PP
-\f[B]procmail\-rs\f[R] \f[B]filter\f[R] \f[B]\(enconfig\f[R]
-\f[I]PATH\f[R] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+\f[B]procmail\-rs\f[R] \f[B]filter\f[R] [\f[B]\(enconfig\f[R]
+\f[I]PATH\f[R]] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
 .PP
 \f[B]procmail\-rs\f[R] \f[B]\(enhelp\f[R]
 .PP
@@ -64,7 +64,7 @@ An original message delivered only by copy recipes remains undelivered.
 .SH OPTIONS
 .TP
 \f[B]\(enconfig\f[R] \f[I]PATH\f[R]
-Select the root rc file.
+Select the root rc file instead of searching the default locations.
 The file must be UTF\-8 and no larger than 1 MiB.
 It is parsed before \f[B]filter\f[R] reads standard input.
 .TP
@@ -155,8 +155,20 @@ A signal observed before publication prevents it; a signal arriving
 after an atomic Maildir publication or completed mbox append cannot
 retract that delivery and a retry may duplicate it.
 .SH FILES
-There is no automatically discovered rc file.
-The root file is always named with \f[B]\(enconfig\f[R].
+Without \f[B]\(enconfig\f[R], the root rc file is the first
+configuration found in the following order:
+.IP "1." 3
+\f[CR]$HOME/.config/procmail\-rs/config\f[R]
+.IP "2." 3
+\f[CR]$HOME/.procmailrc\f[R]
+.PP
+Here \f[CR]$HOME\f[R] is the passwd home directory of the current uid,
+not the ambient environment variable.
+A candidate which does not exist is skipped.
+Any other open or validation error is reported immediately; the search
+does not hide a broken preferred configuration by falling back to the
+next file.
+.PP
 Runtime files may be selected explicitly by \f[CR]INCLUDERC\f[R] and
 \f[CR]SWITCHRC\f[R] statements.
 .SH SECURITY NOTES

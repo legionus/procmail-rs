@@ -82,14 +82,20 @@ validated message without opening the device.
 ## Commands
 
 ```text
-procmail-rs check   --config PATH [--set NAME=VALUE]...
-procmail-rs explain --config PATH [--set NAME=VALUE]...
-procmail-rs filter  --config PATH [--set NAME=VALUE]...
+procmail-rs check   [--config PATH] [--set NAME=VALUE]...
+procmail-rs explain [--config PATH] [--set NAME=VALUE]...
+procmail-rs filter  [--config PATH] [--set NAME=VALUE]...
 ```
 
 `check` validates the configuration without reading a message. `explain`
 additionally prints a value-free description of the execution plan. `filter`
 reads one message from standard input and attempts the selected deliveries.
+
+Without `--config`, the program first tries
+`~/.config/procmail-rs/config`, then `~/.procmailrc`. The home directory comes
+from the passwd entry for the current uid; ambient `HOME` and
+`XDG_CONFIG_HOME` values cannot redirect configuration loading. An explicit
+`--config` always takes precedence.
 
 `check` recursively opens and validates every `INCLUDERC` and `SWITCHRC` path
 that can be computed from command-line values and unconditional rc
@@ -168,9 +174,10 @@ a file:
 - the type, owner, and mode are checked on the opened descriptor rather than
   through a separate pathname lookup.
 
-The root rc file is selected by the command line and establishes the trusted
-numeric owner. It is not subjected to the runtime ownership and mode checks.
-Administrators must protect that file and the command line that selects it.
+The root rc file is selected by `--config` or the default search and establishes
+the trusted numeric owner. It is not subjected to the runtime ownership and
+mode checks. Administrators must protect that file and any command line that
+selects it.
 
 Only a symlink in the final path component is rejected. Intermediate directory
 symlinks and hard links to an otherwise accepted file are allowed. Directory

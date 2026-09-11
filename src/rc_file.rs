@@ -51,6 +51,7 @@ pub struct RcFileError {
     path: PathBuf,
     message: String,
     resource_limit: bool,
+    not_found: bool,
 }
 
 pub(crate) trait RuntimeRcLoader: Send + fmt::Debug {
@@ -512,6 +513,7 @@ impl RcFileError {
             path: path.to_owned(),
             message: message.into(),
             resource_limit: false,
+            not_found: false,
         }
     }
 
@@ -520,15 +522,26 @@ impl RcFileError {
             path: path.to_owned(),
             message: message.into(),
             resource_limit: true,
+            not_found: false,
         }
     }
 
     fn io(path: &Path, error: io::Error) -> Self {
-        Self::new(path, error.to_string())
+        let not_found = error.kind() == io::ErrorKind::NotFound;
+        Self {
+            path: path.to_owned(),
+            message: error.to_string(),
+            resource_limit: false,
+            not_found,
+        }
     }
 
     pub fn is_resource_limit(&self) -> bool {
         self.resource_limit
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        self.not_found
     }
 
     pub fn safe_message(&self) -> &str {

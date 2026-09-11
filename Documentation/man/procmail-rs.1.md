@@ -7,11 +7,11 @@ procmail-rs - bounded procmail-compatible mail filtering
 
 # SYNOPSIS
 
-**procmail-rs** **check** **--config** *PATH* [**--set** *NAME=VALUE*]...
+**procmail-rs** **check** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
 
-**procmail-rs** **explain** **--config** *PATH* [**--set** *NAME=VALUE*]...
+**procmail-rs** **explain** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
 
-**procmail-rs** **filter** **--config** *PATH* [**--set** *NAME=VALUE*]...
+**procmail-rs** **filter** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
 
 **procmail-rs** **--help**
 
@@ -64,8 +64,9 @@ exclude hostile pathname replacement between a check and an operation.
 
 **--config** *PATH*
 
-: Select the root rc file. The file must be UTF-8 and no larger than 1 MiB.
-  It is parsed before **filter** reads standard input.
+: Select the root rc file instead of searching the default locations. The file
+  must be UTF-8 and no larger than 1 MiB. It is parsed before **filter** reads
+  standard input.
 
 **--set** *NAME=VALUE*
 
@@ -164,9 +165,19 @@ append cannot retract that delivery and a retry may duplicate it.
 
 # FILES
 
-There is no automatically discovered rc file. The root file is always named
-with **--config**. Runtime files may be selected explicitly by `INCLUDERC` and
-`SWITCHRC` statements.
+Without **--config**, the root rc file is the first configuration found in the
+following order:
+
+1. `$HOME/.config/procmail-rs/config`
+2. `$HOME/.procmailrc`
+
+Here `$HOME` is the passwd home directory of the current uid, not the ambient
+environment variable. A candidate which does not exist is skipped. Any other
+open or validation error is reported immediately; the search does not hide a
+broken preferred configuration by falling back to the next file.
+
+Runtime files may be selected explicitly by `INCLUDERC` and `SWITCHRC`
+statements.
 
 # SECURITY NOTES
 

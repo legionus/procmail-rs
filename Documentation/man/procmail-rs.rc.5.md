@@ -1378,8 +1378,11 @@ RULE_ROOT=/srv/mail/rules
 
 There is no implicit `DEFAULT` or `ORGMAIL` delivery, system mailbox, sendmail
 forward action, comsat notification, privileged identity change, LMTP mode, MH
-folder, ordinary directory folder, multi-folder action, weighted scoring, or
-automatic `~/.procmailrc` discovery.
+folder, ordinary directory folder, multi-folder action, or weighted scoring.
+
+When **--config** is omitted, **procmail-rs** searches the passwd home directory
+for `.config/procmail-rs/config` and then `.procmailrc`. This selects only the
+root rc file; it does not enable implicit message delivery.
 
 Reserved names for unsupported procmail behavior are rejected explicitly.
 Consult `Documentation/Compatibility.md` for narrowed semantics and known

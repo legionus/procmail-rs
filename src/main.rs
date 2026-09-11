@@ -5,7 +5,7 @@
 
 use std::env;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use procmail_rs::config::{self, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
@@ -17,7 +17,7 @@ use procmail_rs::eval::{
 };
 use procmail_rs::hostname::current_hostname;
 use procmail_rs::message::Message;
-use procmail_rs::rc_file::RcFileLoader;
+use procmail_rs::rc_file::{LoadedRcFile, RcFileLoader};
 use procmail_rs::runtime::RuntimeVariables;
 use procmail_rs::signal_state::{self, InterruptibleReader, ReceivedSignal};
 use procmail_rs::trace::NoTrace;
@@ -39,7 +39,7 @@ enum Action {
 
 struct Command {
     action: Action,
-    config: PathBuf,
+    config: Option<PathBuf>,
     supplied: Vec<SuppliedVariable>,
 }
 
@@ -50,7 +50,7 @@ enum Invocation {
 }
 
 const HELP: &str = "procmail-rs - bounded procmail-compatible mail filtering\n\n\
-usage: procmail-rs <check|explain|filter> --config PATH [--set NAME=VALUE]...\n\
+usage: procmail-rs <check|explain|filter> [--config PATH] [--set NAME=VALUE]...\n\
        procmail-rs --help\n\
        procmail-rs --version\n\n\
 commands:\n\
@@ -58,7 +58,7 @@ commands:\n\
   explain  describe the bounded execution plan without reading stdin\n\
   filter   read one message from stdin and deliver it to explicit destinations\n\n\
 options:\n\
-  --config PATH     select the root rc file\n\
+  --config PATH     override the automatically selected root rc file\n\
   --set NAME=VALUE  provide one policy-checked external value (maximum 256)\n\
   -h, --help        print this help text\n\
   -V, --version     print the program version\n";
@@ -166,9 +166,8 @@ fn run() -> Result<u8, OperationalError> {
             .map_err(|error| OperationalError::Configuration(error.to_string()))?,
     ];
     supplied.extend(command.supplied.iter().cloned());
-    let path = &command.config;
-    let (mut rc_loader, root_rc) = RcFileLoader::for_root(path)
-        .map_err(|error| OperationalError::Configuration(error.to_string()))?;
+    let (path, mut rc_loader, root_rc) =
+        load_root_config(command.config.as_deref(), identity.home())?;
     let config = config::parse(root_rc.source())
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
         .expand(&supplied)
@@ -493,13 +492,43 @@ fn parse_args() -> Result<Invocation, String> {
 
     Ok(Invocation::Run(Command {
         action,
-        config: config.ok_or_else(usage)?,
+        config,
         supplied,
     }))
 }
 
 fn usage() -> String {
-    "usage: procmail-rs <check|explain|filter> --config PATH [--set NAME=VALUE]...".into()
+    "usage: procmail-rs <check|explain|filter> [--config PATH] [--set NAME=VALUE]...".into()
+}
+
+fn load_root_config(
+    explicit: Option<&Path>,
+    home: &str,
+) -> Result<(PathBuf, RcFileLoader, LoadedRcFile), OperationalError> {
+    if let Some(path) = explicit {
+        let loaded = RcFileLoader::for_root(path)
+            .map_err(|error| OperationalError::Configuration(error.to_string()))?;
+        return Ok((path.to_owned(), loaded.0, loaded.1));
+    }
+
+    let home = Path::new(home);
+    let candidates = [
+        home.join(".config/procmail-rs/config"),
+        home.join(".procmailrc"),
+    ];
+    for path in &candidates {
+        match RcFileLoader::for_root(path) {
+            Ok((loader, root)) => return Ok((path.clone(), loader, root)),
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => return Err(OperationalError::Configuration(error.to_string())),
+        }
+    }
+
+    Err(OperationalError::Configuration(format!(
+        "no rc file found; tried {} and {} (use --config PATH to select one)",
+        candidates[0].display(),
+        candidates[1].display()
+    )))
 }
 
 #[cfg(test)]

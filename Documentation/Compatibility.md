@@ -43,6 +43,7 @@ a supported regex, assignment value, or destination.
 | Actions | Explicit Maildir or mbox delivery, including bounded backquoted destination commands; explicit discard through an unmarked `/dev/null`; trusted shell pipe action; a sole `|` for stdout delivery; command-output capture with `NAME=| command`; `{ ... }` block; and the procmail-rs `headers { ... }` extension |
 | Regex dialect | One byte-oriented Rust `regex-syntax` dialect with counted repetition, named ASCII classes, and the procmail `^TO`, `^TO_`, `^FROM_DAEMON`, `^FROM_MAILER`, `\<`, `\>`, `^^`, and `\/` extensions. Capturing groups populate numbered `MATCH1` values through the configured capture ceiling. |
 | Runtime files | Conditional and nested `INCLUDERC`; `SWITCHRC` abandons the current rc file after a successful switch |
+| Root rc discovery | An omitted `--config` searches the passwd-derived `HOME` for `.config/procmail-rs/config` and then `.procmailrc`. | Ambient `HOME` and `XDG_CONFIG_HOME` values are ignored. A preferred file which exists but cannot be loaded is an error rather than a reason to fall back. |
 | External values | Passwd-derived `HOME` and `LOGNAME`, system-derived `HOST`, read-only `PROCMAIL_VERSION`, and policy-checked `--set` values; ambient process variables are not imported |
 | Logging | `LOGFILE`, `VERBOSE`, `LOGABSTRACT`, and `LOGDETAIL=values`; metadata mode omits sensitive values by default |
 | Process settings | `SHELL`, `SHELLFLAGS`, `PATH`, `TIMEOUT`, `TRAP`, `EXITCODE`, and `UMASK` |
