@@ -100,16 +100,18 @@ normalized list identifier. See the rc manual for their exact syntax.
 ## Commands
 
 ```text
-procmail-rs check   [--config PATH] [--set NAME=VALUE]...
-procmail-rs explain [--config PATH] [--set NAME=VALUE]...
+procmail-rs check   [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...
+procmail-rs explain [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...
 procmail-rs filter  [--dry-run] [--format text|json]
                     [--detail metadata|values]
-                    [--config PATH] [--set NAME=VALUE]...
+                    [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...
 ```
 
 `check` validates the configuration without reading a message. `explain`
 additionally prints a value-free description of the execution plan. `filter`
 reads one message from standard input and attempts the selected deliveries.
+Repeatable `-a` options initialize bounded positional parameters `$1`, `$2`,
+and so on; `$#` reports their count.
 
 `filter --dry-run` evaluates the complete message and all reachable runtime
 rules without publishing Maildir, mbox, file, discard, or pipe deliveries. It

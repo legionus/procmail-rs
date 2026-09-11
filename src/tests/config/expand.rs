@@ -118,7 +118,38 @@ fn expression_modes_keep_their_distinct_escape_and_dollar_rules() {
         parse_shell_condition_expression("$!", 7).unwrap().parts,
         [ShellPart::Literal("$!".to_owned())]
     );
-    assert!(parse_shell_condition_expression("$1", 8).is_err());
+    assert_eq!(
+        parse_shell_condition_expression("$1-${10}-$#-${#}", 8)
+            .unwrap()
+            .parts,
+        [
+            ShellPart::Variable {
+                name: "1".to_owned(),
+                operation: ParameterOperation::Value,
+            },
+            ShellPart::Literal("-".to_owned()),
+            ShellPart::Variable {
+                name: "10".to_owned(),
+                operation: ParameterOperation::Value,
+            },
+            ShellPart::Literal("-".to_owned()),
+            ShellPart::Variable {
+                name: "#".to_owned(),
+                operation: ParameterOperation::Value,
+            },
+            ShellPart::Literal("-".to_owned()),
+            ShellPart::Variable {
+                name: "#".to_owned(),
+                operation: ParameterOperation::Value,
+            },
+        ]
+    );
+    for source in ["$0", "$257", "${0}", "${257}", "${1:-fallback}", "$@", "$*"] {
+        assert!(
+            parse_assignment_expression(source, 8).is_err(),
+            "source: {source}"
+        );
+    }
     assert_eq!(
         parse_shell_condition_expression(r"$\NAME", 9)
             .unwrap()
@@ -539,6 +570,38 @@ fn expands_both_variable_reference_forms_sequentially() {
     assert_eq!(
         resolved_destination(&config, 3),
         Destination::Maildir("/srv/mail/mail/inbox".into())
+    );
+}
+
+#[test]
+fn expands_bounded_positional_arguments_and_argument_count() {
+    let mut arguments = PositionalArguments::default();
+    arguments.push("first-$literal".to_owned()).unwrap();
+    arguments.push("second".to_owned()).unwrap();
+    let config = parse("ONE=$1\nTWO=${2}\nMISSING=$10\nCOUNT=$#\nBRACED_COUNT=${#}\n")
+        .unwrap()
+        .expand_with_arguments(&[], &arguments)
+        .unwrap();
+    let values = config
+        .statements
+        .iter()
+        .map(|statement| {
+            let Statement::Assignment(assignment) = statement else {
+                panic!("expected assignment");
+            };
+            (assignment.name.as_str(), assignment.value.as_str())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        values,
+        [
+            ("ONE", "first-$literal"),
+            ("TWO", "second"),
+            ("MISSING", ""),
+            ("COUNT", "2"),
+            ("BRACED_COUNT", "2"),
+        ]
     );
 }
 

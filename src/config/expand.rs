@@ -11,9 +11,9 @@ use super::shell_eval::{self, EvaluationContext, EvaluationDepth, UnsupportedPar
 use super::{
     Assignment, AssignmentPath, AssignmentTarget, CaseDirection, Config, Destination, HeaderAction,
     HeaderOperation, HeaderValue, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
-    MAX_PATH_EXPRESSION_LEN, ParameterOperation, PathExpression, RcFileExpression, Recipe,
-    RecipeAction, ShellExpandedCondition, ShellExpression, ShellPart, Statement, SuppliedVariable,
-    VariablePolicy, VariableSource, variable_policy,
+    MAX_PATH_EXPRESSION_LEN, ParameterOperation, PathExpression, PositionalArguments,
+    RcFileExpression, Recipe, RecipeAction, ShellExpandedCondition, ShellExpression, ShellPart,
+    Statement, SuppliedVariable, VariablePolicy, VariableSource, variable_policy,
 };
 use crate::header_value::validate_generated_header_value;
 
@@ -504,8 +504,17 @@ pub(super) fn expand(
     config: Config,
     supplied: &[SuppliedVariable],
 ) -> Result<Config, ExpansionError> {
+    expand_with_arguments(config, supplied, &PositionalArguments::default())
+}
+
+pub(super) fn expand_with_arguments(
+    config: Config,
+    supplied: &[SuppliedVariable],
+    arguments: &PositionalArguments,
+) -> Result<Config, ExpansionError> {
     let mut variables = BTreeMap::<String, ExpandedValue>::new();
-    let mut initial_variables = Vec::with_capacity(supplied.len());
+    let mut initial_variables =
+        Vec::with_capacity(supplied.len().saturating_add(arguments.len() + 1));
     for variable in supplied {
         let value = if matches!(
             variable.source(),
@@ -524,6 +533,37 @@ pub(super) fn expand(
             variable.source(),
         ));
         variables.insert(variable.name().to_owned(), value);
+    }
+
+    // Make every permitted numeric name known while preparing the root file so
+    // an absent argument expands to an empty value. Retain only supplied
+    // arguments at runtime; RuntimeVariables provides the same empty fallback
+    // to rc files loaded after message processing has begun.
+    for index in 1..=super::MAX_POSITIONAL_ARGUMENTS {
+        let supplied = arguments.values().get(index - 1);
+        let value = supplied.cloned().unwrap_or_default();
+        let name = index.to_string();
+        variables.insert(
+            name.clone(),
+            ExpandedValue {
+                text: value.clone(),
+                depth: 0,
+            },
+        );
+        if supplied.is_some() {
+            initial_variables.push((name, value, VariableSource::CommandLine));
+        }
+    }
+    let count = arguments.len().to_string();
+    variables.insert(
+        "#".to_owned(),
+        ExpandedValue {
+            text: count.clone(),
+            depth: 0,
+        },
+    );
+    if !arguments.is_empty() {
+        initial_variables.push(("#".to_owned(), count, VariableSource::CommandLine));
     }
     expand_config(config, variables, initial_variables, None)
 }
@@ -2403,12 +2443,30 @@ impl<'a> ExpressionParser<'a> {
                 ));
             }
             self.parse_braced_variable(nesting, quote, pattern_word)?
+        } else if first.is_ascii_digit() {
+            if regex_escape {
+                return Err(ExpansionError::new(
+                    self.line,
+                    "regex-escaped positional parameters are not supported",
+                ));
+            }
+            (
+                self.parse_positional_parameter()?,
+                ParameterOperation::Value,
+            )
+        } else if first == b'#' {
+            if regex_escape {
+                return Err(ExpansionError::new(
+                    self.line,
+                    "regex-escaped argument count is not supported",
+                ));
+            }
+            self.index += 1;
+            ("#".to_owned(), ParameterOperation::Value)
         } else {
             if !is_name_start(first) {
                 if matches!(self.syntax, ExpressionSyntax::ShellCondition) {
-                    if matches!(first, b'?' | b'#' | b'$' | b'-' | b'=' | b'@')
-                        || first.is_ascii_digit()
-                    {
+                    if matches!(first, b'?' | b'$' | b'-' | b'=' | b'@' | b'*') {
                         return Err(ExpansionError::new(
                             self.line,
                             "unsupported special parameter in shell-expanded condition",
@@ -2419,12 +2477,14 @@ impl<'a> ExpressionParser<'a> {
                 }
                 return Err(ExpansionError::new(
                     self.line,
-                    "unsupported '$' expansion; use $NAME or ${NAME}",
+                    "unsupported special parameter in expression",
                 ));
             }
             (self.parse_name(), ParameterOperation::Value)
         };
-        if variable_policy(&name) == VariablePolicy::Unsupported {
+        if !super::is_positional_parameter_name(&name)
+            && variable_policy(&name) == VariablePolicy::Unsupported
+        {
             return Err(ExpansionError::new(
                 self.line,
                 format!("procmail variable {name} is not supported"),
@@ -2444,6 +2504,10 @@ impl<'a> ExpressionParser<'a> {
         pattern_word: bool,
     ) -> Result<(String, ParameterOperation), ExpansionError> {
         self.index += 1;
+        if self.bytes.get(self.index..self.index + 2) == Some(b"#}") {
+            self.index += 2;
+            return Ok(("#".to_owned(), ParameterOperation::Value));
+        }
         if self.bytes.get(self.index) == Some(&b'#') {
             self.index += 1;
             let name = self.parse_name();
@@ -2456,6 +2520,17 @@ impl<'a> ExpressionParser<'a> {
             }
             self.index += 1;
             return Ok((name, ParameterOperation::Length));
+        }
+        if self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
+            let name = self.parse_positional_parameter()?;
+            if self.bytes.get(self.index) != Some(&b'}') {
+                return Err(ExpansionError::new(
+                    self.line,
+                    "positional parameter does not accept an operator",
+                ));
+            }
+            self.index += 1;
+            return Ok((name, ParameterOperation::Value));
         }
         let name = self.parse_name();
         validate_reference_name(&name, self.line)?;
@@ -2592,6 +2667,27 @@ impl<'a> ExpressionParser<'a> {
                 "unsupported parameter expansion operator",
             )),
         }
+    }
+
+    fn parse_positional_parameter(&mut self) -> Result<String, ExpansionError> {
+        let start = self.index;
+        while self.bytes.get(self.index).is_some_and(u8::is_ascii_digit) {
+            self.index += 1;
+        }
+        let name = &self.input[start..self.index];
+        let index = name.parse::<usize>().map_err(|_| {
+            ExpansionError::new(self.line, "positional parameter index is too large")
+        })?;
+        if !(1..=super::MAX_POSITIONAL_ARGUMENTS).contains(&index) {
+            return Err(ExpansionError::new(
+                self.line,
+                format!(
+                    "positional parameter index must be from 1 through {}",
+                    super::MAX_POSITIONAL_ARGUMENTS
+                ),
+            ));
+        }
+        Ok(name.to_owned())
     }
 
     fn parse_parameter_word(

@@ -52,6 +52,9 @@ impl ProcessEnvironment {
         // future spawn path independent of secrets and behavior-changing
         // values inherited by the procmail-rs process.
         for (name, value) in runtime.byte_values() {
+            if crate::config::is_positional_parameter_name(name) {
+                continue;
+            }
             validate_entry(name, value)?;
             values.insert(name.to_owned(), value.to_owned());
         }

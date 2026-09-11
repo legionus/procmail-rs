@@ -109,6 +109,7 @@ transition even though neither reads another rc file.
 | Regex captures / one captured value | 64 / 64 KiB |
 | Structured values tested by one condition | 4096 |
 | `--set` entries | 256 |
+| Positional arguments | 256 entries, 64 KiB each, 256 KiB combined |
 | Child environment | 512 entries and 256 KiB |
 | Pending delivery sinks | 256 |
 | Trace | 16384 events and 1 MiB total |

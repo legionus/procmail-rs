@@ -8,11 +8,14 @@ procmail-rs - bounded procmail-compatible mail filtering
 # SYNOPSIS
 
 **procmail-rs** **check** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
+[**-a** *ARGUMENT*]...
 
 **procmail-rs** **explain** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
+[**-a** *ARGUMENT*]...
 
 **procmail-rs** **filter** [**--dry-run**] [**--format** *FORMAT*]
 [**--detail** *DETAIL*] [**--config** *PATH*] [**--set** *NAME=VALUE*]...
+[**-a** *ARGUMENT*]...
 
 **procmail-rs** **--help**
 
@@ -75,6 +78,13 @@ exclude hostile pathname replacement between a check and an operation.
   times. Rc assignments can replace supplied values in statement order.
   Ambient process variables are not imported.
 
+**-a** *ARGUMENT*, **--argument** *ARGUMENT*
+
+: Supply the next positional rc parameter, starting with `$1`. The option is
+  repeatable up to 256 times. One argument may contain at most 64 KiB and all
+  arguments together at most 256 KiB. Values are inserted literally and are
+  not exported under numeric child-environment names.
+
 **-h**, **--help**
 
 : Print brief command-line help.
@@ -94,6 +104,13 @@ Other external values must be admitted explicitly:
 
 ```
 procmail-rs check --config rules.rc --set ACCOUNT=work
+```
+
+For compatibility with original procmail, repeat **-a** to set `$1`, `$2`, and
+later positional parameters. `$#` contains their count:
+
+```text
+procmail-rs filter --config rules.rc -a work -a /home/user/Mail/work
 ```
 
 # FILTERING EXAMPLE

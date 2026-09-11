@@ -6,14 +6,17 @@ procmail\-rs \- bounded procmail\-compatible mail filtering
 .SH SYNOPSIS
 \f[B]procmail\-rs\f[R] \f[B]check\f[R] [\f[B]\(enconfig\f[R]
 \f[I]PATH\f[R]] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+[\f[B]\-a\f[R] \f[I]ARGUMENT\f[R]]\&...
 .PP
 \f[B]procmail\-rs\f[R] \f[B]explain\f[R] [\f[B]\(enconfig\f[R]
 \f[I]PATH\f[R]] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+[\f[B]\-a\f[R] \f[I]ARGUMENT\f[R]]\&...
 .PP
 \f[B]procmail\-rs\f[R] \f[B]filter\f[R] [\f[B]\(endry\-run\f[R]]
 [\f[B]\(enformat\f[R] \f[I]FORMAT\f[R]] [\f[B]\(endetail\f[R]
 \f[I]DETAIL\f[R]] [\f[B]\(enconfig\f[R] \f[I]PATH\f[R]]
 [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+[\f[B]\-a\f[R] \f[I]ARGUMENT\f[R]]\&...
 .PP
 \f[B]procmail\-rs\f[R] \f[B]\(enhelp\f[R]
 .PP
@@ -76,6 +79,14 @@ The option may occur at most 256 times.
 Rc assignments can replace supplied values in statement order.
 Ambient process variables are not imported.
 .TP
+\f[B]\-a\f[R] \f[I]ARGUMENT\f[R], \f[B]\(enargument\f[R] \f[I]ARGUMENT\f[R]
+Supply the next positional rc parameter, starting with \f[CR]$1\f[R].
+The option is repeatable up to 256 times.
+One argument may contain at most 64 KiB and all arguments together at
+most 256 KiB.
+Values are inserted literally and are not exported under numeric
+child\-environment names.
+.TP
 \f[B]\-h\f[R], \f[B]\(enhelp\f[R]
 Print brief command\-line help.
 .TP
@@ -93,6 +104,14 @@ Other external values must be admitted explicitly:
 .IP
 .EX
 procmail\-rs check \-\-config rules.rc \-\-set ACCOUNT=work
+.EE
+.PP
+For compatibility with original procmail, repeat \f[B]\-a\f[R] to set
+\f[CR]$1\f[R], \f[CR]$2\f[R], and later positional parameters.
+\f[CR]$#\f[R] contains their count:
+.IP
+.EX
+procmail\-rs filter \-\-config rules.rc \-a work \-a /home/user/Mail/work
 .EE
 .SH FILTERING EXAMPLE
 Create the destination Maildir before filtering; \f[B]procmail\-rs\f[R]

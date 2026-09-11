@@ -880,6 +880,30 @@ may be arbitrary bounded bytes when produced by a capture, but a value exported
 to a child environment cannot contain NUL. Assignment and expansion occur in
 statement order.
 
+## Positional parameters
+
+Repeatable **-a** or **--argument** command-line options initialize `$1`, `$2`,
+and later numbered parameters. `${N}` is the braced form; `$10` denotes the
+tenth parameter. `$#` and `${#}` contain the number of supplied arguments. A
+permitted but absent numbered parameter expands to an empty string.
+
+```text
+procmail-rs filter --config rules.rc -a work -a /home/user/Mail/work
+```
+
+```text
+ACCOUNT=$1
+
+:0
+* ACCOUNT ?? ^work$
+maildir:${2}/
+```
+
+At most 256 arguments are accepted, with a 64 KiB limit on one value and a
+256 KiB combined limit. Their text is inserted literally, remains available
+to runtime `INCLUDERC` and `SWITCHRC` files, and is not exported under numeric
+child-environment names. `$@`, `$*`, and `SHIFT` are unsupported.
+
 ## Identity and runtime results
 
 `HOME`

@@ -26,6 +26,22 @@ fn builds_only_defaults_and_explicit_runtime_values() {
 }
 
 #[test]
+fn does_not_export_positional_parameters_as_environment_names() {
+    let mut runtime = RuntimeVariables::default();
+    assert_eq!(runtime.get("1"), Some(""));
+    assert_eq!(runtime.get("#"), Some("0"));
+    runtime.set("1", "first");
+    runtime.set("#", "1");
+
+    let environment = ProcessEnvironment::from_runtime(&runtime).unwrap();
+    assert!(
+        environment
+            .values()
+            .all(|(name, _)| name != "1" && name != "#")
+    );
+}
+
+#[test]
 fn exports_non_utf8_runtime_values_without_replacement() {
     let mut runtime = RuntimeVariables::default();
     runtime.set_bytes("BINARY", vec![b'a', 0xff, b'z']);

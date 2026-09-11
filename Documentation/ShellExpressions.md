@@ -25,6 +25,31 @@ Names start with an ASCII letter or underscore and continue with ASCII letters,
 digits, or underscores. Inserted values are literal data and are not scanned
 again for more references.
 
+## Positional parameters
+
+Each repeatable command-line **-a** or **--argument** option supplies the next
+positional parameter. `$1` and `${1}` select the first value, `$10` selects the
+tenth value rather than `$1` followed by `0`, and `$#` or `${#}` reports the
+number supplied. A permitted but absent positional parameter expands to an
+empty string.
+
+```text
+procmail-rs filter -a work -a /home/user/Mail/work --config rules.rc
+```
+
+```text
+ACCOUNT=$1
+
+:0
+* ACCOUNT ?? ^work$
+maildir:${2}/
+```
+
+At most 256 arguments are accepted. One value is limited to 64 KiB and their
+combined size to 256 KiB. Values are inserted literally without another
+expansion pass. They are not exported to child commands under numeric
+environment names. `$@`, `$*`, and `SHIFT` are not supported.
+
 ## Quotes, escapes, and comments
 
 An assignment value is one shell-like word assembled from adjacent unquoted,
@@ -203,4 +228,3 @@ assignment values, paths, shell patterns, and child environments also have
 fixed ceilings described in [Limits.md](Limits.md). Overflow, unsupported
 operators, unterminated quotes, and malformed references fail explicitly;
 values are never truncated or partially assigned.
-

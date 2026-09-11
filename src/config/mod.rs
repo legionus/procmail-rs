@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
+mod arguments;
 pub(crate) mod expand;
 mod parser;
 pub(crate) mod shell_eval;
@@ -12,6 +13,11 @@ use std::fmt;
 
 use regex::bytes::Regex;
 
+pub(crate) use arguments::is_positional_parameter_name;
+pub use arguments::{
+    MAX_POSITIONAL_ARGUMENT_BYTES, MAX_POSITIONAL_ARGUMENT_LEN, MAX_POSITIONAL_ARGUMENTS,
+    PositionalArgumentError, PositionalArguments,
+};
 pub use expand::ExpansionError;
 #[cfg(any(feature = "fuzzing", test))]
 pub(crate) use parser::exercise_condition_regex;
@@ -169,6 +175,14 @@ impl ParseBudget {
 impl Config {
     pub fn expand(self, supplied: &[SuppliedVariable]) -> Result<Self, ExpansionError> {
         expand::expand(self, supplied)
+    }
+
+    pub fn expand_with_arguments(
+        self,
+        supplied: &[SuppliedVariable],
+        arguments: &PositionalArguments,
+    ) -> Result<Self, ExpansionError> {
+        expand::expand_with_arguments(self, supplied, arguments)
     }
 
     pub(crate) fn expand_with_runtime_values<'a>(

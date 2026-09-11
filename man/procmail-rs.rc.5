@@ -1020,6 +1020,33 @@ They can be assigned in an rc file or supplied initially with
 Values may be arbitrary bounded bytes when produced by a capture, but a
 value exported to a child environment cannot contain NUL.
 Assignment and expansion occur in statement order.
+.SS Positional parameters
+Repeatable \f[B]\-a\f[R] or \f[B]\(enargument\f[R] command\-line options
+initialize \f[CR]$1\f[R], \f[CR]$2\f[R], and later numbered parameters.
+\f[CR]${N}\f[R] is the braced form; \f[CR]$10\f[R] denotes the tenth
+parameter.
+\f[CR]$#\f[R] and \f[CR]${#}\f[R] contain the number of supplied
+arguments.
+A permitted but absent numbered parameter expands to an empty string.
+.IP
+.EX
+procmail\-rs filter \-\-config rules.rc \-a work \-a /home/user/Mail/work
+.EE
+.IP
+.EX
+ACCOUNT=$1
+
+:0
+* ACCOUNT ?? \(hawork$
+maildir:${2}/
+.EE
+.PP
+At most 256 arguments are accepted, with a 64 KiB limit on one value and
+a 256 KiB combined limit.
+Their text is inserted literally, remains available to runtime
+\f[CR]INCLUDERC\f[R] and \f[CR]SWITCHRC\f[R] files, and is not exported
+under numeric child\-environment names.
+\f[CR]$\(at\f[R], \f[CR]$*\f[R], and \f[CR]SHIFT\f[R] are unsupported.
 .SS Identity and runtime results
 .TP
 \f[CR]HOME\f[R]

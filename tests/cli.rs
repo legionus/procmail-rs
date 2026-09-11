@@ -72,6 +72,7 @@ fn help_is_available_without_user_or_configuration_lookup() {
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("usage: procmail-rs"), "{stdout}");
         assert!(stdout.contains("--set NAME=VALUE"), "{stdout}");
+        assert!(stdout.contains("-a, --argument VALUE"), "{stdout}");
         assert!(output.stderr.is_empty(), "{:?}", output.stderr);
     }
 }

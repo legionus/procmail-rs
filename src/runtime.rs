@@ -190,14 +190,28 @@ impl RuntimeVariables {
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        match self.find(name)? {
+        let Some(value) = self.find(name) else {
+            return match name {
+                "#" => Some("0"),
+                _ if crate::config::is_positional_parameter_name(name) => Some(""),
+                _ => None,
+            };
+        };
+        match value {
             RuntimeValue::Text(value) => Some(value),
             RuntimeValue::Bytes(_) | RuntimeValue::Removed => None,
         }
     }
 
     pub fn get_bytes(&self, name: &str) -> Option<&[u8]> {
-        match self.find(name)? {
+        let Some(value) = self.find(name) else {
+            return match name {
+                "#" => Some(b"0"),
+                _ if crate::config::is_positional_parameter_name(name) => Some(b""),
+                _ => None,
+            };
+        };
+        match value {
             RuntimeValue::Text(value) => Some(value.as_bytes()),
             RuntimeValue::Bytes(value) => Some(value),
             RuntimeValue::Removed => None,

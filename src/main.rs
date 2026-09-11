@@ -10,7 +10,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use procmail_rs::config::{self, MAX_COMMAND_LINE_VARIABLES, SuppliedVariable};
+use procmail_rs::config::{
+    self, MAX_COMMAND_LINE_VARIABLES, PositionalArguments, SuppliedVariable,
+};
 use procmail_rs::configuration;
 use procmail_rs::delivery::DeliveryFailureClass;
 use procmail_rs::eval::{
@@ -48,6 +50,7 @@ struct Command {
     trace_detail: Option<TraceDetail>,
     config: Option<PathBuf>,
     supplied: Vec<SuppliedVariable>,
+    arguments: PositionalArguments,
 }
 
 enum Invocation {
@@ -58,7 +61,7 @@ enum Invocation {
 
 const HELP: &str = "procmail-rs - bounded procmail-compatible mail filtering\n\n\
 usage: procmail-rs <check|explain|filter> [--dry-run] [--format FORMAT] [--detail DETAIL]\n\
-       [--config PATH] [--set NAME=VALUE]...\n\
+       [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...\n\
        procmail-rs --help\n\
        procmail-rs --version\n\n\
 commands:\n\
@@ -71,6 +74,8 @@ options:\n\
   --detail DETAIL   override LOGDETAIL: metadata or values\n\
   --config PATH     override the automatically selected root rc file\n\
   --set NAME=VALUE  provide one policy-checked external value (maximum 256)\n\
+  -a, --argument VALUE\n\
+                    set the next positional parameter ($1, $2, and so on)\n\
   -h, --help        print this help text\n\
   -V, --version     print the program version\n";
 
@@ -211,7 +216,7 @@ fn run() -> Result<u8, OperationalError> {
         load_root_config(command.config.as_deref(), identity.home())?;
     let config = config::parse(root_rc.source())
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
-        .expand(&supplied)
+        .expand_with_arguments(&supplied, &command.arguments)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     rc_loader
         .account_root_config(&config)
@@ -575,6 +580,7 @@ fn parse_args() -> Result<Invocation, String> {
     };
     let mut config = None;
     let mut supplied = Vec::new();
+    let mut arguments = PositionalArguments::default();
     let mut dry_run = false;
     let mut trace_format = TraceFormat::Text;
     let mut trace_detail = None;
@@ -638,6 +644,14 @@ fn parse_args() -> Result<Invocation, String> {
                     .map_err(|_| "--set value is not valid UTF-8".to_owned())?;
                 supplied.push(SuppliedVariable::parse(value).map_err(|error| error.to_string())?);
             }
+            Some("-a" | "--argument") => {
+                let value = args
+                    .next()
+                    .ok_or_else(usage)?
+                    .into_string()
+                    .map_err(|_| "-a/--argument value is not valid UTF-8".to_owned())?;
+                arguments.push(value).map_err(|error| error.to_string())?;
+            }
             _ => return Err(usage()),
         }
     }
@@ -649,6 +663,7 @@ fn parse_args() -> Result<Invocation, String> {
         trace_detail,
         config,
         supplied,
+        arguments,
     }))
 }
 
@@ -669,7 +684,7 @@ fn parse_trace_detail(value: std::ffi::OsString) -> Result<TraceDetail, String> 
 }
 
 fn usage() -> String {
-    "usage: procmail-rs <check|explain|filter> [--dry-run] [--format FORMAT] [--detail DETAIL] [--config PATH] [--set NAME=VALUE]...".into()
+    "usage: procmail-rs <check|explain|filter> [--dry-run] [--format FORMAT] [--detail DETAIL] [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...".into()
 }
 
 fn load_root_config(
