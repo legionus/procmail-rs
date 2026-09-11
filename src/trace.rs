@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::io::{self, Write};
 
 use crate::config::MAX_ASSIGNMENT_NAME_LEN;
-use crate::config::{AssignmentTarget, Config, Statement};
+use crate::config::{
+    AssignmentTarget, Config, HeaderAction, HeaderExtractionMode, HeaderOperation, Statement,
+};
 
 pub const MAX_TRACE_EVENT_SIZE: usize = 1024;
 pub const MAX_TRACE_EVENTS: usize = 16 * 1024;
@@ -184,6 +186,55 @@ pub fn record_external_command(line: usize, command: &str, trace: &mut impl Trac
         .includes_variable_values()
         .then(|| TraceValue::new(command.as_bytes()));
     trace.record(TraceEvent::ExternalCommandExecuting { line, command });
+}
+
+pub fn record_header_action(action: &HeaderAction, trace: &mut impl TraceSink) {
+    for operation in &action.operations {
+        let (line, kind, name, argument, extraction_mode) = match operation {
+            HeaderOperation::Remove { line, name } => {
+                (*line, HeaderOperationKind::Remove, name, None, None)
+            }
+            HeaderOperation::Set { line, name, .. } => {
+                (*line, HeaderOperationKind::Set, name, None, None)
+            }
+            HeaderOperation::Add { line, name, .. } => {
+                (*line, HeaderOperationKind::Add, name, None, None)
+            }
+            HeaderOperation::Prepend { line, name, .. } => {
+                (*line, HeaderOperationKind::Prepend, name, None, None)
+            }
+            HeaderOperation::Rename { line, from, to } => (
+                *line,
+                HeaderOperationKind::Rename,
+                from,
+                Some(to.as_str()),
+                None,
+            ),
+            HeaderOperation::Extract {
+                line,
+                name,
+                target,
+                mode,
+            } => (
+                *line,
+                HeaderOperationKind::Extract,
+                name,
+                Some(target.as_str()),
+                Some(*mode),
+            ),
+        };
+
+        // The parser has already bounded and validated header and variable
+        // names. Retain only those names here; header values must never enter
+        // a trace event, including in high-detail mode.
+        trace.record(TraceEvent::HeaderOperation {
+            line,
+            kind,
+            name: TraceName(name.clone()),
+            argument: argument.map(|name| TraceName(name.to_owned())),
+            extraction_mode,
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -464,6 +515,32 @@ fn render_json_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::R
             }
             output.write_char('}')
         }
+        TraceEvent::HeaderOperation {
+            line,
+            kind,
+            name,
+            argument,
+            extraction_mode,
+        } => {
+            write!(
+                output,
+                "{{\"event\":\"header-operation\",\"line\":{line},\"operation\":\"{}\",\"name\":",
+                header_operation_kind_name(*kind)
+            )?;
+            render_json_string(output, name.as_str().as_bytes())?;
+            if let Some(argument) = argument {
+                output.write_str(",\"argument\":")?;
+                render_json_string(output, argument.as_str().as_bytes())?;
+            }
+            if let Some(mode) = extraction_mode {
+                write!(
+                    output,
+                    ",\"extraction_mode\":\"{}\"",
+                    header_extraction_mode_name(*mode)
+                )?;
+            }
+            output.write_char('}')
+        }
     }
 }
 
@@ -603,6 +680,63 @@ fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::
             }
             Ok(())
         }
+        TraceEvent::HeaderOperation {
+            line,
+            kind,
+            name,
+            argument,
+            extraction_mode,
+        } => {
+            write!(
+                output,
+                "procmail-rs: {} header \"{}\"",
+                human_header_operation(*kind),
+                name.as_str()
+            )?;
+            if let Some(argument) = argument {
+                match kind {
+                    HeaderOperationKind::Rename => write!(output, " to \"{}\"", argument.as_str())?,
+                    HeaderOperationKind::Extract => {
+                        write!(output, " into \"{}\"", argument.as_str())?
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(mode) = extraction_mode {
+                write!(output, " ({})", header_extraction_mode_name(*mode))?;
+            }
+            write!(output, " at line {line}")
+        }
+    }
+}
+
+fn human_header_operation(kind: HeaderOperationKind) -> &'static str {
+    match kind {
+        HeaderOperationKind::Remove => "Removing",
+        HeaderOperationKind::Set => "Setting",
+        HeaderOperationKind::Add => "Adding",
+        HeaderOperationKind::Prepend => "Prepending",
+        HeaderOperationKind::Rename => "Renaming",
+        HeaderOperationKind::Extract => "Extracting",
+    }
+}
+
+fn header_operation_kind_name(kind: HeaderOperationKind) -> &'static str {
+    match kind {
+        HeaderOperationKind::Remove => "remove",
+        HeaderOperationKind::Set => "set",
+        HeaderOperationKind::Add => "add",
+        HeaderOperationKind::Prepend => "prepend",
+        HeaderOperationKind::Rename => "rename",
+        HeaderOperationKind::Extract => "extract",
+    }
+}
+
+fn header_extraction_mode_name(mode: HeaderExtractionMode) -> &'static str {
+    match mode {
+        HeaderExtractionMode::Raw => "raw",
+        HeaderExtractionMode::Unfolded => "unfolded",
+        HeaderExtractionMode::Decoded => "decoded",
     }
 }
 
@@ -769,6 +903,23 @@ pub enum TraceEvent {
         line: usize,
         command: Option<TraceValue>,
     },
+    HeaderOperation {
+        line: usize,
+        kind: HeaderOperationKind,
+        name: TraceName,
+        argument: Option<TraceName>,
+        extraction_mode: Option<HeaderExtractionMode>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderOperationKind {
+    Remove,
+    Set,
+    Add,
+    Prepend,
+    Rename,
+    Extract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

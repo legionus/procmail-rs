@@ -37,7 +37,7 @@ fn verbose_filter_writes_text_trace_to_logfile() {
     fs::write(
         &config,
         format!(
-            "MAILDIR={}\nLOGFILE={}\nVERBOSE=yes\nLOGDETAIL=values\nBOX=selected\n:0\n* ^Subject: wanted\n${{BOX}}/\n",
+            "MAILDIR={}\nLOGFILE={}\nVERBOSE=yes\nLOGDETAIL=values\nBOX=selected\n:0\nheaders {{\n set Subject header-value-sentinel\n add X-Added added-value-sentinel\n prepend X-Prepended prepended-value-sentinel\n rename X-Added to X-Renamed\n extract unfolded Subject into EXTRACTED\n remove X-Prepended\n}}\n:0\n${{BOX}}/\n",
             base.display(),
             logfile.display()
         ),
@@ -64,8 +64,26 @@ fn verbose_filter_writes_text_trace_to_logfile() {
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
     assert!(trace.contains("procmail-rs: Assigning at line 5 \"BOX=selected\""));
-    assert!(trace.contains("procmail-rs: Match on line 7 on"));
+    assert!(trace.contains("procmail-rs: Setting header \"Subject\" at line 8"));
+    assert!(trace.contains("procmail-rs: Adding header \"X-Added\" at line 9"));
+    assert!(trace.contains("procmail-rs: Prepending header \"X-Prepended\" at line 10"));
+    assert!(trace.contains("procmail-rs: Renaming header \"X-Added\" to \"X-Renamed\" at line 11"));
+    assert!(trace.contains(
+        "procmail-rs: Extracting header \"Subject\" into \"EXTRACTED\" (unfolded) at line 12"
+    ));
+    assert!(trace.contains("procmail-rs: Removing header \"X-Prepended\" at line 13"));
+    assert!(trace.contains("Assigning at line 12 \"EXTRACTED\" (value hidden)"));
     assert!(trace.contains("completed Maildir delivery"));
+    for value in [
+        "header-value-sentinel",
+        "added-value-sentinel",
+        "prepended-value-sentinel",
+    ] {
+        assert!(
+            !trace.contains(value),
+            "header value leaked into trace: {value}"
+        );
+    }
     fs::remove_dir_all(base).unwrap();
 }
 
@@ -73,7 +91,11 @@ fn verbose_filter_writes_text_trace_to_logfile() {
 fn json_format_emits_json_lines_with_requested_detail() {
     let base = temporary_directory("json");
     let config = base.join("rules.rc");
-    fs::write(&config, "BOX=selected\n:0\nmaildir:${BOX}\n").unwrap();
+    fs::write(
+        &config,
+        "BOX=selected\n:0\nheaders {\n remove X-Test\n}\n:0\nmaildir:${BOX}\n",
+    )
+    .unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
         .args([
@@ -104,6 +126,9 @@ fn json_format_emits_json_lines_with_requested_detail() {
     }
     assert!(trace.contains(
         "{\"event\":\"variable-assigned\",\"line\":1,\"name\":\"BOX\",\"source\":\"rc-file\",\"value\":\"selected\",\"value_truncated\":false}"
+    ));
+    assert!(trace.contains(
+        "{\"event\":\"header-operation\",\"line\":4,\"operation\":\"remove\",\"name\":\"X-Test\"}"
     ));
     assert!(trace.contains("\"stage\":\"dry-run\",\"path\":"));
     fs::remove_dir_all(base).unwrap();

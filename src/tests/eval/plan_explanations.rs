@@ -163,7 +163,7 @@ fn rendered_default_trace_excludes_message_and_configuration_values() {
 }
 
 #[test]
-fn rendered_trace_excludes_edited_header_names_and_values() {
+fn rendered_trace_identifies_header_operations_without_values() {
     let config = config::parse(
         ":0\nheaders {\n add X-Private-Edited-Name private-edited-value\n}\n:0\nmaildir:selected\n",
     )
@@ -179,7 +179,8 @@ fn rendered_trace_excludes_edited_header_names_and_values() {
     assert!(matches!(result, HeaderEvaluation::Decided(_)));
 
     let rendered = String::from_utf8(trace.into_inner()).unwrap();
-    assert!(!rendered.contains("X-Private-Edited-Name"));
+    assert!(rendered.contains("\"event\":\"header-operation\""));
+    assert!(rendered.contains("X-Private-Edited-Name"));
     assert!(!rendered.contains("private-edited-value"));
     assert!(rendered.contains("\"event\":\"recipe\""));
 }

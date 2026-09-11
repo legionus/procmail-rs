@@ -1105,6 +1105,11 @@ commands, or variable values. `LOGDETAIL=values` additionally permits bounded,
 escaped variable value prefixes. `LOGABSTRACT=no` is accepted; header-bearing
 abstract modes are not.
 
+Successful native header blocks log each operation in source order. Records
+identify the operation, source line, header name, rename target, or extraction
+variable as applicable. They never contain a header value. A variable assigned
+by `extract` is recorded with its value hidden even under `LOGDETAIL=values`.
+
 ```
 LOGFILE=/srv/mail/filter.log
 VERBOSE=yes

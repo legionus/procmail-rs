@@ -524,6 +524,7 @@ impl CompiledNode {
                     })
                     .map_err(OrderedExecutionError::Evaluation)?;
                 context.replace_message(message);
+                crate::trace::record_header_action(&action, context.host.trace());
                 context
                     .runtime
                     .apply_header_extractions(extractions, context.host.trace());

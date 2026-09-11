@@ -168,13 +168,20 @@ impl RuntimeVariables {
         trace: &mut impl TraceSink,
     ) {
         for extraction in extractions {
-            self.set_bytes_with_trace(
-                extraction.target,
-                extraction.value,
-                Some(extraction.line),
-                TraceVariableSource::RcFile,
-                trace,
-            );
+            let name = TraceName::new(&extraction.target).ok();
+            self.set_bytes(extraction.target, extraction.value);
+
+            // Extracted bytes are header values even after assignment to an rc
+            // variable. Record the assignment itself, but never copy those
+            // bytes into diagnostics in either trace detail mode.
+            if let Some(name) = name {
+                trace.record(TraceEvent::VariableAssigned {
+                    line: Some(extraction.line),
+                    name,
+                    source: TraceVariableSource::RcFile,
+                    value: None,
+                });
+            }
         }
     }
 

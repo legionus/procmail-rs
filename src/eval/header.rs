@@ -485,6 +485,7 @@ impl CompiledSequence {
                         })?;
                         let (edited, extractions) = applied.into_parts();
                         context.head.replace_edited_header(edited);
+                        crate::trace::record_header_action(&action, context.trace);
                         context
                             .runtime
                             .apply_header_extractions(extractions, context.trace);
