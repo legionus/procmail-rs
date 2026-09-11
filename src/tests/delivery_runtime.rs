@@ -86,6 +86,7 @@ fn publication_effects_use_the_visible_backend_result() {
                 recipe_line: 0,
                 destination: TraceDestinationKind::Maildir,
                 stage: DeliveryStage::Published,
+                path: None,
             },
             TraceEvent::LastFolderUpdated,
         ]
@@ -116,6 +117,7 @@ fn publication_effects_distinguish_failures_before_and_after_visibility() {
             recipe_line: 0,
             destination: TraceDestinationKind::Maildir,
             stage: DeliveryStage::Failed(FailureClass::Permanent),
+            path: None,
         }]
     );
 

@@ -39,6 +39,7 @@ fn models_each_required_execution_decision() {
             kind: ConditionKind::HeaderRegex,
             negated: false,
             matched: false,
+            expression: None,
         },
         TraceEvent::RecipeEvaluated {
             line: 2,
@@ -48,6 +49,7 @@ fn models_each_required_execution_decision() {
             recipe_line: 5,
             destination: DestinationKind::Maildir,
             stage: DeliveryStage::Failed(FailureClass::Transient),
+            path: None,
         },
         TraceEvent::ExternalCommand {
             recipe_line: 9,
@@ -118,7 +120,7 @@ fn bounded_writer_emits_complete_records_with_accounted_sizes() {
     assert_eq!(trace.byte_count(), trace.writer.len());
     let output = String::from_utf8(trace.into_inner()).unwrap();
     assert_eq!(output.lines().count(), 2);
-    assert!(output.contains("name=\"MAILBOX\""));
+    assert!(output.contains("\"name\":\"MAILBOX\""));
 }
 
 #[test]
@@ -132,6 +134,7 @@ fn renders_stable_event_fixture_with_source_lines() {
             kind: ConditionKind::BodyRegex,
             negated: true,
             matched: false,
+            expression: None,
         },
         TraceEvent::RecipeEvaluated {
             line: 10,
@@ -141,6 +144,7 @@ fn renders_stable_event_fixture_with_source_lines() {
             recipe_line: 12,
             destination: DestinationKind::Maildir,
             stage: DeliveryStage::Failed(FailureClass::Transient),
+            path: None,
         },
         TraceEvent::LastFolderUpdated,
         TraceEvent::ExternalCommand {
@@ -157,14 +161,52 @@ fn renders_stable_event_fixture_with_source_lines() {
     assert_eq!(
         rendered,
         concat!(
-            "event=variable-assigned line=7 name=\"BOX\" source=rc-file\n",
-            "event=condition recipe_line=10 condition_line=11 condition_index=0 kind=body-regex negated=true matched=false\n",
-            "event=recipe line=10 decision=deferred\n",
-            "event=delivery recipe_line=12 destination=maildir stage=failed failure_class=transient\n",
-            "event=last-folder-updated\n",
-            "event=external-command recipe_line=20 stage=succeeded\n",
+            "{\"event\":\"variable-assigned\",\"line\":7,\"name\":\"BOX\",\"source\":\"rc-file\"}\n",
+            "{\"event\":\"condition\",\"recipe_line\":10,\"condition_line\":11,\"condition_index\":0,\"kind\":\"body-regex\",\"negated\":true,\"matched\":false}\n",
+            "{\"event\":\"recipe\",\"line\":10,\"decision\":\"deferred\"}\n",
+            "{\"event\":\"delivery\",\"recipe_line\":12,\"destination\":\"maildir\",\"stage\":\"failed failure_class=transient\"}\n",
+            "{\"event\":\"last-folder-updated\"}\n",
+            "{\"event\":\"external-command\",\"recipe_line\":20,\"stage\":\"succeeded\"}\n",
         )
     );
+}
+
+#[test]
+fn human_writer_explains_decisions_without_machine_field_names() {
+    let mut trace =
+        BoundedTraceWriter::formatted(Vec::new(), TraceDetail::Values, TraceFormat::Text);
+    trace.record(TraceEvent::ConditionEvaluated {
+        recipe_line: 41,
+        condition_line: 42,
+        condition_index: 1,
+        kind: ConditionKind::VariableRegex,
+        negated: false,
+        matched: false,
+        expression: None,
+    });
+    trace.record(TraceEvent::VariableAssigned {
+        line: Some(7),
+        name: TraceName::new("LISTDIR").unwrap(),
+        source: VariableSource::RcFile,
+        value: Some(TraceValue::new(b"secret")),
+    });
+    trace.record(TraceEvent::Delivery {
+        recipe_line: 50,
+        destination: DestinationKind::Maildir,
+        stage: DeliveryStage::DryRun,
+        path: None,
+    });
+
+    let rendered = String::from_utf8(trace.into_inner()).unwrap();
+    assert_eq!(
+        rendered,
+        concat!(
+            "procmail-rs: No match on line 42 (condition 2 of recipe at line 41: variable regular expression)\n",
+            "procmail-rs: Assigning at line 7 \"LISTDIR=secret\"\n",
+            "procmail-rs: Would deliver to Maildir (recipe at line 50)\n",
+        )
+    );
+    assert!(!rendered.contains("event="));
 }
 
 #[test]
@@ -289,7 +331,7 @@ fn high_detail_writer_escapes_and_truncates_variable_values() {
     });
 
     let rendered = String::from_utf8(trace.into_inner()).unwrap();
-    assert!(rendered.contains("value=\"secret\\n"));
-    assert!(rendered.contains("value_truncated=true"));
+    assert!(rendered.contains("\"value\":\"secret\\n"));
+    assert!(rendered.contains("\"value_truncated\":true"));
     assert_eq!(rendered.lines().count(), 1);
 }

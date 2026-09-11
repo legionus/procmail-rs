@@ -10,10 +10,11 @@ use crate::external_process::process_timeout_from_config;
 use crate::limits::MessageLimits;
 use crate::trace::TraceConfig;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ConfigurationSettings {
     pub message_limits: MessageLimits,
     pub durability: Durability,
+    pub trace: TraceConfig,
 }
 
 pub fn validate(config: &Config) -> Result<ConfigurationSettings, String> {
@@ -28,10 +29,11 @@ pub fn validate(config: &Config) -> Result<ConfigurationSettings, String> {
     lock_sleep_from_config(config)?;
     process_timeout_from_config(config)?;
     config::umask_from_config(config)?;
-    TraceConfig::from_config(config).map_err(|error| error.to_string())?;
+    let trace = TraceConfig::from_config(config).map_err(|error| error.to_string())?;
 
     Ok(ConfigurationSettings {
         message_limits,
         durability,
+        trace,
     })
 }

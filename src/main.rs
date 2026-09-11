@@ -4,7 +4,9 @@
 #![forbid(unsafe_code)]
 
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -20,7 +22,9 @@ use procmail_rs::message::Message;
 use procmail_rs::rc_file::{LoadedRcFile, RcFileLoader};
 use procmail_rs::runtime::RuntimeVariables;
 use procmail_rs::signal_state::{self, InterruptibleReader, ReceivedSignal};
-use procmail_rs::trace::NoTrace;
+use procmail_rs::trace::{
+    BoundedTraceWriter, NoTrace, TraceDetail, TraceEvent, TraceFormat, TraceSink,
+};
 use procmail_rs::user_identity::UserIdentity;
 
 mod command_log;
@@ -39,6 +43,9 @@ enum Action {
 
 struct Command {
     action: Action,
+    dry_run: bool,
+    trace_format: TraceFormat,
+    trace_detail: Option<TraceDetail>,
     config: Option<PathBuf>,
     supplied: Vec<SuppliedVariable>,
 }
@@ -50,7 +57,8 @@ enum Invocation {
 }
 
 const HELP: &str = "procmail-rs - bounded procmail-compatible mail filtering\n\n\
-usage: procmail-rs <check|explain|filter> [--config PATH] [--set NAME=VALUE]...\n\
+usage: procmail-rs <check|explain|filter> [--dry-run] [--format FORMAT] [--detail DETAIL]\n\
+       [--config PATH] [--set NAME=VALUE]...\n\
        procmail-rs --help\n\
        procmail-rs --version\n\n\
 commands:\n\
@@ -58,10 +66,43 @@ commands:\n\
   explain  describe the bounded execution plan without reading stdin\n\
   filter   read one message from stdin and deliver it to explicit destinations\n\n\
 options:\n\
+  --dry-run         evaluate filter without publishing delivery destinations\n\
+  --format FORMAT   trace format: text (default) or json\n\
+  --detail DETAIL   override LOGDETAIL: metadata or values\n\
   --config PATH     override the automatically selected root rc file\n\
   --set NAME=VALUE  provide one policy-checked external value (maximum 256)\n\
   -h, --help        print this help text\n\
   -V, --version     print the program version\n";
+
+enum FilterTrace {
+    Disabled(NoTrace),
+    Enabled(BoundedTraceWriter<Box<dyn Write + Send>>),
+}
+
+impl TraceSink for FilterTrace {
+    fn detail(&self) -> procmail_rs::trace::TraceDetail {
+        match self {
+            Self::Disabled(trace) => trace.detail(),
+            Self::Enabled(trace) => trace.detail(),
+        }
+    }
+
+    fn record(&mut self, event: TraceEvent) {
+        match self {
+            Self::Disabled(trace) => trace.record(event),
+            Self::Enabled(trace) => trace.record(event),
+        }
+    }
+}
+
+impl FilterTrace {
+    fn stop_reason(&self) -> Option<procmail_rs::trace::TraceStopReason> {
+        match self {
+            Self::Disabled(_) => None,
+            Self::Enabled(trace) => trace.stop_reason(),
+        }
+    }
+}
 
 #[derive(Debug)]
 enum OperationalError {
@@ -185,6 +226,7 @@ fn run() -> Result<u8, OperationalError> {
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     let limits = settings.message_limits;
     let durability = settings.durability;
+    let trace_detail = command.trace_detail.unwrap_or(settings.trace.detail());
 
     config.for_each_compatibility_warning(|line, flag| {
         eprintln!(
@@ -247,9 +289,19 @@ fn run() -> Result<u8, OperationalError> {
         Action::Filter => {
             let mut runtime = RuntimeVariables::default();
             runtime.set_system_hostname(hostname);
-            let mut delivery_runtime =
-                DeliveryRuntime::new(staging_directory, durability, limits, identity.uid());
-            let mut trace = NoTrace;
+            let mut delivery_runtime = DeliveryRuntime::new(
+                staging_directory,
+                durability,
+                limits,
+                identity.uid(),
+                command.dry_run,
+            );
+            let mut trace = create_filter_trace(
+                command.dry_run,
+                command.trace_format,
+                trace_detail,
+                &settings.trace,
+            );
             let stdin = io::stdin().lock();
             let mut stdin = InterruptibleReader::new(stdin);
             let mut head = Message::read_headers(&mut stdin, limits).map_err(|error| {
@@ -300,6 +352,9 @@ fn run() -> Result<u8, OperationalError> {
                 }
                 Err(OrderedExecutionError::Delivery(error)) => Err(error),
             };
+            if let Some(reason) = trace.stop_reason() {
+                eprintln!("procmail-rs: warning: trace stopped: {reason:?}");
+            }
 
             // EXITCODE is resolved after recipe processing because a failure
             // handler may assign it using values produced while filtering.
@@ -326,6 +381,64 @@ fn run() -> Result<u8, OperationalError> {
     }
     result?;
     Ok(requested_status.unwrap_or(ExitStatus::Success as u8))
+}
+
+fn create_filter_trace(
+    dry_run: bool,
+    format: TraceFormat,
+    detail: TraceDetail,
+    config: &procmail_rs::trace::TraceConfig,
+) -> FilterTrace {
+    if !dry_run && !config.enabled() {
+        return FilterTrace::Disabled(NoTrace);
+    }
+    if dry_run || config.logfile().is_none() {
+        return FilterTrace::Enabled(BoundedTraceWriter::formatted(
+            Box::new(io::stderr()),
+            detail,
+            format,
+        ));
+    }
+    let path = config.logfile().unwrap_or_default();
+    let nofollow = match i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()) {
+        Ok(flags) => flags,
+        Err(_) => {
+            eprintln!("procmail-rs: cannot enable trace: O_NOFOLLOW does not fit platform flags");
+            return FilterTrace::Disabled(NoTrace);
+        }
+    };
+
+    // Open the configured trace once before message processing. Refusing
+    // symlinks and non-regular files keeps diagnostics from being redirected
+    // to an unexpected object, while any failure remains advisory and disables
+    // only tracing for this message.
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(nofollow)
+        .open(path)
+        .and_then(|file| {
+            if file.metadata()?.file_type().is_file() {
+                Ok(file)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "LOGFILE is not a regular file",
+                ))
+            }
+        });
+    match file {
+        Ok(file) => FilterTrace::Enabled(BoundedTraceWriter::formatted(
+            Box::new(file),
+            detail,
+            format,
+        )),
+        Err(error) => {
+            eprintln!("procmail-rs: cannot open LOGFILE for trace: {error}");
+            FilterTrace::Disabled(NoTrace)
+        }
+    }
 }
 
 fn parse_requested_exit_code(runtime: &RuntimeVariables) -> Result<Option<u8>, OperationalError> {
@@ -459,6 +572,9 @@ fn parse_args() -> Result<Invocation, String> {
     };
     let mut config = None;
     let mut supplied = Vec::new();
+    let mut dry_run = false;
+    let mut trace_format = TraceFormat::Text;
+    let mut trace_detail = None;
 
     // Parse every option before opening the rc file or stdin. This keeps bad
     // or excessive caller-controlled assignments from affecting filtering or
@@ -472,6 +588,39 @@ fn parse_args() -> Result<Invocation, String> {
                     return Err("--config may only be specified once".into());
                 }
                 config = Some(PathBuf::from(args.next().ok_or_else(usage)?));
+            }
+            Some("--dry-run") => {
+                if action != Action::Filter {
+                    return Err("--dry-run may only be used with filter".into());
+                }
+                if dry_run {
+                    return Err("--dry-run may only be specified once".into());
+                }
+                dry_run = true;
+            }
+            Some("--format") => {
+                if action != Action::Filter {
+                    return Err("--format may only be used with filter".into());
+                }
+                trace_format = parse_trace_format(args.next().ok_or_else(usage)?)?;
+            }
+            Some("--detail") => {
+                if action != Action::Filter {
+                    return Err("--detail may only be used with filter".into());
+                }
+                trace_detail = Some(parse_trace_detail(args.next().ok_or_else(usage)?)?);
+            }
+            Some(option) if option.starts_with("--format=") => {
+                if action != Action::Filter {
+                    return Err("--format may only be used with filter".into());
+                }
+                trace_format = parse_trace_format(option["--format=".len()..].into())?;
+            }
+            Some(option) if option.starts_with("--detail=") => {
+                if action != Action::Filter {
+                    return Err("--detail may only be used with filter".into());
+                }
+                trace_detail = Some(parse_trace_detail(option["--detail=".len()..].into())?);
             }
             Some("--set") => {
                 if supplied.len() == MAX_COMMAND_LINE_VARIABLES {
@@ -492,13 +641,32 @@ fn parse_args() -> Result<Invocation, String> {
 
     Ok(Invocation::Run(Command {
         action,
+        dry_run,
+        trace_format,
+        trace_detail,
         config,
         supplied,
     }))
 }
 
+fn parse_trace_format(value: std::ffi::OsString) -> Result<TraceFormat, String> {
+    match value.to_str() {
+        Some("text") => Ok(TraceFormat::Text),
+        Some("json") => Ok(TraceFormat::Json),
+        _ => Err("--format expects 'text' or 'json'".into()),
+    }
+}
+
+fn parse_trace_detail(value: std::ffi::OsString) -> Result<TraceDetail, String> {
+    match value.to_str() {
+        Some("metadata") => Ok(TraceDetail::Metadata),
+        Some("values") => Ok(TraceDetail::Values),
+        _ => Err("--detail expects 'metadata' or 'values'".into()),
+    }
+}
+
 fn usage() -> String {
-    "usage: procmail-rs <check|explain|filter> [--config PATH] [--set NAME=VALUE]...".into()
+    "usage: procmail-rs <check|explain|filter> [--dry-run] [--format FORMAT] [--detail DETAIL] [--config PATH] [--set NAME=VALUE]...".into()
 }
 
 fn load_root_config(

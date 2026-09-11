@@ -409,6 +409,11 @@ impl CompiledNode {
                     .program_input(input)
                     .ok_or(EvalError::BodyWasNotBuffered)
                     .map_err(OrderedExecutionError::Evaluation)?;
+                crate::trace::record_external_command(
+                    condition.line,
+                    command,
+                    context.host.trace(),
+                );
                 match context
                     .host
                     .external_condition(command, input, context.runtime)
@@ -455,6 +460,11 @@ impl CompiledNode {
                     .map_err(OrderedExecutionError::Evaluation)?;
                 let limit =
                     active_command_value_limit(context.runtime, action.target, action.line)?;
+                crate::trace::record_external_command(
+                    action.line,
+                    &action.command,
+                    context.host.trace(),
+                );
                 let captured = context.host.capture(
                     &action.command,
                     input,
@@ -541,6 +551,11 @@ impl CompiledNode {
                     .resolve_lock(context.runtime)
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
+                crate::trace::record_external_command(
+                    self.line,
+                    &action.command,
+                    context.host.trace(),
+                );
                 match context.host.external_action(
                     action,
                     *options,
@@ -866,6 +881,7 @@ where
     }
 
     fn command(&mut self, command: &str, remaining: usize) -> Result<Vec<u8>, Self::Error> {
+        crate::trace::record_external_command(self.line, command, self.host.trace());
         let captured =
             self.host
                 .capture(

@@ -52,7 +52,7 @@ fn metadata_trace_excludes_capture_command_output_and_message_values() {
     ] {
         assert!(!rendered.contains(private), "leaked {private:?}");
     }
-    assert!(rendered.contains("name=\"CAPTURED\""));
+    assert!(rendered.contains("\"name\":\"CAPTURED\""));
 }
 
 #[test]
@@ -116,6 +116,7 @@ fn forwards_evaluation_events_to_the_selected_sink() {
                 kind: TraceConditionKind::HeaderRegex,
                 negated: false,
                 matched: true,
+                expression: None,
             },
             TraceEvent::RecipeEvaluated {
                 line: 2,
@@ -156,9 +157,9 @@ fn rendered_default_trace_excludes_message_and_configuration_values() {
     ] {
         assert!(!rendered.contains(private), "leaked {private:?}");
     }
-    assert!(rendered.contains("name=\"TOKEN\""));
-    assert!(rendered.contains("event=condition"));
-    assert!(rendered.contains("event=recipe"));
+    assert!(rendered.contains("\"name\":\"TOKEN\""));
+    assert!(rendered.contains("\"event\":\"condition\""));
+    assert!(rendered.contains("\"event\":\"recipe\""));
 }
 
 #[test]
@@ -180,7 +181,7 @@ fn rendered_trace_excludes_edited_header_names_and_values() {
     let rendered = String::from_utf8(trace.into_inner()).unwrap();
     assert!(!rendered.contains("X-Private-Edited-Name"));
     assert!(!rendered.contains("private-edited-value"));
-    assert!(rendered.contains("event=recipe"));
+    assert!(rendered.contains("\"event\":\"recipe\""));
 }
 
 #[test]
@@ -198,7 +199,7 @@ fn variable_values_require_an_explicit_high_detail_sink() {
     assert!(matches!(result, HeaderEvaluation::Decided(_)));
 
     let rendered = String::from_utf8(trace.into_inner()).unwrap();
-    assert!(rendered.contains("value=\"secret-value\""));
+    assert!(rendered.contains("\"value\":\"secret-value\""));
 }
 
 #[test]

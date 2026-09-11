@@ -178,6 +178,14 @@ pub trait TraceSink {
     fn record(&mut self, event: TraceEvent);
 }
 
+pub fn record_external_command(line: usize, command: &str, trace: &mut impl TraceSink) {
+    let command = trace
+        .detail()
+        .includes_variable_values()
+        .then(|| TraceValue::new(command.as_bytes()));
+    trace.record(TraceEvent::ExternalCommandExecuting { line, command });
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TraceDetail {
     #[default]
@@ -205,6 +213,14 @@ pub struct BoundedTraceWriter<W> {
     bytes: usize,
     stopped: Option<TraceStopReason>,
     detail: TraceDetail,
+    format: TraceFormat,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TraceFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 impl<W> BoundedTraceWriter<W> {
@@ -215,6 +231,7 @@ impl<W> BoundedTraceWriter<W> {
             bytes: 0,
             stopped: None,
             detail: TraceDetail::Metadata,
+            format: TraceFormat::Json,
         }
     }
 
@@ -225,6 +242,18 @@ impl<W> BoundedTraceWriter<W> {
             bytes: 0,
             stopped: None,
             detail,
+            format: TraceFormat::Json,
+        }
+    }
+
+    pub fn formatted(writer: W, detail: TraceDetail, format: TraceFormat) -> Self {
+        Self {
+            writer,
+            events: 0,
+            bytes: 0,
+            stopped: None,
+            detail,
+            format,
         }
     }
 
@@ -254,6 +283,14 @@ impl<W: Write> TraceSink for BoundedTraceWriter<W> {
         if self.stopped.is_some() {
             return;
         }
+        if self.format == TraceFormat::Text
+            && matches!(
+                event,
+                TraceEvent::RecipeEvaluated { .. } | TraceEvent::LastFolderUpdated
+            )
+        {
+            return;
+        }
         if self.events >= MAX_TRACE_EVENTS {
             self.stopped = Some(TraceStopReason::EventLimit);
             return;
@@ -263,7 +300,11 @@ impl<W: Write> TraceSink for BoundedTraceWriter<W> {
         // This prevents both a partial record and allocation beyond the
         // per-event budget when an event contains hostile future fields.
         let mut rendered = BoundedText::new(MAX_TRACE_EVENT_SIZE);
-        if render_event(&mut rendered, &event).is_err() || rendered.write_char('\n').is_err() {
+        let formatted = match self.format {
+            TraceFormat::Json => render_json_event(&mut rendered, &event),
+            TraceFormat::Text => render_human_event(&mut rendered, &event),
+        };
+        if formatted.is_err() || rendered.write_char('\n').is_err() {
             self.stopped = Some(TraceStopReason::EventSizeLimit);
             return;
         }
@@ -329,7 +370,7 @@ impl fmt::Write for BoundedText {
     }
 }
 
-fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
+fn render_json_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
     match event {
         TraceEvent::VariableAssigned {
             line,
@@ -339,22 +380,19 @@ fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result
         } => {
             write!(
                 output,
-                "event=variable-assigned line={} name=\"{}\" source={}",
+                "{{\"event\":\"variable-assigned\",\"line\":{},\"name\":",
                 line.unwrap_or(0),
-                EscapedBytes::new(name.as_str().as_bytes()),
-                variable_source_name(*source)
             )?;
+            render_json_string(output, name.as_str().as_bytes())?;
+            write!(output, ",\"source\":\"{}\"", variable_source_name(*source))?;
             if let Some(value) = value {
-                write!(
-                    output,
-                    " value=\"{}\" value_truncated={}",
-                    EscapedBytes::new(value.as_bytes()),
-                    value.was_truncated()
-                )?;
+                output.write_str(",\"value\":")?;
+                render_json_string(output, value.as_bytes())?;
+                write!(output, ",\"value_truncated\":{}", value.was_truncated())?;
             }
-            Ok(())
+            output.write_char('}')
         }
-        TraceEvent::LastFolderUpdated => output.write_str("event=last-folder-updated"),
+        TraceEvent::LastFolderUpdated => output.write_str("{\"event\":\"last-folder-updated\"}"),
         TraceEvent::ConditionEvaluated {
             recipe_line,
             condition_line,
@@ -362,15 +400,28 @@ fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result
             kind,
             negated,
             matched,
-        } => write!(
-            output,
-            "event=condition recipe_line={recipe_line} condition_line={condition_line} condition_index={condition_index} kind={} negated={negated} matched={matched}",
-            condition_kind_name(*kind)
-        ),
+            expression,
+        } => {
+            write!(
+                output,
+                "{{\"event\":\"condition\",\"recipe_line\":{recipe_line},\"condition_line\":{condition_line},\"condition_index\":{condition_index},\"kind\":\"{}\",\"negated\":{negated},\"matched\":{matched}",
+                condition_kind_name(*kind)
+            )?;
+            if let Some(expression) = expression {
+                output.write_str(",\"expression\":")?;
+                render_json_string(output, expression.as_bytes())?;
+                write!(
+                    output,
+                    ",\"expression_truncated\":{}",
+                    expression.was_truncated()
+                )?;
+            }
+            output.write_char('}')
+        }
         TraceEvent::RecipeEvaluated { line, decision } => {
             write!(
                 output,
-                "event=recipe line={line} decision={}",
+                "{{\"event\":\"recipe\",\"line\":{line},\"decision\":\"{}\"}}",
                 recipe_decision_name(*decision)
             )
         }
@@ -378,21 +429,202 @@ fn render_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result
             recipe_line,
             destination,
             stage,
+            path,
         } => {
             write!(
                 output,
-                "event=delivery recipe_line={recipe_line} destination={} stage=",
+                "{{\"event\":\"delivery\",\"recipe_line\":{recipe_line},\"destination\":\"{}\",\"stage\":\"",
                 destination_kind_name(*destination)
             )?;
-            render_delivery_stage(output, *stage)
+            render_delivery_stage(output, *stage)?;
+            if let Some(path) = path {
+                output.write_str("\",\"path\":")?;
+                render_json_string(output, path.as_bytes())?;
+                write!(output, ",\"path_truncated\":{}}}", path.was_truncated())
+            } else {
+                output.write_str("\"}")
+            }
         }
         TraceEvent::ExternalCommand { recipe_line, stage } => {
             write!(
                 output,
-                "event=external-command recipe_line={recipe_line} stage="
+                "{{\"event\":\"external-command\",\"recipe_line\":{recipe_line},\"stage\":\""
             )?;
-            render_external_stage(output, *stage)
+            render_external_stage(output, *stage).and_then(|()| output.write_str("\"}"))
         }
+        TraceEvent::ExternalCommandExecuting { line, command } => {
+            write!(
+                output,
+                "{{\"event\":\"external-command-executing\",\"line\":{line}"
+            )?;
+            if let Some(command) = command {
+                output.write_str(",\"command\":")?;
+                render_json_string(output, command.as_bytes())?;
+                write!(output, ",\"command_truncated\":{}", command.was_truncated())?;
+            }
+            output.write_char('}')
+        }
+    }
+}
+
+fn render_json_string(output: &mut impl fmt::Write, value: &[u8]) -> fmt::Result {
+    output.write_char('"')?;
+    for byte in value {
+        match byte {
+            b'"' => output.write_str("\\\"")?,
+            b'\\' => output.write_str("\\\\")?,
+            b'\n' => output.write_str("\\n")?,
+            b'\r' => output.write_str("\\r")?,
+            b'\t' => output.write_str("\\t")?,
+            b' '..=b'~' => output.write_char(char::from(*byte))?,
+            _ => write!(output, "\\u00{byte:02x}")?,
+        }
+    }
+    output.write_char('"')
+}
+
+fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
+    match event {
+        TraceEvent::VariableAssigned {
+            line, name, value, ..
+        } => {
+            match line {
+                Some(line) => write!(
+                    output,
+                    "procmail-rs: Assigning at line {line} \"{}",
+                    name.as_str()
+                )?,
+                None => write!(output, "procmail-rs: Assigning \"{}", name.as_str())?,
+            }
+            match value {
+                Some(value) => write!(
+                    output,
+                    "={}\"{}",
+                    EscapedBytes::new(value.as_bytes()),
+                    if value.was_truncated() {
+                        " (truncated)"
+                    } else {
+                        ""
+                    }
+                ),
+                None => output.write_str("\" (value hidden)"),
+            }
+        }
+        TraceEvent::LastFolderUpdated => output.write_str("procmail-rs: Updated LASTFOLDER"),
+        TraceEvent::ConditionEvaluated {
+            recipe_line,
+            condition_line,
+            condition_index,
+            kind,
+            negated,
+            matched,
+            expression,
+        } => {
+            write!(
+                output,
+                "procmail-rs: {} on line {condition_line}",
+                if *matched { "Match" } else { "No match" }
+            )?;
+            if let Some(expression) = expression {
+                write!(
+                    output,
+                    " on \"{}\"",
+                    EscapedBytes::new(expression.as_bytes())
+                )?;
+            } else {
+                write!(
+                    output,
+                    " (condition {} of recipe at line {recipe_line}: {}{})",
+                    condition_index + 1,
+                    human_condition_kind(*kind),
+                    if *negated { ", negated" } else { "" }
+                )?;
+            }
+            Ok(())
+        }
+        TraceEvent::RecipeEvaluated { line, decision } => write!(
+            output,
+            "procmail-rs: Recipe at line {line}: {}",
+            match decision {
+                RecipeDecision::Selected => "selected",
+                RecipeDecision::Deferred => "waiting for more message data",
+                RecipeDecision::Skipped => "skipped",
+            }
+        ),
+        TraceEvent::Delivery {
+            recipe_line,
+            destination,
+            stage,
+            path,
+        } => match stage {
+            DeliveryStage::DryRun => {
+                write!(
+                    output,
+                    "procmail-rs: Would deliver to {}",
+                    human_destination_kind(*destination)
+                )?;
+                if let Some(path) = path {
+                    write!(output, " \"{}\"", EscapedBytes::new(path.as_bytes()))?;
+                }
+                write!(output, " (recipe at line {recipe_line})")
+            }
+            DeliveryStage::Preparing => write!(
+                output,
+                "procmail-rs: Recipe at line {recipe_line}: preparing {} delivery",
+                human_destination_kind(*destination)
+            ),
+            DeliveryStage::Published => write!(
+                output,
+                "procmail-rs: Recipe at line {recipe_line}: completed {} delivery",
+                human_destination_kind(*destination)
+            ),
+            DeliveryStage::Failed(class) => write!(
+                output,
+                "procmail-rs: Recipe at line {recipe_line}: {} delivery failed ({})",
+                human_destination_kind(*destination),
+                failure_class_name(*class)
+            ),
+        },
+        TraceEvent::ExternalCommand { recipe_line, stage } => write!(
+            output,
+            "procmail-rs: Recipe at line {recipe_line}: external command {}",
+            match stage {
+                ExternalCommandStage::Starting => "started",
+                ExternalCommandStage::Succeeded => "succeeded",
+                ExternalCommandStage::Failed(_) => "failed",
+            }
+        ),
+        TraceEvent::ExternalCommandExecuting { line, command } => {
+            write!(output, "procmail-rs: Executing at line {line}")?;
+            if let Some(command) = command {
+                write!(output, " \"{}\"", EscapedBytes::new(command.as_bytes()))?;
+            } else {
+                output.write_str(" external command")?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn human_condition_kind(kind: ConditionKind) -> &'static str {
+    match kind {
+        ConditionKind::ShellExpanded => "expanded condition",
+        ConditionKind::HeaderRegex => "header regular expression",
+        ConditionKind::BodyRegex => "body regular expression",
+        ConditionKind::MessageRegex => "message regular expression",
+        ConditionKind::VariableRegex => "variable regular expression",
+        ConditionKind::Program => "external program",
+        ConditionKind::SmallerThan => "message size is smaller than",
+        ConditionKind::LargerThan => "message size is larger than",
+    }
+}
+
+fn human_destination_kind(kind: DestinationKind) -> &'static str {
+    match kind {
+        DestinationKind::Maildir => "Maildir",
+        DestinationKind::Mbox => "mbox",
+        DestinationKind::File => "file",
+        DestinationKind::Discard => "/dev/null",
     }
 }
 
@@ -448,6 +680,7 @@ fn failure_class_name(class: FailureClass) -> &'static str {
 fn render_delivery_stage(output: &mut impl fmt::Write, stage: DeliveryStage) -> fmt::Result {
     match stage {
         DeliveryStage::Preparing => output.write_str("preparing"),
+        DeliveryStage::DryRun => output.write_str("dry-run"),
         DeliveryStage::Published => output.write_str("published"),
         DeliveryStage::Failed(class) => {
             write!(output, "failed failure_class={}", failure_class_name(class))
@@ -516,6 +749,7 @@ pub enum TraceEvent {
         kind: ConditionKind,
         negated: bool,
         matched: bool,
+        expression: Option<TraceValue>,
     },
     RecipeEvaluated {
         line: usize,
@@ -525,10 +759,15 @@ pub enum TraceEvent {
         recipe_line: usize,
         destination: DestinationKind,
         stage: DeliveryStage,
+        path: Option<TraceValue>,
     },
     ExternalCommand {
         recipe_line: usize,
         stage: ExternalCommandStage,
+    },
+    ExternalCommandExecuting {
+        line: usize,
+        command: Option<TraceValue>,
     },
 }
 
@@ -631,6 +870,7 @@ pub enum DestinationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStage {
     Preparing,
+    DryRun,
     Published,
     Failed(FailureClass),
 }

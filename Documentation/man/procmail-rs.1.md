@@ -11,7 +11,8 @@ procmail-rs - bounded procmail-compatible mail filtering
 
 **procmail-rs** **explain** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
 
-**procmail-rs** **filter** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
+**procmail-rs** **filter** [**--dry-run**] [**--format** *FORMAT*]
+[**--detail** *DETAIL*] [**--config** *PATH*] [**--set** *NAME=VALUE*]...
 
 **procmail-rs** **--help**
 
@@ -118,6 +119,28 @@ procmail-rs check --config rules.rc
 procmail-rs explain --config rules.rc
 procmail-rs filter --config rules.rc <message.eml
 ```
+
+Use **--dry-run** with **filter** to read and validate the complete message,
+evaluate runtime conditions, and report bounded trace events to standard
+error without publishing Maildir, mbox, file, discard, or pipe deliveries.
+Global and local locks are not acquired, and `TRAP` is not run. Header and
+body filters, command substitutions, and external program conditions still
+run because their results can change later recipe decisions; those trusted rc
+commands can therefore have effects outside procmail-rs. The default trace
+does not expose values. Set `LOGDETAIL=values` explicitly when bounded variable
+values are needed for diagnosis, or pass **--detail=values**. The command-line
+setting controls only logging and does not enter the rc variable table.
+
+```
+procmail-rs filter --dry-run --config rules.rc <message.eml
+```
+
+**--format=text** is the default and produces bounded, human-readable records
+modelled after original procmail diagnostics. **--format=json** produces one
+JSON object per line for automated analysis. The format is independent of
+**--dry-run**: a regular filtering run writes enabled `VERBOSE` diagnostics to
+`LOGFILE`, or to standard error when no log file is configured. The options
+also accept the separated forms `--format text` and `--detail values`.
 
 # EXIT STATUS
 

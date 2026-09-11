@@ -21,6 +21,7 @@ pub(super) struct CompiledCondition {
     kind: CompiledConditionKind,
     match_captures: Vec<usize>,
     capture_indexes: Vec<usize>,
+    trace_expression: String,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +70,18 @@ fn compile_condition(
     area: RegexArea,
     case_sensitive: bool,
 ) -> CompiledCondition {
+    let trace_expression = match &condition.kind {
+        ConditionKind::ShellExpanded(condition) => condition.source.clone(),
+        ConditionKind::Regex(regex) | ConditionKind::AreaRegex { regex, .. } => {
+            regex.pattern().to_owned()
+        }
+        ConditionKind::VariableRegex { name, regex } => {
+            format!("{name} ?? {}", regex.pattern())
+        }
+        ConditionKind::Program(command) => command.clone(),
+        ConditionKind::SmallerThan(size) => format!("< {size}"),
+        ConditionKind::LargerThan(size) => format!("> {size}"),
+    };
     let regex_condition = match &condition.kind {
         ConditionKind::Regex(regex)
         | ConditionKind::AreaRegex { regex, .. }
@@ -129,6 +142,7 @@ fn compile_condition(
         capture_indexes: regex_condition
             .map(|regex| regex.capture_indexes().to_vec())
             .unwrap_or_default(),
+        trace_expression,
     }
 }
 
@@ -310,6 +324,10 @@ impl CompiledCondition {
             CompiledConditionKind::SmallerThan(_) => TraceConditionKind::SmallerThan,
             CompiledConditionKind::LargerThan(_) => TraceConditionKind::LargerThan,
         };
+        let expression = trace
+            .detail()
+            .includes_variable_values()
+            .then(|| crate::trace::TraceValue::new(self.trace_expression.as_bytes()));
         trace.record(TraceEvent::ConditionEvaluated {
             recipe_line,
             condition_line: self.line,
@@ -317,6 +335,7 @@ impl CompiledCondition {
             kind,
             negated: self.negated,
             matched,
+            expression,
         });
     }
 

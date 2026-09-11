@@ -428,6 +428,11 @@ impl CompiledSequence {
                             .capture
                             .as_deref_mut()
                             .ok_or(EvalError::ExternalActionUnsupported { line: recipe.line })?;
+                        crate::trace::record_external_command(
+                            action.line,
+                            &action.command,
+                            context.trace,
+                        );
                         match executor(
                             &action.command,
                             context.head.as_bytes(),

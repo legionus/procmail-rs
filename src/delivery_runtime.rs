@@ -33,6 +33,7 @@ pub(super) struct DeliveryRuntime {
     uid: u32,
     global_lock: Option<LocalLock>,
     publications: PublicationTracker,
+    dry_run: bool,
 }
 
 struct SharedTrace<'a, T> {
@@ -70,6 +71,7 @@ struct OrderedDeliveryHost<'a, T> {
     global_lock: Option<LocalLock>,
     suspended_global_locks: Vec<Option<LocalLock>>,
     trace: SharedTrace<'a, T>,
+    dry_run: bool,
 }
 
 impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T> {
@@ -89,6 +91,10 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
         runtime: &mut RuntimeVariables,
     ) -> Result<(), DeliveryAttemptError<Self::Error>> {
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        if self.dry_run {
+            return simulate_delivery(destination, runtime, &mut self.trace)
+                .map_err(DeliveryAttemptError::Fatal);
+        }
         let _local_lock = acquire_recipe_lock(lock, Some(destination), runtime, self.uid)
             .map_err(classify_execution_error)?;
         let result = if destination.supports_fanout_delivery() {
@@ -128,6 +134,15 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
         runtime: &mut RuntimeVariables,
     ) -> Result<Option<procmail_rs::message::Message>, DeliveryAttemptError<Self::Error>> {
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        if self.dry_run && options.action_mode == config::ActionMode::Deliver {
+            // A delivery pipe is intentionally not started, but later recipes
+            // must observe the same LASTFOLDER value as after a successful
+            // real run. Otherwise dry-run could choose a different branch for
+            // configurations that inspect the preceding destination.
+            runtime.set("LASTFOLDER", action.command.as_str());
+            self.trace.record(TraceEvent::LastFolderUpdated);
+            return Ok(None);
+        }
         let local_lock = acquire_recipe_lock(lock, None, runtime, self.uid)
             .map(|lock| lock.map(|guard| Box::new(guard) as Box<dyn RecipeLockGuard>))
             .map_err(classify_execution_error)?;
@@ -177,6 +192,10 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
         runtime: &mut RuntimeVariables,
     ) -> Result<(), Self::Error> {
         check_signal()?;
+        if self.dry_run {
+            self.global_lock = None;
+            return Ok(());
+        }
         // Replacing LOCKFILE first releases the preceding global lock. Clear
         // its visible value on failure so later statements cannot treat an
         // unheld path as an active lock.
@@ -202,6 +221,9 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
         runtime: &mut RuntimeVariables,
     ) -> Result<Box<dyn RecipeLockGuard>, DeliveryAttemptError<Self::Error>> {
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
+        if self.dry_run {
+            return Ok(Box::new(()));
+        }
         acquire_configured_lock(path, runtime, self.uid)
             .map(|lock| Box::new(lock) as Box<dyn RecipeLockGuard>)
             .map_err(classify_execution_error)
@@ -227,6 +249,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
             global_lock: None,
             suspended_global_locks: Vec::new(),
             trace: self.trace.clone(),
+            dry_run: self.dry_run,
         })
     }
 
@@ -241,6 +264,9 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
         state: CompletionState<'_, Self::Error>,
     ) {
         if procmail_rs::signal_state::received().is_some() {
+            return;
+        }
+        if self.dry_run {
             return;
         }
         self.command_runner
@@ -297,6 +323,7 @@ impl DeliveryRuntime {
         durability: Durability,
         limits: MessageLimits,
         uid: u32,
+        dry_run: bool,
     ) -> Self {
         Self {
             staging_directory,
@@ -305,6 +332,7 @@ impl DeliveryRuntime {
             uid,
             global_lock: None,
             publications: PublicationTracker::default(),
+            dry_run,
         }
     }
 
@@ -317,6 +345,12 @@ impl DeliveryRuntime {
         trace: &mut impl TraceSink,
     ) -> Result<(), OperationalError> {
         check_signal()?;
+        if self.dry_run {
+            head.stream_to(reader, &mut io::sink()).map_err(|error| {
+                OperationalError::Input(format!("cannot validate message from stdin: {error}"))
+            })?;
+            return simulate_plan(plan, runtime, trace);
+        }
         let sinks = open_sinks(plan.deliveries(), self.durability, runtime, trace)?;
         let pending = PendingFanout::new(sinks)
             .map_err(|error| OperationalError::Internal(error.to_string()))?;
@@ -350,7 +384,7 @@ impl DeliveryRuntime {
                 )
             })?;
         let early_count = continuation.pending_deliveries().len();
-        let early_sinks = if execution.requires_ordered_delivery() {
+        let early_sinks = if self.dry_run || execution.requires_ordered_delivery() {
             Vec::new()
         } else {
             open_sinks(
@@ -404,6 +438,7 @@ impl DeliveryRuntime {
                 trace: SharedTrace {
                     inner: Arc::new(Mutex::new(trace)),
                 },
+                dry_run: self.dry_run,
             };
             let outcome = execution
                 .execute_ordered(
@@ -434,6 +469,9 @@ impl DeliveryRuntime {
                 OperationalError::PermanentDestination(format!("cannot evaluate message: {error}"))
             })?;
         check_signal()?;
+        if self.dry_run {
+            return simulate_plan(&plan, runtime, trace);
+        }
         let late_deliveries = plan.deliveries().get(early_count..).ok_or_else(|| {
             OperationalError::Internal(
                 "internal error: deferred delivery discarded an early copy destination".to_owned(),
@@ -451,6 +489,42 @@ impl DeliveryRuntime {
             .record(published, plan.original_delivered())?;
         self.publications.finish()
     }
+}
+
+fn simulate_plan(
+    plan: &DeliveryPlan,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) -> Result<(), OperationalError> {
+    for delivery in plan.deliveries() {
+        simulate_delivery(delivery.destination(), runtime, trace)?;
+    }
+    if plan.original_delivered() {
+        Ok(())
+    } else {
+        Err(OperationalError::Undelivered(format!(
+            "original message was not delivered (dry-run selected {} copy destination(s))",
+            plan.deliveries().len()
+        )))
+    }
+}
+
+fn simulate_delivery(
+    unresolved: &Destination,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) -> Result<(), OperationalError> {
+    // Resolve at the real publication point and update LASTFOLDER in the same
+    // order as delivery. Opening the destination even for validation would
+    // introduce the filesystem effects and races that dry-run promises to
+    // avoid, so the trace reports selection rather than backend readiness.
+    let destination = unresolved
+        .resolve_with(|name| runtime.get(name).map(str::to_owned))
+        .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
+    record_delivery(&destination, DeliveryStage::DryRun, trace);
+    runtime.set("LASTFOLDER", destination.path());
+    trace.record(TraceEvent::LastFolderUpdated);
+    Ok(())
 }
 
 fn completion_exit_status(state: CompletionState<'_, OperationalError>) -> u8 {
@@ -1005,10 +1079,15 @@ fn record_delivery(destination: &Destination, stage: DeliveryStage, trace: &mut 
         DestinationKind::File => TraceDestinationKind::File,
         DestinationKind::Discard => TraceDestinationKind::Discard,
     };
+    let path = trace
+        .detail()
+        .includes_variable_values()
+        .then(|| procmail_rs::trace::TraceValue::new(destination.path().as_bytes()));
     trace.record(TraceEvent::Delivery {
         recipe_line: destination.line(),
         destination: destination_kind,
         stage,
+        path,
     });
 }
 
