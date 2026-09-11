@@ -35,7 +35,7 @@ a supported regex, assignment value, or destination.
 | Syntax area | Supported forms |
 | --- | --- |
 | Statements | `NAME=value`, assignments containing backquoted commands, `INCLUDERC=expression`, `SWITCHRC=expression`, recipes, and nested recipe blocks |
-| Variable references | `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`, `${NAME+word}`, `${NAME:+word}`, `${NAME:=word}`, `${NAME:?word}`, `${#NAME}`, pattern removal with `#`, `##`, `%`, and `%%`, and ASCII case forms with `^`, `^^`, `,`, and `,,`; assignment values may concatenate unquoted, single-quoted literal, and double-quoted fragments into one word |
+| Variable references | `$NAME`, `${NAME}`, `${NAME-word}`, `${NAME:-word}`, `${NAME+word}`, `${NAME:+word}`, `${NAME:=word}`, `${NAME:?word}`, `${#NAME}`, pattern removal with `#`, `##`, `%`, and `%%`, and ASCII case forms with `^`, `^^`, `,`, and `,,`; see [ShellExpressions.md](ShellExpressions.md) |
 | Recipe header | `:0` followed by flags and an optional `: lockfile` |
 | Condition source flags | default/`H` for normalized headers, `B` for body, and `HB` for their documented combined byte sequence |
 | Recipe flags | `H`, `B`, `D`, `c`, `A`, `a`, `E`, `e`, `h`, `b`, `f`, `w`, `W`, `i`, and `r`, subject to action-specific checks |
@@ -61,13 +61,13 @@ a review source; installed procmail-rs tests do not depend on it.
 | Documented procmail behavior | Current status | Compatibility consequence |
 | --- | --- | --- |
 | Ordinary regex, `!`, `?`, `<`, `>`, and `NAME ??` conditions | Supported within the limits described above. | Program conditions use the configured trusted shell and finite `TIMEOUT`. |
-| Structured address and list identifier matching | Original procmail has no corresponding condition and recipes normally match encoded header text or invoke an external parser. | procmail-rs adds `address From,To,Cc,Sender,Reply-To ?? REGEX` and `identifier List-Id ?? REGEX`. They discard surrounding syntax, lowercase address domains or the complete List-Id, and test bounded values separately without exposing them in metadata traces. |
+| Structured address and list identifier matching | Original procmail has no corresponding condition and recipes normally match encoded header text or invoke an external parser. | procmail-rs adds the bounded `address` and `identifier` forms documented in [StructuredConditions.md](StructuredConditions.md). |
 | A condition beginning with `$` is expanded using shell substitution rules inside double quotes and then reparsed as a condition. | Supported with the project's bounded variable syntax, procmail's `$\NAME` regex quoting, and backquoted commands. | Intermediate text is limited by active `LINEBUF`; commands receive the complete current message and use active `TIMEOUT` and `LOGFILE`. Unsupported special parameters are rejected explicitly. Runtime-dependent forms conservatively require complete staging because the resulting condition type is not known before evaluation. |
 | `w^x` weighted regex, program, and length conditions; final score in `$=` | Explicitly rejected as one unsupported condition category. | Implement all scoring forms together with bounded match counting, checked numeric handling, and `$=` so a mixed recipe cannot receive partial scoring behavior. |
 | A trailing backslash continues a condition; shell-expanded conditions retain continuation whitespace. | Supported. Each physical line and the complete joined condition are bounded by the active `LINEBUF`. | Leading space and tab are removed from continued ordinary conditions and retained in `$` conditions before their expansion pass. |
 | Procmail ERE operators and its `^`, `$`, `^^`, `\<`, `\>`, and `\/` extensions | Partly supported by parsing the source with upstream `regex-syntax`, locating extensions through typed AST nodes and source spans, applying bounded replacements, and compiling with the Rust byte-regex engine. | procmail-rs deliberately uses the richer Rust regex dialect. Counted repetition uses `{m,n}` and literal braces must be escaped, while original procmail treats braces as ordinary text. Named ASCII classes and other documented Rust forms are accepted. Original procmail selects the leftmost shortest span before `\/` and the leftmost longest suffix after it; the Rust engine is leftmost-first. This difference is observable when alternatives are ambiguous, as recorded in `tests/fixtures/regex_match_selection/reference-behavior.md`. |
 | `\/` inside groups, alternatives, and expressions containing several markers | Supported with at most 64 markers per expression. Focused tests preserve results recorded with Debian-patched procmail 3.23pre. | Nested markers include the complete matched suffix and a terminal LF consumed by `$`. A successful alternative which does not reach a marker retains the old `MATCH`; if a successful path reaches several markers, the last reached marker selects its value. |
-| Shell-style assignments, including single and double quotes, escapes, unsetting with bare `NAME`, field splitting, and all documented parameter forms | One shell-like assignment word is supported. Unquoted, single-quoted, and double-quoted fragments may be concatenated; single quotes suppress expansion, commands, and backslash processing. A `#` begins a comment only after whitespace at a word boundary. Byte length, shell-pattern prefix or suffix removal, and ASCII case conversion are supported. The `:=` and `:?` forms are privacy-preserving procmail-rs extensions: `:=` transactionally changes only user variables, while `:?` never evaluates or reveals its diagnostic word. | A second unquoted word and unterminated quotes are rejected. Bare-name unsetting and field splitting of command output remain absent. Pattern matching is byte-oriented and subject to a fixed work ceiling. Case conversion is locale-independent and preserves non-ASCII bytes. `:=` is accepted only in assignment values and destination expressions; other contexts reject it before message input. |
+| Shell-style assignments, including quoting, escapes, unsetting, field splitting, and parameter forms | procmail-rs supports the bounded expression language documented in [ShellExpressions.md](ShellExpressions.md), including several forms beyond original procmail. | Bare-name unsetting and field splitting of command output remain absent. Unsupported forms, extra words, and unterminated quotes are rejected instead of being assigned a different meaning. |
 | Backquoted commands in assignments and in mailbox names | Supported. Each command receives the complete current message and its stdout participates in bounded path construction. | Destination output must be UTF-8 and obeys both active `LINEBUF` and the fixed path ceiling. It is resolved only after every fragment succeeds. |
 | `| command`, `NAME=| command`, and a sole `|` that writes the selected input to stdout | All three explicit recipe forms are supported. | A sole `|` writes the area selected by `h`/`b` directly, applies `r` and `i`, and does not start a shell. `DEFAULT=|` remains outside project scope because implicit fallback delivery is absent. |
 | A pipe without `w` or `W` may continue without waiting after its input has been accepted. | Supported for non-filter pipe actions. | The complete selected input is written before recipe evaluation continues. Process-group timeout supervision, stderr redirection, reaping, and local-lock ownership remain active in the background. All background commands are reaped before message processing returns, with at most 128 background commands per message. Filters and captures still wait because their output is needed immediately. |
@@ -133,225 +133,23 @@ line and carries the same detail policy. Native header operations identify
 field names and source lines, but never expose header values. Values extracted
 from headers remain hidden even in detailed mode.
 
-## Shell-expanded conditions
+## Extension documentation
 
-A condition beginning with `$` expands its remainder using double-quoted
-shell-like rules and reparses the bounded result as a condition:
+Detailed descriptions of procmail-rs-only syntax live outside this comparison:
 
-```text
-:0
-* $^To:.*<$\LOGNAME>
-maildir:addressed/
-```
+- [Extensions.md](Extensions.md) provides the overview;
+- [ShellExpressions.md](ShellExpressions.md) defines bounded rc expansion;
+- [HeaderEditing.md](HeaderEditing.md) describes the `headers { ... }` action;
+- [StructuredConditions.md](StructuredConditions.md) describes `address` and `identifier`.
 
-The supported parameter forms use the runtime values
-active when the condition is reached. Procmail's `$\NAME` form inserts the
-value as a literal regex fragment, including a leading empty noncapturing group
-that prevents the value from becoming `!`, `$`, `?`, a size test, scoring text,
-or a special search-area prefix. Inserted values are not scanned again during
-that expansion pass. A complete expanded result beginning with `$` starts a
-new bounded expansion-and-reparse pass, up to the shared expansion-depth
-ceiling.
-
-Every intermediate result is limited by active `LINEBUF`. The reparsed result
-must be one of the supported condition forms and remains subject to the regex
-length, compiled-size, capture, and program-command limits. Statically known
-results are parsed and regex-compiled before stdin is read. A condition using
-`MATCH`, `LASTFOLDER`, command output, or another runtime-produced value is
-resolved only when evaluation reaches it and conservatively requires the
-complete message because it may become a body regex, size test, or program
-condition.
-
-Backquoted commands receive the complete current message on stdin when the
-condition is reached. Their bounded stdout has all trailing newlines removed,
-uses the active `TIMEOUT` and `LOGFILE`, and then participates in the same
-reparse pass as literal and variable parts. Unsupported special parameters and
-physical condition continuations are bounded before expansion. Ordinary
-substitution requires UTF-8 runtime data; `$\NAME` can safely quote arbitrary
-bytes into an ASCII byte-regex fragment.
-
-## Command output assignments
-
-Two procmail-compatible forms assign the stdout of a trusted shell command to
-an rc variable. They execute only during `filter`; `check` and `explain`
-validate and report the presence of shell execution without running it or
-showing command text or assigned values.
-
-A backquoted command may appear among literal and expanded fragments in an
-ordinary assignment:
-
-```text
-LABEL="prefix-`printf '%s\n' "$MATCH1"`-suffix"
-```
-
-Each substitution receives the complete current message independently on
-stdin. All trailing LF bytes are removed from its stdout before the next
-fragment is appended. A normal nonzero child status does not suppress the
-captured bytes. Every fragment is assembled privately, and the variable is
-changed only after all commands and expansions succeed. Reaching this form
-requires complete replayable input and therefore private staging under the
-active `MAILDIR`.
-
-A recipe action captures stdout with different newline and status behavior:
-
-```text
-:0 hW
-FIELD=| extract-field
-```
-
-The `h` flag selects the header section including its terminating empty line,
-`b` selects only the body, and neither flag selects the complete current
-message. Without `r`, one LF is appended when header or complete-message input
-lacks a final LF. Body-only input receives one LF unless it already ends in two
-LF bytes, matching original procmail's representation of that selected area;
-`r` preserves the selected ending. Header-only capture can execute before the
-body is read, while body and complete-message capture require staging. Exactly
-one trailing LF is removed from successful stdout.
-
-Without `w` or `W`, a normal nonzero child status is ignored. With either flag
-it makes the action fail and preserves the variable's previous value; `W`
-only suppresses the child-failure diagnostic. The `i` flag ignores only a
-failure while writing the selected input. A failed capture can select a
-following `e` recipe, while a successful one can select `a` or `A`, and the
-recipe sequence continues after a successful assignment.
-
-For both forms, stdout is read concurrently with stdin and is bounded before
-allocation grows past the active limit. The raw captured output, before LF
-removal, may not exceed the smaller of the active `LINEBUF` and the fixed
-ceiling for the assigned variable. Exceeding that limit terminates the
-process group and fails the assignment. `TIMEOUT` also covers input, output,
-and child termination; a timeout always fails a command-output assignment,
-even without `w` or `W`. Stderr is appended to `LOGFILE`, or inherits
-procmail-rs stderr when no log is selected.
-
-Commands run as `SHELL SHELLFLAGS command`, where `SHELLFLAGS` is passed as one
-argument. The child environment is rebuilt only from bounded runtime rc
-variables and the defaults `SHELL=/bin/sh`, `SHELLFLAGS=-c`, and
-`PATH=/usr/bin:/bin`; the ambient process environment is not inherited. The
-shell path must be absolute and may not contain empty, `.` or `..` components.
-
-Backquoted commands are also accepted in an explicit recipe destination:
-
-```text
-:0
-maildir:`date +%Y-%m`/
-```
-
-As with assignment backquotes, each command receives the complete current
-message, all trailing LF bytes are removed from its stdout, and the complete
-result is kept private until every literal expansion and command succeeds.
-The raw captured output is limited by the smaller of active `LINEBUF` and the
-4096-byte path-expression ceiling. The result must be UTF-8 and pass the normal
-path checks; relative results use the `MAILDIR` active when the recipe executes.
-Bytes emitted by a command are inserted literally and are not scanned again as
-variable references. `TIMEOUT`, the bounded child environment, and `LOGFILE`
-stderr handling are identical to assignment backquotes.
-
-## Explicit stdout delivery
-
-A recipe whose complete action is `|` delivers its selected input directly to
-procmail-rs stdout without starting a shell. The `h` and `b` flags select the
-header or body; neither selects the complete message. Without `r`, a missing
-final LF is added, while `r` preserves the exact ending. A stdout write or flush
-failure makes the recipe fail unless `i` is present. The ordinary `c`, `A`,
-`a`, `E`, and `e` flow rules continue to apply. The filter form `:0 f` followed
-by a sole `|` is rejected because stdout does not provide a replacement message.
-
-This action is evaluated only after the selected message bytes have passed all
-input limits. It does not enable `DEFAULT=|` or any other implicit delivery.
-
-## Native header editing extension
-
-`headers { ... }` is a procmail-rs action for common header-only changes that
-would otherwise require a pipe through `formail`. It is deliberately not
-procmail syntax. A selected action applies every operation in source order and
-then continues with the following recipe:
-
-```text
-:0
-headers {
-    remove X-Old-Status
-    set X-Filter-Status checked
-    add X-Filter-Result clean
-    prepend X-Processed-By procmail-rs
-}
-```
-
-Field names are matched without regard to ASCII case. The operations behave as
-follows:
-
-| Operation | Behavior |
-| --- | --- |
-| `remove NAME` | Removes every field named `NAME`, including all continuation lines belonging to a folded field. |
-| `set NAME [VALUE]` | Replaces the first matching field at its existing position and removes later duplicates. Appends a new field when none exists. |
-| `add NAME [VALUE]` | Appends a new field even when fields with the same name already exist. Repeated additions retain source order. |
-| `prepend NAME [VALUE]` | Inserts a new field before every current field. A later `prepend` therefore appears before an earlier one. |
-| `rename OLD-NAME to NEW-NAME` | Renames every matching field while preserving values, folding, ordering, and line endings. |
-| `extract raw NAME into VARIABLE` | Assigns the first field value without its name, colon, or final line ending while preserving leading whitespace and folds. |
-| `extract unfolded NAME into VARIABLE` | Assigns the first field value after removing leading horizontal whitespace from each physical line and joining folds with one space. |
-| `extract decoded NAME into VARIABLE` | Unfolds the first value and strictly decodes RFC 2047 `B` or `Q` encoded-words using UTF-8, US-ASCII, or ISO-8859-1. Unknown charsets, malformed words, invalid text, and oversized output fail the action. |
-
-`NAME` must follow RFC 5322 `1*ftext`: non-empty ASCII `33..=126` without
-`:`, which also excludes whitespace. Generated names use stable ASCII title
-case at hyphen boundaries; unchanged input names retain their original
-spelling. `VALUE` uses the documented bounded parameter forms when the action
-executes. Printable US-ASCII, space, and tab are emitted directly. A value
-containing non-ASCII Unicode is automatically encoded as bounded RFC 2047
-`UTF-8/B` encoded-words without splitting a UTF-8 character. This convenience
-does not classify structured fields, so configurations remain responsible for
-using automatic encoded-words only where RFC 2047 permits them. Control
-characters are rejected. Unencoded generated lines are limited to the RFC 5322
-maximum of 998 bytes excluding their endings; encoded-words and their lines use
-the RFC 2047 limits of 75 and 76 characters. Requested folded continuations are
-rejected.
-
-Inserted values are not reparsed as shell text. Existing fields and the body
-remain byte-for-byte unchanged. New fields use the first physical header line's
-LF or CRLF ending, or the separator's ending when the header is empty.
-Ordinary `H` conditions continue to match the byte-preserved raw header view;
-decoded matching is deliberately explicit through `extract decoded` and a
-following variable condition.
-
-The condition and control flags `H`, `B`, `D`, `c`, `A`, `a`, `E`, and `e` are
-accepted with their usual meanings. The action always continues after a
-successful edit, so `c` does not change its behavior. Action flags `h`, `b`,
-`f`, `w`, `W`, `i`, and `r`, as well as local lockfiles, are rejected because
-the action neither invokes a child nor publishes a destination.
-
-The complete edited header is checked against `LIMIT_MSG_SIZE`,
-`LIMIT_MSG_HEADERS`, `LIMIT_HEADER_LINE`, and `LIMIT_HEADER_FIELD` before it
-becomes visible. If expansion, validation, or a limit check fails, the earlier
-message remains selected. Later conditions, runtime rc files, external
-actions, and delivery see the edited header. A header-only path can still
-stream the untouched body without retaining it.
-
-Extraction targets are restricted to ordinary user variables. Values become
-visible only after the complete action succeeds, absent fields assign empty,
-and repeated targets use the last extracted value. Raw and unfolded values may
-contain arbitrary bytes and are limited to `MAX_ASSIGNMENT_VALUE_LEN` before
-publication. The operation-count limit caps their aggregate retained size at
-16 MiB per action.
-
-This action is not a complete built-in replacement for `formail`. It does not
-parse addresses, decode MIME fields, generate addresses or message identifiers,
-split digests, rewrite the body, or implement other `formail` options. In particular,
-the common `formail -I NAME:` removal idiom maps to `remove NAME`; `set NAME`
-creates an empty field. Unlike a `formail -I` filter, `set` keeps the position
-of the first matching field. Use a trusted pipe action when broader `formail`
-behavior is required.
-
-Reserved procmail variables `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`,
-`DROPPRIVS`, `LOG`, `MSGPREFIX`, `NORESRETRY`,
-`PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and
-`SHIFT`, as well as the project-reserved `LIMIT_RC_SIZE`, are rejected by name.
-Forward actions beginning with `!` are also rejected. This makes unsupported
-behavior visible instead of silently assigning it another meaning.
+The complete rc manual remains self-contained and includes both compatible and
+extended syntax.
 
 ## Deliberate differences
 
 | Area | procmail 3.22 | procmail-rs |
 | --- | --- | --- |
-| Native header editing | Requires an external filter such as `formail`; there is no `headers { ... }` action. | Provides the bounded `headers` extension described above. Rc files using it are intentionally not accepted by procmail 3.22. |
+| Native header editing | Requires an external filter such as `formail`; there is no `headers { ... }` action. | Provides the bounded extension documented in [HeaderEditing.md](HeaderEditing.md). Rc files using it are intentionally not accepted by procmail 3.22. |
 | Destination type and directory delivery | May infer a directory or mailbox from the current filesystem. | Never infers a backend from the filesystem. Requires `maildir:PATH` or a trailing `/` for a Maildir containing `tmp`, `new`, and `cur`; `mbox:PATH` and every other unmarked path select mbox. An unmarked path resolving exactly to `/dev/null` is discarded internally after complete input validation. |
 | FreeBSD Maildir publication | Creates and renames a named file in `tmp`. | Uses exclusive named creation in `tmp`, no-replace hard-link publication in `new`, and inode checks before cleanup. It additionally requires the Maildir directories to be owned by the current uid and not writable by group or other users. Without FreeBSD-specific FFI there remains a pathname-replacement race between each check and operation; Linux uses the stronger unnamed-file path. |
 | Default delivery | Can fall back to `DEFAULT`, `ORGMAIL`, or the system mailbox. | Never selects an implicit destination. An undelivered original is an error. |

@@ -10,8 +10,10 @@ procmail\-rs \- bounded procmail\-compatible mail filtering
 \f[B]procmail\-rs\f[R] \f[B]explain\f[R] [\f[B]\(enconfig\f[R]
 \f[I]PATH\f[R]] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
 .PP
-\f[B]procmail\-rs\f[R] \f[B]filter\f[R] [\f[B]\(enconfig\f[R]
-\f[I]PATH\f[R]] [\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
+\f[B]procmail\-rs\f[R] \f[B]filter\f[R] [\f[B]\(endry\-run\f[R]]
+[\f[B]\(enformat\f[R] \f[I]FORMAT\f[R]] [\f[B]\(endetail\f[R]
+\f[I]DETAIL\f[R]] [\f[B]\(enconfig\f[R] \f[I]PATH\f[R]]
+[\f[B]\(enset\f[R] \f[I]NAME=VALUE\f[R]]\&...
 .PP
 \f[B]procmail\-rs\f[R] \f[B]\(enhelp\f[R]
 .PP
@@ -115,6 +117,35 @@ procmail\-rs check \-\-config rules.rc
 procmail\-rs explain \-\-config rules.rc
 procmail\-rs filter \-\-config rules.rc <message.eml
 .EE
+.PP
+Use \f[B]\(endry\-run\f[R] with \f[B]filter\f[R] to read and validate
+the complete message, evaluate runtime conditions, and report bounded
+trace events to standard error without publishing Maildir, mbox, file,
+discard, or pipe deliveries.
+Global and local locks are not acquired, and \f[CR]TRAP\f[R] is not run.
+Header and body filters, command substitutions, and external program
+conditions still run because their results can change later recipe
+decisions; those trusted rc commands can therefore have effects outside
+procmail\-rs.
+The default trace does not expose values.
+Set \f[CR]LOGDETAIL=values\f[R] explicitly when bounded variable values
+are needed for diagnosis, or pass \f[B]\(endetail=values\f[R].
+The command\-line setting controls only logging and does not enter the
+rc variable table.
+.IP
+.EX
+procmail\-rs filter \-\-dry\-run \-\-config rules.rc <message.eml
+.EE
+.PP
+\f[B]\(enformat=text\f[R] is the default and produces bounded,
+human\-readable records modelled after original procmail diagnostics.
+\f[B]\(enformat=json\f[R] produces one JSON object per line for
+automated analysis.
+The format is independent of \f[B]\(endry\-run\f[R]: a regular filtering
+run writes enabled \f[CR]VERBOSE\f[R] diagnostics to \f[CR]LOGFILE\f[R],
+or to standard error when no log file is configured.
+The options also accept the separated forms \f[CR]\-\-format text\f[R]
+and \f[CR]\-\-detail values\f[R].
 .SH EXIT STATUS
 .TP
 \f[B]0\f[R] (\f[CR]EX_OK\f[R])
@@ -188,5 +219,9 @@ message bodies and header values are not enabled by that setting.
 .PP
 The source distribution also contains
 \f[CR]Documentation/Compatibility.md\f[R],
+\f[CR]Documentation/Extensions.md\f[R],
+\f[CR]Documentation/ShellExpressions.md\f[R],
+\f[CR]Documentation/HeaderEditing.md\f[R],
+\f[CR]Documentation/StructuredConditions.md\f[R],
 \f[CR]Documentation/Delivery.md\f[R], and
 \f[CR]Documentation/Limits.md\f[R].

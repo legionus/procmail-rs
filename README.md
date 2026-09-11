@@ -44,6 +44,19 @@ provenance is recorded in [Documentation/Licenses.md](Documentation/Licenses.md)
 Migration from original procmail, including a rollback procedure, is described
 in [Documentation/Migration.md](Documentation/Migration.md).
 
+The documentation is organized by task:
+
+- [Extensions.md](Documentation/Extensions.md) is an index of features unique
+  to procmail-rs;
+- [ShellExpressions.md](Documentation/ShellExpressions.md) defines quoting,
+  parameter operations, patterns, and command substitution;
+- [HeaderEditing.md](Documentation/HeaderEditing.md) documents the native
+  `headers { ... }` action;
+- [StructuredConditions.md](Documentation/StructuredConditions.md) documents
+  parsed mailbox-address and List-Id matching;
+- [Compatibility.md](Documentation/Compatibility.md) compares procmail-rs with
+  original procmail without duplicating those guides.
+
 The editable manual-page sources are
 [Documentation/man/procmail-rs.1.md](Documentation/man/procmail-rs.1.md) and
 [Documentation/man/procmail-rs.rc.5.md](Documentation/man/procmail-rs.rc.5.md).
@@ -268,8 +281,10 @@ ceiling for the assigned variable. Overflow and `TIMEOUT` fail the assignment
 without exposing a partial value; timeout is an error even when a capture
 recipe omits `w` and `W`. `check` and `explain` never execute these commands or
 display their text and values. See
-[Documentation/Compatibility.md](Documentation/Compatibility.md) for complete
-input, newline, status, and compatibility details.
+[Documentation/ShellExpressions.md](Documentation/ShellExpressions.md) for
+complete input, newline, status, and expansion details; compatibility
+differences remain listed in
+[Documentation/Compatibility.md](Documentation/Compatibility.md).
 
 ## External command timeout
 

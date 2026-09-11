@@ -1068,7 +1068,10 @@ Base directory for following relative destination, staging, lock,
 include, switch, and log paths.
 It has no implicit default; when unset or empty, relative paths use the
 process working directory.
-Assignment does not change the process working directory.
+Every external command is started with the active non\-empty
+\f[CR]MAILDIR\f[R] as its working directory.
+The parent process directory is left unchanged so concurrent copy
+branches can use different values safely.
 .TP
 \f[CR]DURABILITY\f[R]
 Select \f[CR]none\f[R] (default), \f[CR]file\f[R], or \f[CR]full\f[R].
@@ -1295,6 +1298,13 @@ values.
 variable value prefixes.
 \f[CR]LOGABSTRACT=no\f[R] is accepted; header\-bearing abstract modes
 are not.
+.PP
+Successful native header blocks log each operation in source order.
+Records identify the operation, source line, header name, rename target,
+or extraction variable as applicable.
+They never contain a header value.
+A variable assigned by \f[CR]extract\f[R] is recorded with its value
+hidden even under \f[CR]LOGDETAIL=values\f[R].
 .IP
 .EX
 LOGFILE=/srv/mail/filter.log
@@ -1682,5 +1692,9 @@ procmail rc file.
 .PP
 The source distribution also contains
 \f[CR]Documentation/Compatibility.md\f[R],
+\f[CR]Documentation/Extensions.md\f[R],
+\f[CR]Documentation/ShellExpressions.md\f[R],
+\f[CR]Documentation/HeaderEditing.md\f[R],
+\f[CR]Documentation/StructuredConditions.md\f[R],
 \f[CR]Documentation/Delivery.md\f[R], and
 \f[CR]Documentation/Limits.md\f[R].

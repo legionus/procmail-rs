@@ -219,4 +219,6 @@ by that setting.
 **procmail-rs.rc**(5), **maildir**(5), **mbox**(5)
 
 The source distribution also contains `Documentation/Compatibility.md`,
+`Documentation/Extensions.md`, `Documentation/ShellExpressions.md`,
+`Documentation/HeaderEditing.md`, `Documentation/StructuredConditions.md`,
 `Documentation/Delivery.md`, and `Documentation/Limits.md`.
