@@ -1786,7 +1786,8 @@ impl<'a> ExpressionAnalysis<'a> {
                         );
                     }
 
-                    analysis.references_dynamic |= dynamic.contains(name)
+                    analysis.references_dynamic |= policy == VariablePolicy::RuntimeOnly
+                        || dynamic.contains(name)
                         || (word_may_run
                             && child.as_ref().is_some_and(|value| value.references_dynamic));
                     analysis.has_runtime_variable |= policy == VariablePolicy::RuntimeOnly
@@ -2550,10 +2551,19 @@ impl<'a> ExpressionParser<'a> {
             }
             self.index += 1;
             ("#".to_owned(), ParameterOperation::Value)
+        } else if matches!(first, b'$' | b'?' | b'_' | b'-') {
+            if regex_escape {
+                return Err(ExpansionError::new(
+                    self.line,
+                    "regex-escaped special parameters are not supported",
+                ));
+            }
+            self.index += 1;
+            (char::from(first).to_string(), ParameterOperation::Value)
         } else {
             if !is_name_start(first) {
                 if matches!(self.syntax, ExpressionSyntax::ShellCondition) {
-                    if matches!(first, b'?' | b'$' | b'-' | b'=' | b'@' | b'*') {
+                    if matches!(first, b'=' | b'@' | b'*') {
                         return Err(ExpansionError::new(
                             self.line,
                             "unsupported special parameter in shell-expanded condition",

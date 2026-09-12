@@ -26,6 +26,43 @@ fn default_runtime_uses_the_procmail_lock_extension() {
 }
 
 #[test]
+fn special_parameters_use_private_runtime_state() {
+    let mut runtime = RuntimeVariables::default();
+    runtime.set_current_rc_file("/mail/root.rc");
+    runtime.set_last_command_status(17);
+    runtime.set("LASTFOLDER", "/mail/archive");
+
+    assert_eq!(
+        runtime.get("$"),
+        Some(std::process::id().to_string().as_str())
+    );
+    assert_eq!(runtime.get("?"), Some("17"));
+    assert_eq!(runtime.get("_"), Some("/mail/root.rc"));
+    assert_eq!(runtime.get("-"), Some("/mail/archive"));
+    assert!(
+        !runtime
+            .values()
+            .any(|(name, _)| matches!(name, "$" | "?" | "_" | "-"))
+    );
+}
+
+#[test]
+fn fork_keeps_command_and_rc_special_state_private() {
+    let mut parent = RuntimeVariables::default();
+    parent.set_current_rc_file("root.rc");
+    parent.set_last_command_status(3);
+    let mut branch = parent.fork();
+
+    branch.set_current_rc_file("child.rc");
+    branch.set_last_command_status(9);
+
+    assert_eq!(parent.get("_"), Some("root.rc"));
+    assert_eq!(parent.get("?"), Some("3"));
+    assert_eq!(branch.get("_"), Some("child.rc"));
+    assert_eq!(branch.get("?"), Some("9"));
+}
+
+#[test]
 fn fork_keeps_later_assignments_and_removals_branch_local() {
     let mut parent = RuntimeVariables::default();
     parent.set("SHARED", "before");

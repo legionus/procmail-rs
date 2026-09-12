@@ -47,6 +47,7 @@ pub struct FilterRun {
     input_write: InputWrite,
     output: Result<Message, MessageReadError>,
     child_exit: ChildExit,
+    exit_code: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +254,10 @@ impl FilterRun {
 
     pub fn outcome(&self) -> CommandOutcome {
         CommandOutcome::new(self.input_write, self.child_exit)
+    }
+
+    pub fn exit_code(&self) -> Option<u8> {
+        self.exit_code
     }
 }
 
@@ -464,6 +469,7 @@ pub fn run_filter(
         input_write: completed.input_write,
         output,
         child_exit: completed.child_exit,
+        exit_code: completed.exit_code,
     })
 }
 

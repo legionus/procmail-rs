@@ -61,6 +61,45 @@ struct CompletePlanContext<'a, 'message, T> {
     rc: RcExecutionContext<'a>,
 }
 
+impl<T: TraceSink> CompletePlanContext<'_, '_, T> {
+    fn execute_runtime_rc(
+        &mut self,
+        sequence: &CompiledSequence,
+        path: &str,
+        child_rc: RcExecutionContext<'_>,
+    ) -> Result<SequenceControl, EvalError> {
+        let caller_path = self.runtime.replace_current_rc_file(Some(path.to_owned()));
+        let mut child = CompletePlanContext {
+            message: self.message,
+            runtime: self.runtime,
+            trace: self.trace,
+            execution: self.execution,
+            rc: child_rc,
+        };
+        let result = sequence.plan_complete_with_context(&mut child);
+        self.runtime.replace_current_rc_file(caller_path);
+        result
+    }
+}
+
+impl<'a, E, T: TraceSink> HeaderPlanContext<'a, '_, E, T> {
+    fn execute_runtime_rc(
+        &mut self,
+        sequence: &CompiledSequence,
+        path: &str,
+        child_rc: RcExecutionContext<'a>,
+        following: InputRequirements,
+    ) -> Result<HeaderControl, OrderedExecutionError<E>> {
+        let caller_rc = self.rc;
+        let caller_path = self.runtime.replace_current_rc_file(Some(path.to_owned()));
+        self.rc = child_rc;
+        let result = sequence.plan_headers(self, following);
+        self.rc = caller_rc;
+        self.runtime.replace_current_rc_file(caller_path);
+        result
+    }
+}
+
 // A resumed sequence must move its position and prior-recipe state together.
 // Keeping them in one value prevents a caller from advancing to another node
 // while accidentally retaining state that belongs to the old position.
@@ -806,15 +845,10 @@ fn plan_statements_complete<T: TraceSink>(
             }
             CompiledStatement::Include(include) => {
                 let entered = include.enter(context.runtime, context.rc)?;
-                if let Some((sequence, child_rc)) = entered.sequence()? {
-                    let mut child = CompletePlanContext {
-                        message: context.message,
-                        runtime: context.runtime,
-                        trace: context.trace,
-                        execution: context.execution,
-                        rc: child_rc,
-                    };
-                    if sequence.plan_complete_with_context(&mut child)? == SequenceControl::Stop {
+                if let Some((sequence, path, child_rc)) = entered.sequence()? {
+                    if context.execute_runtime_rc(sequence, path, child_rc)?
+                        == SequenceControl::Stop
+                    {
                         return Ok(SequenceControl::Stop);
                     }
                 }
@@ -828,15 +862,8 @@ fn plan_statements_complete<T: TraceSink>(
                 if entered.is_empty() {
                     return Ok(SequenceControl::EndRcFile);
                 }
-                if let Some((sequence, child_rc)) = entered.sequence()? {
-                    let mut child = CompletePlanContext {
-                        message: context.message,
-                        runtime: context.runtime,
-                        trace: context.trace,
-                        execution: context.execution,
-                        rc: child_rc,
-                    };
-                    let control = sequence.plan_complete_with_context(&mut child)?;
+                if let Some((sequence, path, child_rc)) = entered.sequence()? {
+                    let control = context.execute_runtime_rc(sequence, path, child_rc)?;
                     return Ok(if control == SequenceControl::Stop {
                         SequenceControl::Stop
                     } else {
@@ -876,7 +903,7 @@ where
             }
             CompiledStatement::Include(include) => {
                 let entered = include.enter(context.runtime, context.rc)?;
-                if let Some((sequence, child_rc)) = entered.sequence()? {
+                if let Some((sequence, path, child_rc)) = entered.sequence()? {
                     if sequence.requires_preemptive_ordered_delivery() {
                         context.planning.frames.clear();
                         context.planning.restart = true;
@@ -889,11 +916,7 @@ where
                             });
                         return Ok(HeaderControl::Deferred);
                     }
-                    let parent_rc = context.rc;
-                    context.rc = child_rc;
-                    let child = sequence.plan_headers(context, following);
-                    context.rc = parent_rc;
-                    let child = child?;
+                    let child = context.execute_runtime_rc(sequence, path, child_rc, following)?;
                     if child == HeaderControl::Deferred {
                         // Continuation frames point into the static root tree.
                         // A dynamically loaded child cannot be represented by
@@ -921,7 +944,7 @@ where
                 if entered.is_empty() {
                     return Ok(HeaderControl::EndRcFile);
                 }
-                if let Some((sequence, child_rc)) = entered.sequence()? {
+                if let Some((sequence, path, child_rc)) = entered.sequence()? {
                     if sequence.requires_preemptive_ordered_delivery() {
                         context.planning.frames.clear();
                         context.planning.restart = true;
@@ -932,11 +955,12 @@ where
                             });
                         return Ok(HeaderControl::Deferred);
                     }
-                    let parent_rc = context.rc;
-                    context.rc = child_rc;
-                    let child = sequence.plan_headers(context, InputRequirements::default());
-                    context.rc = parent_rc;
-                    let child = child?;
+                    let child = context.execute_runtime_rc(
+                        sequence,
+                        path,
+                        child_rc,
+                        InputRequirements::default(),
+                    )?;
                     if child == HeaderControl::Deferred {
                         // Replaying from the root reconstructs the dynamic
                         // target without retaining pointers into its tree.

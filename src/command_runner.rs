@@ -187,6 +187,7 @@ impl CommandRunner {
                 "condition returned non-program output",
             ));
         };
+        record_command_status(runtime, run.exit_code(), run.outcome());
         Ok(run
             .outcome()
             .decide(CommandOutcomePolicy::Condition)
@@ -222,6 +223,7 @@ impl CommandRunner {
             }
         });
         let outcome = run.outcome();
+        record_command_status(runtime, run.exit_code(), outcome);
         let run = process_command(run, outcome, policy, runtime)?
             .require(CommandDecision::accepted, |outcome| {
                 if outcome.child_exit() == ChildExit::TimedOut {
@@ -271,6 +273,7 @@ impl CommandRunner {
         match self.run(request, runtime)? {
             CommandRun::Program(run) => {
                 let outcome = run.outcome();
+                record_command_status(runtime, run.exit_code(), outcome);
                 process_command(
                     run,
                     outcome,
@@ -324,6 +327,7 @@ impl CommandRunner {
         // the recipe handles that failure through `i` or `e`, the shell still
         // belongs to this message and must be timed out and reaped.
         self.background.push(BackgroundCommand { run, _lock: lock });
+        runtime.set_last_command_status(0);
         if !outcome
             .decide(CommandOutcomePolicy::Pipe {
                 child_status: options.child_status,
@@ -516,9 +520,10 @@ fn finish_filter(
     input: ExternalActionInput<'_>,
     options: RecipeOptions,
     limits: MessageLimits,
-    runtime: &RuntimeVariables,
+    runtime: &mut RuntimeVariables,
 ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
     let outcome = run.outcome();
+    record_command_status(runtime, run.exit_code(), outcome);
     let output_state = run.output_state();
     let processed = process_command(
         run,
@@ -585,6 +590,22 @@ fn process_command<T>(
         decision,
         outcome,
     })
+}
+
+fn record_command_status(
+    runtime: &mut RuntimeVariables,
+    exit_code: Option<u8>,
+    outcome: CommandOutcome,
+) {
+    // Normal child exits retain their exact shell-visible status. A child
+    // killed by supervision has no portable numeric signal status in the
+    // current process result, so expose failure rather than leaving a stale
+    // status from an unrelated earlier command.
+    let status = exit_code.unwrap_or_else(|| match outcome.child_exit() {
+        ChildExit::Success => 0,
+        ChildExit::ExitFailure | ChildExit::Signaled | ChildExit::TimedOut => 1,
+    });
+    runtime.set_last_command_status(status);
 }
 
 fn write_stdout(

@@ -84,6 +84,7 @@ impl<'a, H: OrderedExecutionHost + Send> OrderedTreeExecution<'a, H> {
     fn execute_runtime_rc(
         &mut self,
         sequence: &CompiledSequence,
+        path: &str,
         child_context: RcExecutionContext<'a>,
     ) -> Result<(ActionExecution, SequenceControl), OrderedExecutionError<H::Error>>
     where
@@ -95,7 +96,9 @@ impl<'a, H: OrderedExecutionHost + Send> OrderedTreeExecution<'a, H> {
         // success or failure so an included file cannot leak its depth into
         // the statements that follow it.
         let caller_context = std::mem::replace(&mut self.rc, child_context);
+        let caller_path = self.runtime.replace_current_rc_file(Some(path.to_owned()));
         let result = sequence.execute_ordered(self);
+        self.runtime.replace_current_rc_file(caller_path);
         self.rc = caller_context;
         result
     }
@@ -746,11 +749,11 @@ where
                 let entered = include
                     .enter(context.runtime, context.rc)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                if let Some((sequence, child_context)) = entered
+                if let Some((sequence, path, child_context)) = entered
                     .sequence()
                     .map_err(OrderedExecutionError::Evaluation)?
                 {
-                    let (_, control) = context.execute_runtime_rc(sequence, child_context)?;
+                    let (_, control) = context.execute_runtime_rc(sequence, path, child_context)?;
                     if control == SequenceControl::Stop {
                         return Ok(control);
                     }
@@ -766,11 +769,11 @@ where
                 if entered.is_empty() {
                     return Ok(SequenceControl::EndRcFile);
                 }
-                if let Some((sequence, child_context)) = entered
+                if let Some((sequence, path, child_context)) = entered
                     .sequence()
                     .map_err(OrderedExecutionError::Evaluation)?
                 {
-                    let (_, control) = context.execute_runtime_rc(sequence, child_context)?;
+                    let (_, control) = context.execute_runtime_rc(sequence, path, child_context)?;
                     return Ok(if control == SequenceControl::Stop {
                         SequenceControl::Stop
                     } else {

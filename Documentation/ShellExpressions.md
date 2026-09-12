@@ -61,6 +61,36 @@ SHIFT=1
 FOLDER=$1
 ```
 
+## Scalar special parameters
+
+The following procmail parameters expand to one bounded value and may be used
+wherever an ordinary scalar expansion is accepted:
+
+| Form | Value |
+| --- | --- |
+| `$$` | Decimal process id of the running procmail-rs instance. |
+| `$?` | Status of the most recently completed external command, initially `0`. |
+| `$_` | Name of the rc file currently being executed. |
+| `$-` | Current value of `LASTFOLDER`; it is unset before the first successful delivery or external action. |
+
+`$_` changes while an `INCLUDERC` or `SWITCHRC` file runs. Returning from an
+include restores the caller's file name. `$?` records the exact code from a
+normal child exit. A child without a numeric exit code, including termination
+by a signal or `TIMEOUT`, records `1`. Starting an explicitly asynchronous
+pipe records `0`; its later completion cannot race with following expansion.
+Copy branches retain private current-file and command-status values.
+
+```text
+SOURCE_RC=$_
+RESULT=`spam-check`
+STATUS=$?
+TEMP=$MAILDIR/filter.$$
+PREVIOUS_DESTINATION=$-
+```
+
+These special values are not ordinary environment variables and are not
+exported under the names `$`, `?`, `_`, or `-` to child processes.
+
 ## Quotes, escapes, and comments
 
 An assignment value is one shell-like word assembled from adjacent unquoted,

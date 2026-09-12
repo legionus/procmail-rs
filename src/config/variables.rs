@@ -616,7 +616,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "HOST" => VariablePolicy::RcOnly(AssignmentTarget::Host),
         "SHIFT" => VariablePolicy::RcOnly(AssignmentTarget::Shift),
         "PROCMAIL_VERSION" => VariablePolicy::ReadOnly,
-        "LASTFOLDER" | "MATCH" => VariablePolicy::RuntimeOnly,
+        "$" | "?" | "_" | "-" | "LASTFOLDER" | "MATCH" => VariablePolicy::RuntimeOnly,
         name if name.strip_prefix("MATCH").is_some_and(|suffix| {
             !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
         }) =>

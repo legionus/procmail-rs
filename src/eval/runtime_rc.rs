@@ -150,10 +150,12 @@ impl<'state> EnteredRuntimeRc<'state> {
 
     pub(super) fn sequence(
         &self,
-    ) -> Result<Option<(&CompiledSequence, RcExecutionContext<'state>)>, EvalError> {
+    ) -> Result<Option<(&CompiledSequence, &str, RcExecutionContext<'state>)>, EvalError> {
         match (self.loaded.as_ref(), self.child_context) {
-            (LoadedRuntimeRc::Sequence(sequence), Some(context)) => Ok(Some((sequence, context))),
-            (LoadedRuntimeRc::Sequence(_), None) => Err(EvalError::RuntimeRc(
+            (LoadedRuntimeRc::Sequence { path, sequence }, Some(context)) => {
+                Ok(Some((sequence, path, context)))
+            }
+            (LoadedRuntimeRc::Sequence { .. }, None) => Err(EvalError::RuntimeRc(
                 "loaded runtime rc sequence has no child context".to_owned(),
             )),
             _ => Ok(None),
@@ -166,7 +168,10 @@ pub(super) enum LoadedRuntimeRc {
     #[default]
     Empty,
     Failed,
-    Sequence(Box<CompiledSequence>),
+    Sequence {
+        path: String,
+        sequence: Box<CompiledSequence>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +333,11 @@ fn load_runtime_rc(
             truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
             context.push_warning(diagnostic);
         });
+    let path = loaded
+        .path()
+        .to_str()
+        .ok_or_else(|| EvalError::RuntimeRc("runtime rc path is not valid UTF-8".to_owned()))?;
+    let path = path.to_owned();
     let mut preceding = Vec::new();
     let sequence = CompiledSequence::compile(&loaded.into_config().statements, &mut preceding);
     let requirements = sequence.requirements();
@@ -343,7 +353,10 @@ fn load_runtime_rc(
             .dynamic_ordered_delivery
             .store(true, Ordering::Relaxed);
     }
-    let loaded = Arc::new(LoadedRuntimeRc::Sequence(Box::new(sequence)));
+    let loaded = Arc::new(LoadedRuntimeRc::Sequence {
+        path: path.clone(),
+        sequence: Box::new(sequence),
+    });
     loaded_states.insert(path, Arc::clone(&loaded));
     Ok(loaded)
 }
@@ -361,7 +374,7 @@ fn enter_runtime_rc<'state>(
     // tree. This keeps depth checking identical in every evaluation mode and
     // prevents a caller from accidentally evaluating a child with its
     // parent's rc-file depth.
-    let child_context = if matches!(&*loaded, LoadedRuntimeRc::Sequence(_)) {
+    let child_context = if matches!(&*loaded, LoadedRuntimeRc::Sequence { .. }) {
         Some(context.descend()?)
     } else {
         None

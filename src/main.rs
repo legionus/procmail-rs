@@ -294,6 +294,12 @@ fn run() -> Result<u8, OperationalError> {
         Action::Filter => {
             let mut runtime = RuntimeVariables::default();
             runtime.set_system_hostname(hostname);
+            let root_rc_path = path.to_str().ok_or_else(|| {
+                OperationalError::Configuration(
+                    "root rc path cannot be represented as UTF-8".to_owned(),
+                )
+            })?;
+            runtime.set_current_rc_file(root_rc_path);
             let mut delivery_runtime = DeliveryRuntime::new(
                 staging_directory,
                 durability,

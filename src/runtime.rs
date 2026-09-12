@@ -48,6 +48,9 @@ pub struct RuntimeVariables {
     parent: Option<Arc<RuntimeLayer>>,
     values: BTreeMap<String, RuntimeValue>,
     system_hostname: Option<String>,
+    process_id: String,
+    last_command_status: String,
+    current_rc_file: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -90,6 +93,9 @@ impl Default for RuntimeVariables {
             parent: None,
             values,
             system_hostname: None,
+            process_id: std::process::id().to_string(),
+            last_command_status: "0".to_owned(),
+            current_rc_file: None,
         }
     }
 }
@@ -116,7 +122,22 @@ impl RuntimeVariables {
             parent: Some(shared),
             values: BTreeMap::new(),
             system_hostname: self.system_hostname.clone(),
+            process_id: self.process_id.clone(),
+            last_command_status: self.last_command_status.clone(),
+            current_rc_file: self.current_rc_file.clone(),
         }
+    }
+
+    pub fn set_current_rc_file(&mut self, path: impl Into<String>) {
+        self.current_rc_file = Some(path.into());
+    }
+
+    pub(crate) fn replace_current_rc_file(&mut self, path: Option<String>) -> Option<String> {
+        std::mem::replace(&mut self.current_rc_file, path)
+    }
+
+    pub fn set_last_command_status(&mut self, status: u8) {
+        self.last_command_status = status.to_string();
     }
 
     pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
@@ -190,6 +211,13 @@ impl RuntimeVariables {
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
+        match name {
+            "$" => return Some(&self.process_id),
+            "?" => return Some(&self.last_command_status),
+            "_" => return self.current_rc_file.as_deref(),
+            "-" => return self.get("LASTFOLDER"),
+            _ => {}
+        }
         let Some(value) = self.find(name) else {
             return match name {
                 "#" => Some("0"),
@@ -204,6 +232,13 @@ impl RuntimeVariables {
     }
 
     pub fn get_bytes(&self, name: &str) -> Option<&[u8]> {
+        match name {
+            "$" => return Some(self.process_id.as_bytes()),
+            "?" => return Some(self.last_command_status.as_bytes()),
+            "_" => return self.current_rc_file.as_deref().map(str::as_bytes),
+            "-" => return self.get_bytes("LASTFOLDER"),
+            _ => {}
+        }
         let Some(value) = self.find(name) else {
             return match name {
                 "#" => Some(b"0"),

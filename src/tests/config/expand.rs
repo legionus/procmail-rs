@@ -1014,8 +1014,29 @@ fn expands_destinations_inside_recipe_blocks() {
 
 #[test]
 fn rejects_unsupported_and_malformed_references() {
-    for source in ["A=$$\n", "A=${NAME@pattern}\n", "A=${NAME\n", "A=$\n"] {
+    for source in ["A=$@\n", "A=${NAME@pattern}\n", "A=${NAME\n", "A=$\n"] {
         assert!(parse(source).is_err(), "{source:?}");
+    }
+}
+
+#[test]
+fn parses_documented_scalar_special_parameters() {
+    let config = parse("PID=$$\nSTATUS=$?\nRC=$_\nFOLDER=$-\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+
+    for (statement, expected) in config.statements.iter().zip(["$", "?", "_", "-"]) {
+        let Statement::Assignment(assignment) = statement else {
+            panic!("expected assignment");
+        };
+        assert_eq!(
+            assignment.expansion.as_ref().unwrap().parts,
+            [ShellPart::Variable {
+                name: expected.to_owned(),
+                operation: ParameterOperation::Value,
+            }]
+        );
     }
 }
 

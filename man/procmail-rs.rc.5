@@ -1064,6 +1064,43 @@ FOLDER=$1
 .PP
 Unlike original procmail, zero, negative, and malformed values are
 errors instead of silent no\-ops.
+.SS Scalar special parameters
+.TP
+\f[CR]$$\f[R]
+Decimal process id of the running procmail\-rs instance.
+.TP
+\f[CR]$?\f[R]
+Status of the most recently completed external command.
+It is initially \f[CR]0\f[R].
+A normal exit preserves its exact code.
+Termination by a signal or \f[CR]TIMEOUT\f[R] records \f[CR]1\f[R] when
+no numeric exit code is available.
+Starting an explicitly asynchronous pipe records \f[CR]0\f[R]; later
+completion does not change following expressions.
+.TP
+\f[CR]$_\f[R]
+Name of the rc file currently being executed.
+Entering an \f[CR]INCLUDERC\f[R] or \f[CR]SWITCHRC\f[R] file selects its
+name.
+Returning from an include restores the caller\(cqs name.
+.TP
+\f[CR]$\-\f[R]
+Current \f[CR]LASTFOLDER\f[R] value.
+It is unset before the first successful delivery or external action.
+.IP
+.EX
+SOURCE_RC=$_
+RESULT=\(gaspam\-check\(ga
+STATUS=$?
+TEMP=$MAILDIR/filter.$$
+PREVIOUS_DESTINATION=$\-
+.EE
+.PP
+These parameters are private runtime values.
+They are not exported to child processes under the environment names
+\f[CR]$\f[R], \f[CR]?\f[R], \f[CR]_\f[R], or \f[CR]\-\f[R].
+Copy branches change their current rc\-file name and last command status
+independently.
 .SS Identity and runtime results
 .TP
 \f[CR]HOME\f[R]

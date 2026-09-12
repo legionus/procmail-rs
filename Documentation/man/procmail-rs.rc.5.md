@@ -920,6 +920,43 @@ FOLDER=$1
 Unlike original procmail, zero, negative, and malformed values are errors
 instead of silent no-ops.
 
+## Scalar special parameters
+
+`$$`
+
+: Decimal process id of the running procmail-rs instance.
+
+`$?`
+
+: Status of the most recently completed external command. It is initially
+  `0`. A normal exit preserves its exact code. Termination by a signal or
+  `TIMEOUT` records `1` when no numeric exit code is available. Starting an
+  explicitly asynchronous pipe records `0`; later completion does not change
+  following expressions.
+
+`$_`
+
+: Name of the rc file currently being executed. Entering an `INCLUDERC` or
+  `SWITCHRC` file selects its name. Returning from an include restores the
+  caller's name.
+
+`$-`
+
+: Current `LASTFOLDER` value. It is unset before the first successful delivery
+  or external action.
+
+```text
+SOURCE_RC=$_
+RESULT=`spam-check`
+STATUS=$?
+TEMP=$MAILDIR/filter.$$
+PREVIOUS_DESTINATION=$-
+```
+
+These parameters are private runtime values. They are not exported to child
+processes under the environment names `$`, `?`, `_`, or `-`. Copy branches
+change their current rc-file name and last command status independently.
+
 ## Identity and runtime results
 
 `HOME`
