@@ -23,7 +23,7 @@ pub use expand::ExpansionError;
 pub(crate) use parser::exercise_condition_regex;
 pub use parser::parse;
 pub(crate) use parser::{parse_reparsed_condition, parse_with_state};
-pub(crate) use variables::AssignmentPath;
+pub(crate) use variables::{AssignmentPath, parse_shift};
 pub use variables::{
     AssignmentTarget, DEFAULT_LOCK_EXT, DEFAULT_UMASK, MAX_COMMAND_LINE_VARIABLES,
     MAX_LOCK_SLEEP_SECONDS, MAX_LOCK_TIMEOUT_SECONDS, MAX_PROCESS_TIMEOUT_SECONDS,

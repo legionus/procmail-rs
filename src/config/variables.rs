@@ -25,9 +25,25 @@ pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "SUSPEND",
     "SENDMAIL",
     "SENDMAILFLAGS",
-    "SHIFT",
     "LIMIT_RC_SIZE",
 ];
+
+pub(crate) fn parse_shift(value: &str) -> Result<usize, String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("SHIFT must be a positive decimal integer".to_owned());
+    }
+    let mut amount = 0usize;
+    for digit in value.bytes().map(|byte| usize::from(byte - b'0')) {
+        amount = amount
+            .saturating_mul(10)
+            .saturating_add(digit)
+            .min(super::MAX_POSITIONAL_ARGUMENTS);
+    }
+    if amount == 0 {
+        return Err("SHIFT must be a positive decimal integer".to_owned());
+    }
+    Ok(amount)
+}
 
 pub fn parse_umask(value: &str) -> Result<u32, String> {
     if value.is_empty() || value.len() > 4 || !value.bytes().all(|byte| matches!(byte, b'0'..=b'7'))
@@ -156,6 +172,7 @@ pub enum AssignmentTarget {
     Path,
     ExitCode,
     Host,
+    Shift,
     MessageLimit(MessageLimitVariable),
     RcLimit(RcLimitVariable),
     User,
@@ -179,6 +196,7 @@ enum AssignmentValueValidator {
     Trap,
     LockExt,
     LogAbstract,
+    Shift,
 }
 
 impl AssignmentValueValidator {
@@ -193,6 +211,7 @@ impl AssignmentValueValidator {
             Self::Trap => validate_trap_command(value),
             Self::LockExt => validate_lock_ext(value),
             Self::LogAbstract => validate_log_abstract(value),
+            Self::Shift => parse_shift(value).map(drop),
         }
     }
 }
@@ -217,6 +236,7 @@ impl AssignmentTarget {
             | Self::Trap
             | Self::ExitCode
             | Self::Host
+            | Self::Shift
             | Self::MessageLimit(_)
             | Self::RcLimit(_)
             | Self::User => MAX_ASSIGNMENT_VALUE_LEN,
@@ -233,6 +253,7 @@ impl AssignmentTarget {
             Self::Trap => AssignmentValueValidator::Trap,
             Self::LockExt => AssignmentValueValidator::LockExt,
             Self::LogAbstract => AssignmentValueValidator::LogAbstract,
+            Self::Shift => AssignmentValueValidator::Shift,
             Self::Maildir
             | Self::LogFile
             | Self::LogDetail
@@ -286,6 +307,7 @@ impl AssignmentTarget {
             | Self::Path
             | Self::ExitCode
             | Self::Host
+            | Self::Shift
             | Self::MessageLimit(_)
             | Self::RcLimit(_)
             | Self::User => None,
@@ -301,6 +323,7 @@ impl AssignmentTarget {
             | Self::Path
             | Self::ExitCode
             | Self::Host
+            | Self::Shift
             | Self::LockMethod
             | Self::LockFile
             | Self::LockExt
@@ -342,6 +365,7 @@ impl AssignmentTarget {
             | Self::Path
             | Self::ExitCode
             | Self::Host
+            | Self::Shift
             | Self::MessageLimit(_)
             | Self::User => false,
         }
@@ -364,6 +388,7 @@ impl AssignmentTarget {
             | Self::Umask
             | Self::Trap
             | Self::LogAbstract
+            | Self::Shift
             | Self::RcLimit(_) => true,
             Self::LogFile
             | Self::LogDetail
@@ -396,6 +421,7 @@ impl AssignmentTarget {
             | Self::Path
             | Self::ExitCode
             | Self::Host
+            | Self::Shift
             | Self::MessageLimit(_)
             | Self::RcLimit(_)
             | Self::User => false,
@@ -588,6 +614,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
         "PATH" => VariablePolicy::RcOrCommandLine(AssignmentTarget::Path),
         "EXITCODE" => VariablePolicy::RcOnly(AssignmentTarget::ExitCode),
         "HOST" => VariablePolicy::RcOnly(AssignmentTarget::Host),
+        "SHIFT" => VariablePolicy::RcOnly(AssignmentTarget::Shift),
         "PROCMAIL_VERSION" => VariablePolicy::ReadOnly,
         "LASTFOLDER" | "MATCH" => VariablePolicy::RuntimeOnly,
         name if name.strip_prefix("MATCH").is_some_and(|suffix| {

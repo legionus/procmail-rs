@@ -268,14 +268,58 @@ fn execute_assignment(
         .assignment
         .resolve_with(|name| runtime.get(name).map(str::to_owned))
         .map_err(EvalError::Expansion)?;
-    runtime.set_bytes_with_trace(
-        assignment.assignment.name.clone(),
-        value.into_bytes(),
-        assignment.line,
-        assignment.source,
-        trace,
-    );
-    Ok(())
+    ResolvedAssignment {
+        name: assignment.assignment.name.clone(),
+        target: assignment.assignment.target,
+        value: value.into_bytes(),
+        source_line: assignment.assignment.line,
+        trace_line: assignment.line,
+        source: assignment.source,
+    }
+    .apply(runtime, trace)
+}
+
+struct ResolvedAssignment {
+    name: String,
+    target: AssignmentTarget,
+    value: Vec<u8>,
+    source_line: usize,
+    trace_line: Option<usize>,
+    source: TraceVariableSource,
+}
+
+impl ResolvedAssignment {
+    fn apply(
+        self,
+        runtime: &mut RuntimeVariables,
+        trace: &mut impl TraceSink,
+    ) -> Result<(), EvalError> {
+        if self.target == AssignmentTarget::Shift {
+            let text =
+                std::str::from_utf8(&self.value).map_err(|_| EvalError::RuntimeCondition {
+                    line: self.source_line,
+                    message: "SHIFT must be a positive decimal integer".to_owned(),
+                })?;
+            let amount = crate::config::parse_shift(text).map_err(|message| {
+                EvalError::RuntimeCondition {
+                    line: self.source_line,
+                    message,
+                }
+            })?;
+            runtime.set_bytes_with_trace(
+                self.name,
+                self.value,
+                self.trace_line,
+                self.source,
+                trace,
+            );
+            runtime.remove("SHIFT");
+            runtime.shift_positionals(amount);
+            return Ok(());
+        }
+        runtime.set_bytes_with_trace(self.name, self.value, self.trace_line, self.source, trace);
+        Ok(())
+    }
 }
 
 fn execute_host_assignment(

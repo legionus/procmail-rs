@@ -19,6 +19,8 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
   mailbox addresses and `List-Id` values without external header parsers.
 - Add repeatable `-a` positional arguments with `$N`, `${N}`, and `$#`
   expansion across runtime rc files.
+- Add statement-ordered `SHIFT` support for positional arguments, including
+  runtime rc files and branch-local processing.
 - Add human-readable and JSON trace formats, session-start records, resolved
   delivery paths, and detailed logging controls.
 - Add `filter --dry-run` for evaluating recipes without publishing delivery

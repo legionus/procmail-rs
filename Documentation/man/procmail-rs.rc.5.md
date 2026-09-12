@@ -902,7 +902,23 @@ maildir:${2}/
 At most 256 arguments are accepted, with a 64 KiB limit on one value and a
 256 KiB combined limit. Their text is inserted literally, remains available
 to runtime `INCLUDERC` and `SWITCHRC` files, and is not exported under numeric
-child-environment names. `$@`, `$*`, and `SHIFT` are unsupported.
+child-environment names. `$@` and `$*` are unsupported.
+
+`SHIFT`
+
+: Assign a positive decimal integer to discard that many leading positional
+  arguments. An amount larger than `$#` discards all remaining arguments.
+  Following statements and runtime rc files observe the new `$1` and `$#`.
+  A copied recipe branch changes only its private argument window.
+
+```text
+ACCOUNT=$1
+SHIFT=1
+FOLDER=$1
+```
+
+Unlike original procmail, zero, negative, and malformed values are errors
+instead of silent no-ops.
 
 ## Identity and runtime results
 
@@ -1093,8 +1109,8 @@ child-environment names. `$@`, `$*`, and `SHIFT` are unsupported.
 
 Assignments and references to `DEFAULT`, `ORGMAIL`, `COMSAT`, `DELIVERED`,
 `DROPPRIVS`, `LOG`, `MSGPREFIX`, `NORESRETRY`,
-`PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, `SENDMAILFLAGS`, and
-`SHIFT` are rejected with an explicit unsupported-variable diagnostic.
+`PROCMAIL_OVERFLOW`, `SHELLMETAS`, `SUSPEND`, `SENDMAIL`, and `SENDMAILFLAGS`
+are rejected with an explicit unsupported-variable diagnostic.
 `LIMIT_RC_SIZE` is likewise reserved and rejected because an rc file cannot
 choose the bound under which that same file was already read. These names are
 not treated as ordinary user variables.

@@ -132,6 +132,19 @@ fn registry_classifies_every_unsupported_procmail_variable() {
 }
 
 #[test]
+fn shift_accepts_only_positive_decimal_values() {
+    assert_eq!(parse_shift("1"), Ok(1));
+    assert_eq!(parse_shift("256"), Ok(256));
+    assert_eq!(
+        parse_shift("999999999999999999999999999999999999"),
+        Ok(crate::config::MAX_POSITIONAL_ARGUMENTS)
+    );
+    for value in ["", "0", "-1", "+1", "1x", " 1"] {
+        assert!(parse_shift(value).is_err(), "{value:?}");
+    }
+}
+
+#[test]
 fn special_procmail_names_never_fall_through_to_user_policy() {
     for name in [
         "LOCKEXT",

@@ -577,7 +577,7 @@ pub(super) fn expand_with_runtime_values<'a>(
         .iter()
         .rev()
         .find_map(|(name, value)| (*name == "MAILDIR").then(|| (*value).to_owned()));
-    let variables = values
+    let mut variables = values
         .into_iter()
         .map(|(name, value)| {
             (
@@ -588,7 +588,8 @@ pub(super) fn expand_with_runtime_values<'a>(
                 },
             )
         })
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    populate_missing_positionals(&mut variables);
     expand_config(config, variables, Vec::new(), maildir)
 }
 
@@ -601,7 +602,7 @@ pub(super) fn prepare_for_check<'a>(
         .iter()
         .rev()
         .find_map(|(name, value)| (*name == "MAILDIR").then_some(*value));
-    let known = values
+    let mut known = values
         .into_iter()
         .map(|(name, value)| {
             (
@@ -612,7 +613,8 @@ pub(super) fn prepare_for_check<'a>(
                 },
             )
         })
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    populate_missing_positionals(&mut known);
     // A check has no message values, but it still needs to reject undefined
     // ordinary variables and malformed path expressions throughout a loaded
     // file. Prepare every statement for later symbolic evaluation instead of
@@ -862,7 +864,11 @@ impl ConfigPreparer {
                 assignment.expression.for_each_assignment(&mut |name| {
                     self.dynamic.insert(name.to_owned());
                 });
-                self.dynamic.insert(assignment.name.clone());
+                if assignment.target == AssignmentTarget::Shift {
+                    mark_positional_dynamic(&mut self.dynamic);
+                } else {
+                    self.dynamic.insert(assignment.name.clone());
+                }
                 Ok(())
             }
             Statement::Recipe(recipe) => {
@@ -886,6 +892,7 @@ impl ConfigPreparer {
                 }
                 validate_runtime_references(&parsed, expression.line, &self.known, &self.dynamic)?;
                 expression.expansion = Some(parsed);
+                mark_positional_dynamic(&mut self.dynamic);
                 Ok(())
             }
         }
@@ -914,6 +921,10 @@ impl ConfigPreparer {
             .map_err(|error| relabel_linebuf_error(error, self.linebuf, hard_limit))?;
         assignment.value = expanded.text;
         self.validate_static_assignment(assignment)?;
+        if assignment.target == AssignmentTarget::Shift {
+            shift_known_positionals(&mut self.known, &assignment.value, assignment.line)?;
+            return Ok(());
+        }
         self.resolve_static_assignment_path(assignment)?;
         self.known.insert(
             assignment.name.clone(),
@@ -950,7 +961,11 @@ impl ConfigPreparer {
         // Conditional assignments exist only on a selected execution path.
         // Record their names without changing the known values so following
         // expressions are validated against the value available at runtime.
-        self.dynamic.insert(assignment.name.clone());
+        if assignment.target == AssignmentTarget::Shift {
+            mark_positional_dynamic(&mut self.dynamic);
+        } else {
+            self.dynamic.insert(assignment.name.clone());
+        }
         Ok(())
     }
 
@@ -1144,10 +1159,18 @@ fn record_recipe_dynamic_names(recipe: &Recipe, dynamic: &mut BTreeSet<String>) 
             for statement in statements {
                 match statement {
                     Statement::Assignment(assignment) => {
-                        dynamic.insert(assignment.name.clone());
+                        if assignment.target == AssignmentTarget::Shift {
+                            mark_positional_dynamic(dynamic);
+                        } else {
+                            dynamic.insert(assignment.name.clone());
+                        }
                     }
                     Statement::CommandAssignment(assignment) => {
-                        dynamic.insert(assignment.name.clone());
+                        if assignment.target == AssignmentTarget::Shift {
+                            mark_positional_dynamic(dynamic);
+                        } else {
+                            dynamic.insert(assignment.name.clone());
+                        }
                     }
                     Statement::Recipe(child) => record_recipe_dynamic_names(child, dynamic),
                     Statement::Include(_) | Statement::Switch(_) => {}
@@ -1170,6 +1193,70 @@ fn record_recipe_dynamic_names(recipe: &Recipe, dynamic: &mut BTreeSet<String>) 
         }
         RecipeAction::Pipe(_) => {}
     }
+}
+
+fn mark_positional_dynamic(dynamic: &mut BTreeSet<String>) {
+    dynamic.insert("#".to_owned());
+    dynamic.extend((1..=super::MAX_POSITIONAL_ARGUMENTS).map(|index| index.to_string()));
+}
+
+fn populate_missing_positionals(variables: &mut BTreeMap<String, ExpandedValue>) {
+    for index in 1..=super::MAX_POSITIONAL_ARGUMENTS {
+        variables.entry(index.to_string()).or_insert(ExpandedValue {
+            text: String::new(),
+            depth: 0,
+        });
+    }
+    variables.entry("#".to_owned()).or_insert(ExpandedValue {
+        text: "0".to_owned(),
+        depth: 0,
+    });
+}
+
+fn shift_known_positionals(
+    known: &mut BTreeMap<String, ExpandedValue>,
+    value: &str,
+    line: usize,
+) -> Result<(), ExpansionError> {
+    let requested =
+        super::parse_shift(value).map_err(|message| ExpansionError::new(line, message))?;
+    let count = known
+        .get("#")
+        .and_then(|value| value.text.parse::<usize>().ok())
+        .unwrap_or(0);
+    let amount = requested.min(count);
+    let remaining = count - amount;
+
+    // Update the bounded positional window in place so following eagerly
+    // prepared statements observe the same names that runtime execution will
+    // expose. Clone source values before replacing destinations because the
+    // ranges overlap whenever at least one argument remains.
+    let shifted = (1..=remaining)
+        .map(|index| {
+            known
+                .get(&(index + amount).to_string())
+                .cloned()
+                .unwrap_or(ExpandedValue {
+                    text: String::new(),
+                    depth: 0,
+                })
+        })
+        .collect::<Vec<_>>();
+    for index in 1..=super::MAX_POSITIONAL_ARGUMENTS {
+        let value = shifted.get(index - 1).cloned().unwrap_or(ExpandedValue {
+            text: String::new(),
+            depth: 0,
+        });
+        known.insert(index.to_string(), value);
+    }
+    known.insert(
+        "#".to_owned(),
+        ExpandedValue {
+            text: remaining.to_string(),
+            depth: 0,
+        },
+    );
+    Ok(())
 }
 
 fn prepare_header_action(

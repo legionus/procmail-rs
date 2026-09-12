@@ -48,7 +48,18 @@ maildir:${2}/
 At most 256 arguments are accepted. One value is limited to 64 KiB and their
 combined size to 256 KiB. Values are inserted literally without another
 expansion pass. They are not exported to child commands under numeric
-environment names. `$@`, `$*`, and `SHIFT` are not supported.
+environment names. `$@` and `$*` are not supported.
+
+Assign a positive decimal integer to `SHIFT` to discard that many leading
+arguments. A value larger than `$#` discards every remaining argument; it is
+not an error. The new `$1` and `$#` values apply to following statements and
+runtime rc files. A shift in a copied recipe branch does not change its parent.
+
+```text
+ACCOUNT=$1
+SHIFT=1
+FOLDER=$1
+```
 
 ## Quotes, escapes, and comments
 

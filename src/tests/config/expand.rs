@@ -606,6 +606,43 @@ fn expands_bounded_positional_arguments_and_argument_count() {
 }
 
 #[test]
+fn shift_changes_following_static_and_conditional_positional_references() {
+    let mut arguments = PositionalArguments::default();
+    for value in ["first", "second", "third"] {
+        arguments.push(value.to_owned()).unwrap();
+    }
+    let config =
+        parse("BEFORE=$1\nSHIFT=1\nAFTER=$1\nCOUNT=$#\n:0\n{\nSHIFT=1\nINSIDE=$1\n}\nLATER=$1\n")
+            .unwrap();
+    let config = config.expand_with_arguments(&[], &arguments).unwrap();
+
+    let assignments = config
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Assignment(assignment) => Some(assignment),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(assignments[0].value, "first");
+    assert_eq!(assignments[1].target, AssignmentTarget::Shift);
+    assert_eq!(assignments[2].value, "second");
+    assert_eq!(assignments[3].value, "2");
+    assert!(assignments[4].expansion.is_some());
+
+    let Statement::Recipe(recipe) = &config.statements[4] else {
+        panic!("expected recipe block");
+    };
+    let RecipeAction::Block(block) = &recipe.action else {
+        panic!("expected block action");
+    };
+    let Statement::Assignment(inside) = &block[1] else {
+        panic!("expected assignment after SHIFT");
+    };
+    assert!(inside.expansion.is_some());
+}
+
+#[test]
 fn prepares_named_and_implicit_delivery_lockfiles() {
     let config = parse(
         "MAILDIR=/srv/mail\nNAME=selected\n:0 c:named-$NAME.lock\nmaildir:one\n:0 :\nmaildir:two\n",

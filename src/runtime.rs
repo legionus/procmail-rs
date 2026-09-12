@@ -233,6 +233,34 @@ impl RuntimeVariables {
         self.values.insert(name.to_owned(), RuntimeValue::Removed);
     }
 
+    pub(crate) fn shift_positionals(&mut self, requested: usize) {
+        let count = self
+            .get("#")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let amount = requested.min(count);
+        let remaining = count - amount;
+
+        // Collect the bounded source window before overwriting numeric names.
+        // This preserves overlapping shifts and keeps a forked runtime from
+        // consulting values changed earlier in the same operation.
+        let shifted = (1..=remaining)
+            .map(|index| {
+                self.get(&(index + amount).to_string())
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        for index in 1..=crate::config::MAX_POSITIONAL_ARGUMENTS {
+            if let Some(value) = shifted.get(index - 1) {
+                self.set(index.to_string(), value.clone());
+            } else {
+                self.remove(&index.to_string());
+            }
+        }
+        self.set("#", remaining.to_string());
+    }
+
     pub(crate) fn values(&self) -> impl Iterator<Item = (&str, &str)> {
         self.visible_values()
             .into_iter()

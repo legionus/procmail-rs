@@ -810,14 +810,16 @@ where
         context.host,
     )?;
 
-    context.runtime.set_bytes_with_trace(
-        assignment.name.clone(),
+    ResolvedAssignment {
+        name: assignment.name.clone(),
+        target: assignment.target,
         value,
-        Some(assignment.line),
-        TraceVariableSource::RcFile,
-        context.host.trace(),
-    );
-    Ok(())
+        source_line: assignment.line,
+        trace_line: Some(assignment.line),
+        source: TraceVariableSource::RcFile,
+    }
+    .apply(context.runtime, context.host.trace())
+    .map_err(OrderedExecutionError::Evaluation)
 }
 
 struct ShellExpressionInput<'a> {

@@ -1046,7 +1046,24 @@ a 256 KiB combined limit.
 Their text is inserted literally, remains available to runtime
 \f[CR]INCLUDERC\f[R] and \f[CR]SWITCHRC\f[R] files, and is not exported
 under numeric child\-environment names.
-\f[CR]$\(at\f[R], \f[CR]$*\f[R], and \f[CR]SHIFT\f[R] are unsupported.
+\f[CR]$\(at\f[R] and \f[CR]$*\f[R] are unsupported.
+.TP
+\f[CR]SHIFT\f[R]
+Assign a positive decimal integer to discard that many leading
+positional arguments.
+An amount larger than \f[CR]$#\f[R] discards all remaining arguments.
+Following statements and runtime rc files observe the new \f[CR]$1\f[R]
+and \f[CR]$#\f[R].
+A copied recipe branch changes only its private argument window.
+.IP
+.EX
+ACCOUNT=$1
+SHIFT=1
+FOLDER=$1
+.EE
+.PP
+Unlike original procmail, zero, negative, and malformed values are
+errors instead of silent no\-ops.
 .SS Identity and runtime results
 .TP
 \f[CR]HOME\f[R]
@@ -1243,8 +1260,8 @@ Assignments and references to \f[CR]DEFAULT\f[R], \f[CR]ORGMAIL\f[R],
 \f[CR]COMSAT\f[R], \f[CR]DELIVERED\f[R], \f[CR]DROPPRIVS\f[R],
 \f[CR]LOG\f[R], \f[CR]MSGPREFIX\f[R], \f[CR]NORESRETRY\f[R],
 \f[CR]PROCMAIL_OVERFLOW\f[R], \f[CR]SHELLMETAS\f[R], \f[CR]SUSPEND\f[R],
-\f[CR]SENDMAIL\f[R], \f[CR]SENDMAILFLAGS\f[R], and \f[CR]SHIFT\f[R] are
-rejected with an explicit unsupported\-variable diagnostic.
+\f[CR]SENDMAIL\f[R], and \f[CR]SENDMAILFLAGS\f[R] are rejected with an
+explicit unsupported\-variable diagnostic.
 \f[CR]LIMIT_RC_SIZE\f[R] is likewise reserved and rejected because an rc
 file cannot choose the bound under which that same file was already
 read.
