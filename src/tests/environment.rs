@@ -39,6 +39,13 @@ fn does_not_export_positional_parameters_as_environment_names() {
             .values()
             .all(|(name, _)| name != "1" && name != "#")
     );
+    assert_eq!(
+        environment
+            .positional_arguments()
+            .map(OsStr::as_bytes)
+            .collect::<Vec<_>>(),
+        vec![b"first".as_slice()]
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
+use std::borrow::Cow;
 use std::fmt;
 use std::io::{BufReader, Read, Write};
 use std::os::fd::OwnedFd;
@@ -299,16 +300,29 @@ impl ChildLifecycle {
         let invocation = policy
             .authorize(environment)
             .map_err(|error| process_error(error.to_string()))?;
+        let command = prepare_special_positional_argument(command);
+        let forwards_positionals = matches!(command, Cow::Owned(_));
         let mut child = Command::new(invocation.path());
         child
             .arg(invocation.flags())
-            .arg(command)
+            .arg(command.as_ref())
             .env_clear()
             .envs(environment.values())
             .stdin(Stdio::piped())
             .stdout(stdout)
             .stderr(stderr)
             .process_group(0);
+
+        // The shell reserves its first post-command argument for $0. Supply a
+        // fixed non-secret name before the bounded rc arguments so its "$@"
+        // preserves each original argv entry, including empty values. Avoid
+        // adding these arguments to commands without the documented token,
+        // because doing so would also change their observable $0 and $#.
+        if forwards_positionals {
+            child
+                .arg("procmail-rs")
+                .args(environment.positional_arguments());
+        }
 
         // Original procmail makes MAILDIR the current directory for commands.
         // Set it on the child instead of changing this process directory: copy
@@ -401,6 +415,86 @@ impl ChildLifecycle {
             waited.map_err(|_| process_error("external command wait worker failed"))??;
         Ok(complete_child(input_write, status, timed_out))
     }
+}
+
+fn prepare_special_positional_argument(command: &str) -> Cow<'_, str> {
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    let mut at_word_boundary = true;
+    let mut selected = None;
+
+    // Find the rightmost documented standalone "$@" shell word. Original
+    // procmail expands only that occurrence; earlier quoted occurrences
+    // become empty words rather than duplicating the caller's argument list.
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => {
+                index = index.saturating_add(2);
+                at_word_boundary = false;
+            }
+            b'\'' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'\'' {
+                    index += 1;
+                }
+                index = index.saturating_add(1);
+                at_word_boundary = false;
+            }
+            b'"' if at_word_boundary
+                && bytes.get(index..index.saturating_add(4)) == Some(b"\"$@\"")
+                && bytes
+                    .get(index.saturating_add(4))
+                    .is_none_or(|byte| is_shell_word_boundary(*byte)) =>
+            {
+                selected = Some(index + 1);
+                index += 4;
+                at_word_boundary = true;
+            }
+            byte => {
+                at_word_boundary = is_shell_word_boundary(byte);
+                index += 1;
+            }
+        }
+    }
+    let Some(selected) = selected else {
+        return Cow::Borrowed(command);
+    };
+
+    let mut rewritten = String::with_capacity(command.len());
+    let mut quote = None;
+    let mut index = 0;
+    let mut copied = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' && quote != Some(b'\'') {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') && quote.is_none_or(|active| active == byte) {
+            quote = if quote == Some(byte) {
+                None
+            } else {
+                Some(byte)
+            };
+        }
+        if byte == b'$'
+            && bytes.get(index + 1) == Some(&b'@')
+            && quote != Some(b'\'')
+            && index != selected
+        {
+            rewritten.push_str(&command[copied..index]);
+            index += 2;
+            copied = index;
+            continue;
+        }
+        index += 1;
+    }
+    rewritten.push_str(&command[copied..]);
+    Cow::Owned(rewritten)
+}
+
+fn is_shell_word_boundary(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>')
 }
 
 fn write_process_input(mut stdin: ChildStdin, input: ProcessInput<'_>) -> std::io::Result<()> {

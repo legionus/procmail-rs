@@ -48,7 +48,24 @@ maildir:${2}/
 At most 256 arguments are accepted. One value is limited to 64 KiB and their
 combined size to 256 KiB. Values are inserted literally without another
 expansion pass. They are not exported to child commands under numeric
-environment names. `$@` and `$*` are not supported.
+environment names.
+
+The special standalone word `"$@"` is supported only in an external program's
+argument list. It expands to the current positional window as separate
+arguments, preserving empty values and whitespace without interpreting their
+contents as shell syntax. The quotes are required. If a command contains the
+word more than once, only the rightmost occurrence expands and each preceding
+occurrence contributes one empty argument, matching original procmail.
+
+```text
+:0
+* ? spam-check --account "$1" -- "$@"
+spam/
+```
+
+`SHIFT` changes the arguments seen by a later `"$@"`. Other `$@` spellings and
+`$*` are unsupported; in particular, `prefix"$@"`, unquoted `$@`, and
+single-quoted `'$@'` do not request positional forwarding.
 
 Assign a positive decimal integer to `SHIFT` to discard that many leading
 arguments. A value larger than `$#` discards every remaining argument; it is

@@ -1046,7 +1046,26 @@ a 256 KiB combined limit.
 Their text is inserted literally, remains available to runtime
 \f[CR]INCLUDERC\f[R] and \f[CR]SWITCHRC\f[R] files, and is not exported
 under numeric child\-environment names.
-\f[CR]$\(at\f[R] and \f[CR]$*\f[R] are unsupported.
+.PP
+The standalone quoted word \f[CR]\(dq$\(at\(dq\f[R] is special only in
+an external program\(cqs argument list.
+It expands to the current positional window as distinct arguments,
+preserving empty arguments and whitespace.
+The quotes are required.
+When the word occurs more than once, only the rightmost occurrence
+expands and each earlier occurrence supplies one empty argument.
+.IP
+.EX
+:0
+* ? spam\-check \-\-account \(dq$1\(dq \-\- \(dq$\(at\(dq
+spam/
+.EE
+.PP
+A preceding \f[CR]SHIFT\f[R] changes the window supplied by a later
+\f[CR]\(dq$\(at\(dq\f[R].
+\f[CR]$*\f[R], unquoted \f[CR]$\(at\f[R], single\-quoted
+\f[CR]\(aq$\(at\(aq\f[R], and quoted \f[CR]$\(at\f[R] embedded in
+another word are unsupported.
 .TP
 \f[CR]SHIFT\f[R]
 Assign a positive decimal integer to discard that many leading

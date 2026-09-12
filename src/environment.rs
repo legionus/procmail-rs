@@ -7,8 +7,8 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::config::{
-    AssignmentTarget, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_SHELL_SETTING_LEN,
-    variable_policy,
+    AssignmentTarget, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_POSITIONAL_ARGUMENTS,
+    MAX_SHELL_SETTING_LEN, variable_policy,
 };
 use crate::runtime::RuntimeVariables;
 
@@ -21,6 +21,7 @@ pub const MAX_CHILD_ENVIRONMENT_BYTES: usize = 256 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessEnvironment {
     values: BTreeMap<String, Vec<u8>>,
+    positional_arguments: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +69,34 @@ impl ProcessEnvironment {
                 .or_insert_with(|| value.as_bytes().to_vec());
         }
         validate_aggregate(&values)?;
-        Ok(Self { values })
+
+        // Keep positional values out of the child environment while retaining
+        // their argv boundaries. A later "$@" expansion can then pass empty
+        // and whitespace-containing arguments to the shell without quoting
+        // user data into the command text.
+        let positional_count = runtime
+            .get("#")
+            .unwrap_or("0")
+            .parse::<usize>()
+            .map_err(|_| error("invalid positional argument count"))?;
+        if positional_count > MAX_POSITIONAL_ARGUMENTS {
+            return Err(error("positional argument count exceeds its hard limit"));
+        }
+        let mut positional_arguments = Vec::new();
+        positional_arguments
+            .try_reserve_exact(positional_count)
+            .map_err(|_| error("cannot reserve positional arguments"))?;
+        for index in 1..=positional_count {
+            let value = runtime.get_bytes(&index.to_string()).unwrap_or(b"");
+            if value.contains(&0) {
+                return Err(error("positional argument contains NUL"));
+            }
+            positional_arguments.push(value.to_vec());
+        }
+        Ok(Self {
+            values,
+            positional_arguments,
+        })
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
@@ -81,6 +109,12 @@ impl ProcessEnvironment {
         self.values
             .iter()
             .map(|(name, value)| (name.as_str(), OsStr::from_bytes(value)))
+    }
+
+    pub(crate) fn positional_arguments(&self) -> impl Iterator<Item = &OsStr> {
+        self.positional_arguments
+            .iter()
+            .map(|value| OsStr::from_bytes(value))
     }
 }
 

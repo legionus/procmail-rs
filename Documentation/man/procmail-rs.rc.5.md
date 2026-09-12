@@ -902,7 +902,23 @@ maildir:${2}/
 At most 256 arguments are accepted, with a 64 KiB limit on one value and a
 256 KiB combined limit. Their text is inserted literally, remains available
 to runtime `INCLUDERC` and `SWITCHRC` files, and is not exported under numeric
-child-environment names. `$@` and `$*` are unsupported.
+child-environment names.
+
+The standalone quoted word `"$@"` is special only in an external program's
+argument list. It expands to the current positional window as distinct
+arguments, preserving empty arguments and whitespace. The quotes are
+required. When the word occurs more than once, only the rightmost occurrence
+expands and each earlier occurrence supplies one empty argument.
+
+```text
+:0
+* ? spam-check --account "$1" -- "$@"
+spam/
+```
+
+A preceding `SHIFT` changes the window supplied by a later `"$@"`. `$*`,
+unquoted `$@`, single-quoted `'$@'`, and quoted `$@` embedded in another word
+are unsupported.
 
 `SHIFT`
 

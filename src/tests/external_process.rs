@@ -549,3 +549,31 @@ fn parses_timeout_at_boundaries_and_in_statement_order() {
         Duration::from_secs(2)
     );
 }
+
+#[test]
+fn recognizes_only_a_standalone_quoted_at_word() {
+    assert!(matches!(
+        prepare_special_positional_argument("program \"$@\""),
+        std::borrow::Cow::Owned(_)
+    ));
+    for command in [
+        "program $@",
+        "program '$@'",
+        r#"program \"$@\""#,
+        "program prefix\"$@\"",
+        "program \"$@\"suffix",
+    ] {
+        assert!(matches!(
+            prepare_special_positional_argument(command),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+}
+
+#[test]
+fn keeps_only_the_rightmost_quoted_at_expansion_active() {
+    assert_eq!(
+        prepare_special_positional_argument("program --метка before \"$@\" middle \"$@\" after",),
+        "program --метка before \"\" middle \"$@\" after"
+    );
+}

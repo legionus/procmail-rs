@@ -21,6 +21,8 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
   expansion across runtime rc files.
 - Add statement-ordered `SHIFT` support for positional arguments, including
   runtime rc files and branch-local processing.
+- Add procmail-compatible standalone `"$@"` forwarding to external programs
+  while preserving positional argument boundaries and empty values.
 - Add the procmail `$$`, `$?`, `$_`, and `$-` special parameters for the
   process id, last command status, current rc-file name, and `LASTFOLDER`.
 - Add human-readable and JSON trace formats, session-start records, resolved

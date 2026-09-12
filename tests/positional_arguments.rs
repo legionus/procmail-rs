@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -260,4 +261,36 @@ fn command_output_can_select_the_shift_amount() {
 
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     assert_eq!(fs::read_dir(destination.join("new")).unwrap().count(), 1);
+}
+
+#[test]
+fn quoted_at_forwards_shifted_arguments_without_losing_boundaries() {
+    let directory = temporary_directory();
+    let config = directory.join("rules.rc");
+    let helper = directory.join("check-arguments.sh");
+    fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$#\" -eq 7 ] &&\n[ \"$1\" = before ] &&\n[ -z \"$2\" ] &&\n[ \"$3\" = middle ] &&\n[ -z \"$4\" ] &&\n[ \"$5\" = 'two words' ] &&\n[ \"$6\" = \"* '\\$\" ] &&\n[ \"$7\" = after ]\n",
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\nSHIFT=1\n:0\n* ? {} before \"$@\" middle \"$@\" after\n/dev/null\n",
+            directory.display(),
+            helper.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .args(["-a", "ignored", "-a", "", "-a", "two words", "-a", "* '$"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
 }
