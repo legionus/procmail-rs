@@ -5,6 +5,8 @@ edition = "2024"
 rust-version = "1.85"
 description = "A bounded mail filter with explicit Maildir and mbox delivery"
 license = "MIT"
+homepage = "https://github.com/legionus/procmail-rs"
+repository = "https://github.com/legionus/procmail-rs.git"
 include = [
     "/.github/scripts/check-package.sh",
     "/Cargo.lock",

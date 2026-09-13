@@ -7,7 +7,9 @@ All notable user-visible changes will be recorded here. The format follows
 Keep a Changelog, and versions follow Semantic Versioning as described in
 `Documentation/ReleasePolicy.md`.
 
-## Unreleased
+## [Unreleased]
+
+## [0.1.0] - 2026-09-13
 
 - Compile on 32-bit and 64-bit Unix targets by sharing the named-file Maildir
   backend across non-Linux systems.
@@ -43,3 +45,6 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
 - Start external commands in the active `MAILDIR` without changing the parent
   process directory.
 - Support 32-bit and 64-bit Linux targets and 64-bit FreeBSD.
+
+[Unreleased]: https://github.com/legionus/procmail-rs/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/legionus/procmail-rs/releases/tag/v0.1.0
