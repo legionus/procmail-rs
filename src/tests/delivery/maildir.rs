@@ -2,6 +2,8 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
@@ -135,6 +137,22 @@ fn commit_atomically_publishes_the_complete_file_in_new() {
         fs::read(published.last_folder()).unwrap(),
         b"Subject: test\n\nbody"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn opens_maildir_through_a_search_only_directory() {
+    let maildir = TestMaildir::create();
+    let original = fs::metadata(maildir.path()).unwrap().permissions();
+    fs::set_permissions(maildir.path(), fs::Permissions::from_mode(0o300)).unwrap();
+
+    let result = MaildirSink::create(maildir.path(), Durability::None, 0);
+
+    // Restore listing permission before assertions so test cleanup can always
+    // enumerate and remove the temporary Maildir after a failure.
+    fs::set_permissions(maildir.path(), original).unwrap();
+    let sink = result.unwrap();
+    PendingSink::abort(Box::new(sink)).unwrap();
 }
 
 #[test]

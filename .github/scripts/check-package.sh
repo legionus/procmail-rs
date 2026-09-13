@@ -7,6 +7,13 @@ set -eu
 temporary_directory=$(mktemp -d)
 trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
 
+# Keep every tool and test in the same private temporary hierarchy. Exporting
+# this value, instead of setting it only on cargo, also covers test processes
+# and helper programs which consult the environment independently.
+test_tmpdir="$temporary_directory/test-tmp"
+mkdir -m 700 "$test_tmpdir"
+export TMPDIR="$test_tmpdir"
+
 # Use a private target directory so a stale archive cannot be mistaken for the
 # artifact produced from this tree. Extracting and testing that artifact also
 # catches files which exist in a checkout but were omitted from the package.
@@ -25,6 +32,9 @@ if test "$#" -ne 1 || test ! -d "$1"; then
 fi
 package_directory=$1
 
+# Package tests intentionally use std::env::temp_dir() for filesystem race
+# scenarios, so an inaccessible or shared /tmp would turn an environment
+# setup issue into dozens of misleading delivery failures.
 (cd "$package_directory" && cargo test --locked)
 
 # Install into an empty image and check every public artifact and its mode.

@@ -227,15 +227,15 @@ pub(crate) fn open_directory_path(path: &Path) -> io::Result<OwnedFd> {
     }
 
     let mut directory = if path.is_absolute() {
-        open_directory_at(CWD, OsStr::new("/"))?
+        open_path_directory_at(CWD, OsStr::new("/"))?
     } else {
-        open_directory_at(CWD, OsStr::new("."))?
+        open_path_directory_at(CWD, OsStr::new("."))?
     };
     for component in path.components() {
         match component {
             Component::RootDir | Component::CurDir => {}
             Component::Normal(name) => {
-                directory = open_directory_at(&directory, name)?;
+                directory = open_path_directory_at(&directory, name)?;
             }
             Component::ParentDir | Component::Prefix(_) => {
                 return Err(io::Error::new(
@@ -246,6 +246,25 @@ pub(crate) fn open_directory_path(path: &Path) -> io::Result<OwnedFd> {
         }
     }
     Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn open_path_directory_at(dir: impl rustix::fd::AsFd, name: &OsStr) -> io::Result<OwnedFd> {
+    // Linux O_PATH needs only search permission on a directory. This matters
+    // for private temporary hierarchies whose ancestors deliberately deny
+    // directory listing while still allowing their owner to traverse them.
+    openat(
+        dir,
+        name.as_encoded_bytes(),
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(io_error)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn open_path_directory_at(dir: impl rustix::fd::AsFd, name: &OsStr) -> io::Result<OwnedFd> {
+    open_directory_at(dir, name)
 }
 
 pub(crate) fn open_directory_at(dir: impl rustix::fd::AsFd, name: &OsStr) -> io::Result<OwnedFd> {
