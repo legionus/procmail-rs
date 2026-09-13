@@ -62,6 +62,20 @@ impl<T: TraceSink> TraceSink for SharedTrace<'_, T> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record(event);
     }
+
+    fn set_verbose(&mut self, enabled: bool) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_verbose(enabled);
+    }
+
+    fn set_log_abstract(&mut self, mode: procmail_rs::trace::LogAbstractMode) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_log_abstract(mode);
+    }
 }
 
 struct OrderedDeliveryHost<'a, T> {

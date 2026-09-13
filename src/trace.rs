@@ -58,6 +58,7 @@ pub struct TraceConfig {
     verbose: bool,
     logfile: Option<String>,
     detail: TraceDetail,
+    may_log: bool,
     failure_policy: LogFailurePolicy,
 }
 
@@ -67,6 +68,7 @@ impl Default for TraceConfig {
             verbose: false,
             logfile: None,
             detail: TraceDetail::Metadata,
+            may_log: false,
             failure_policy: LogFailurePolicy::Advisory,
         }
     }
@@ -74,7 +76,10 @@ impl Default for TraceConfig {
 
 impl TraceConfig {
     pub fn from_config(config: &Config) -> Result<Self, TraceConfigError> {
-        let mut settings = Self::default();
+        let mut settings = Self {
+            may_log: statements_may_log(&config.statements),
+            ..Self::default()
+        };
         for statement in &config.statements {
             let Statement::Assignment(assignment) = statement else {
                 if let Statement::Unset(unset) = statement {
@@ -130,7 +135,7 @@ impl TraceConfig {
     }
 
     pub fn enabled(&self) -> bool {
-        self.verbose
+        self.verbose || self.may_log
     }
 
     pub fn failure_policy(&self) -> LogFailurePolicy {
@@ -140,6 +145,21 @@ impl TraceConfig {
     pub fn detail(&self) -> TraceDetail {
         self.detail
     }
+}
+
+fn statements_may_log(statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::Assignment(assignment) => {
+            assignment.target == AssignmentTarget::Log
+                || assignment.target == AssignmentTarget::LogAbstract && assignment.value != "no"
+        }
+        Statement::Include(_) | Statement::Switch(_) => true,
+        Statement::Recipe(recipe) => match &recipe.action {
+            crate::config::RecipeAction::Block(children) => statements_may_log(children),
+            _ => false,
+        },
+        Statement::Unset(_) | Statement::CommandAssignment(_) => false,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +181,7 @@ impl fmt::Display for TraceConfigError {
 
 impl std::error::Error for TraceConfigError {}
 
-fn parse_procmail_boolean(value: &str) -> Option<bool> {
+pub(crate) fn parse_procmail_boolean(value: &str) -> Option<bool> {
     let value = value.to_ascii_lowercase();
     if value.starts_with(|character: char| character.is_ascii_digit() && character != '0')
         || ["on", "y", "t", "e"]
@@ -186,6 +206,31 @@ pub trait TraceSink {
     }
 
     fn record(&mut self, event: TraceEvent);
+
+    fn set_verbose(&mut self, _enabled: bool) {}
+
+    fn set_log_abstract(&mut self, _mode: LogAbstractMode) {}
+
+    fn finish(&mut self) {}
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogAbstractMode {
+    #[default]
+    No,
+    Yes,
+    All,
+}
+
+impl LogAbstractMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "no" => Some(Self::No),
+            "yes" => Some(Self::Yes),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
 }
 
 pub fn record_external_command(line: usize, command: &str, trace: &mut impl TraceSink) {
@@ -281,6 +326,9 @@ pub struct BoundedTraceWriter<W> {
     stopped: Option<TraceStopReason>,
     detail: TraceDetail,
     format: TraceFormat,
+    verbose: bool,
+    abstract_mode: LogAbstractMode,
+    last_published: Option<(usize, DestinationKind, Option<TraceValue>)>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -299,6 +347,9 @@ impl<W> BoundedTraceWriter<W> {
             stopped: None,
             detail: TraceDetail::Metadata,
             format: TraceFormat::Json,
+            verbose: true,
+            abstract_mode: LogAbstractMode::No,
+            last_published: None,
         }
     }
 
@@ -310,6 +361,9 @@ impl<W> BoundedTraceWriter<W> {
             stopped: None,
             detail,
             format: TraceFormat::Json,
+            verbose: true,
+            abstract_mode: LogAbstractMode::No,
+            last_published: None,
         }
     }
 
@@ -321,6 +375,29 @@ impl<W> BoundedTraceWriter<W> {
             stopped: None,
             detail,
             format,
+            verbose: true,
+            abstract_mode: LogAbstractMode::No,
+            last_published: None,
+        }
+    }
+
+    pub fn runtime_formatted(
+        writer: W,
+        detail: TraceDetail,
+        format: TraceFormat,
+        verbose: bool,
+        abstract_mode: LogAbstractMode,
+    ) -> Self {
+        Self {
+            writer,
+            events: 0,
+            bytes: 0,
+            stopped: None,
+            detail,
+            format,
+            verbose,
+            abstract_mode,
+            last_published: None,
         }
     }
 
@@ -347,6 +424,59 @@ impl<W: Write> TraceSink for BoundedTraceWriter<W> {
     }
 
     fn record(&mut self, event: TraceEvent) {
+        if let TraceEvent::Delivery {
+            recipe_line,
+            destination,
+            stage: DeliveryStage::Published,
+            path,
+        } = &event
+        {
+            match self.abstract_mode {
+                LogAbstractMode::No => {}
+                LogAbstractMode::Yes => {
+                    self.last_published = Some((*recipe_line, *destination, path.clone()));
+                }
+                LogAbstractMode::All => {
+                    let abstract_event = TraceEvent::DeliveryAbstract {
+                        recipe_line: *recipe_line,
+                        destination: *destination,
+                        path: path.clone(),
+                    };
+                    self.write_event(&abstract_event);
+                }
+            }
+        }
+        if !self.verbose && !matches!(event, TraceEvent::Log { .. }) {
+            return;
+        }
+        self.write_event(&event);
+    }
+
+    fn set_verbose(&mut self, enabled: bool) {
+        self.verbose = enabled;
+    }
+
+    fn set_log_abstract(&mut self, mode: LogAbstractMode) {
+        self.abstract_mode = mode;
+        self.last_published = None;
+    }
+
+    fn finish(&mut self) {
+        if self.abstract_mode != LogAbstractMode::Yes {
+            return;
+        }
+        if let Some((recipe_line, destination, path)) = self.last_published.take() {
+            self.write_event(&TraceEvent::DeliveryAbstract {
+                recipe_line,
+                destination,
+                path,
+            });
+        }
+    }
+}
+
+impl<W: Write> BoundedTraceWriter<W> {
+    fn write_event(&mut self, event: &TraceEvent) {
         if self.stopped.is_some() {
             return;
         }
@@ -368,10 +498,12 @@ impl<W: Write> TraceSink for BoundedTraceWriter<W> {
         // per-event budget when an event contains hostile future fields.
         let mut rendered = BoundedText::new(MAX_TRACE_EVENT_SIZE);
         let formatted = match self.format {
-            TraceFormat::Json => render_json_event(&mut rendered, &event),
-            TraceFormat::Text => render_human_event(&mut rendered, &event),
+            TraceFormat::Json => render_json_event(&mut rendered, event),
+            TraceFormat::Text => render_human_event(&mut rendered, event),
         };
-        if formatted.is_err() || rendered.write_char('\n').is_err() {
+        let needs_record_newline =
+            self.format == TraceFormat::Json || !matches!(event, TraceEvent::Log { .. });
+        if formatted.is_err() || needs_record_newline && rendered.write_char('\n').is_err() {
             self.stopped = Some(TraceStopReason::EventSizeLimit);
             return;
         }
@@ -578,6 +710,28 @@ fn render_json_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::R
             }
             output.write_char('}')
         }
+        TraceEvent::Log { line, value } => {
+            write!(output, "{{\"event\":\"log\",\"line\":{line},\"value\":")?;
+            render_json_string(output, value.as_bytes())?;
+            write!(output, ",\"value_truncated\":{}}}", value.was_truncated())
+        }
+        TraceEvent::DeliveryAbstract {
+            recipe_line,
+            destination,
+            path,
+        } => {
+            write!(
+                output,
+                "{{\"event\":\"delivery-abstract\",\"recipe_line\":{recipe_line},\"destination\":\"{}\"",
+                destination_kind_name(*destination)
+            )?;
+            if let Some(path) = path {
+                output.write_str(",\"path\":")?;
+                render_json_string(output, path.as_bytes())?;
+                write!(output, ",\"path_truncated\":{}", path.was_truncated())?;
+            }
+            output.write_char('}')
+        }
     }
 }
 
@@ -760,6 +914,28 @@ fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::
                 write!(output, " ({})", header_extraction_mode_name(*mode))?;
             }
             write!(output, " at line {line}")
+        }
+        TraceEvent::Log { value, .. } => {
+            output.write_str(std::str::from_utf8(value.as_bytes()).map_err(|_| fmt::Error)?)?;
+            if value.was_truncated() {
+                output.write_str("...[truncated]")?;
+            }
+            Ok(())
+        }
+        TraceEvent::DeliveryAbstract {
+            recipe_line,
+            destination,
+            path,
+        } => {
+            write!(
+                output,
+                "procmail-rs: Abstract: delivered to {}",
+                human_destination_kind(*destination)
+            )?;
+            if let Some(path) = path {
+                write!(output, " \"{}\"", EscapedBytes::new(path.as_bytes()))?;
+            }
+            write!(output, " (recipe at line {recipe_line})")
         }
     }
 }
@@ -976,6 +1152,15 @@ pub enum TraceEvent {
         name: TraceName,
         argument: Option<TraceName>,
         extraction_mode: Option<HeaderExtractionMode>,
+    },
+    Log {
+        line: usize,
+        value: TraceValue,
+    },
+    DeliveryAbstract {
+        recipe_line: usize,
+        destination: DestinationKind,
+        path: Option<TraceValue>,
     },
 }
 

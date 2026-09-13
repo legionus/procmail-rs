@@ -2638,14 +2638,12 @@ fn known_unsupported_constructs_fail_check_before_message_input() {
 }
 
 #[test]
-fn logabstract_rejects_header_logging_modes_before_message_input() {
+fn logabstract_rejects_invalid_modes_before_message_input() {
     for rules in [
         "LOGABSTRACT=\n:0\nmaildir:unused\n",
         "LOGABSTRACT=No\n:0\nmaildir:unused\n",
         "LOGABSTRACT=off\n:0\nmaildir:unused\n",
-        "LOGABSTRACT=yes\n:0\nmaildir:unused\n",
-        "LOGABSTRACT=all\n:0\nmaildir:unused\n",
-        "MODE=all\nLOGABSTRACT=$MODE\n:0\nmaildir:unused\n",
+        "LOGABSTRACT=everything\n:0\nmaildir:unused\n",
     ] {
         let config = config_file(rules);
         let input_path = config.parent().unwrap().join("message.eml");
@@ -2667,7 +2665,7 @@ fn logabstract_rejects_header_logging_modes_before_message_input() {
         assert_eq!(input.stream_position().unwrap(), 0, "{rules:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(
-            stderr.contains("LOGABSTRACT supports only 'no'"),
+            stderr.contains("LOGABSTRACT must be 'no', 'yes', or 'all'"),
             "{stderr}"
         );
         assert!(!stderr.contains("private-from-sentinel"), "{stderr}");
@@ -2715,6 +2713,109 @@ fn logabstract_no_does_not_create_an_abstract_log() {
             "private-body",
         ],
     );
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn log_assignment_appends_expanded_text_without_enabling_verbose_trace() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let logfile = base.join("filter.log");
+    fs::write(
+        &config,
+        format!(
+            "LOGFILE={}\nNAME=world\nLOG='hello '\nLOG=\"$NAME\"\n:0\n/dev/null\n",
+            logfile.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(fs::read(&logfile).unwrap(), b"hello world");
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn logabstract_yes_reports_only_the_final_successful_delivery() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let copy = base.join("copy");
+    let final_destination = base.join("final");
+    let logfile = base.join("filter.log");
+    create_maildir(&copy);
+    create_maildir(&final_destination);
+    fs::write(
+        &config,
+        format!(
+            "LOGFILE={}\nLOGDETAIL=values\nLOGABSTRACT=yes\n:0c\nmaildir:{}/\n:0\nmaildir:{}/\n",
+            logfile.display(),
+            copy.display(),
+            final_destination.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    let log = String::from_utf8(fs::read(&logfile).unwrap()).unwrap();
+    assert_eq!(log.matches("Abstract:").count(), 1, "{log}");
+    assert!(!log.contains(copy.to_str().unwrap()), "{log}");
+    assert!(log.contains(final_destination.to_str().unwrap()), "{log}");
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn logabstract_all_reports_each_successful_delivery_without_header_values() {
+    let config = config_file("");
+    let base = config.parent().unwrap();
+    let copy = base.join("copy");
+    let final_destination = base.join("final");
+    let logfile = base.join("filter.log");
+    create_maildir(&copy);
+    create_maildir(&final_destination);
+    fs::write(
+        &config,
+        format!(
+            "LOGFILE={}\nLOGABSTRACT=all\n:0c\nmaildir:{}/\n:0\nmaildir:{}/\n",
+            logfile.display(),
+            copy.display(),
+            final_destination.display()
+        ),
+    )
+    .unwrap();
+
+    let input = b"From: private-from\nSubject: private-subject\n\nprivate-body";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    let log = String::from_utf8(fs::read(&logfile).unwrap()).unwrap();
+    assert_eq!(log.matches("Abstract:").count(), 2, "{log}");
+    assert!(!log.contains("private-from"), "{log}");
+    assert!(!log.contains("private-subject"), "{log}");
+    assert!(!log.contains("private-body"), "{log}");
+    assert!(!log.contains(copy.to_str().unwrap()), "{log}");
     fs::remove_dir_all(base).unwrap();
 }
 

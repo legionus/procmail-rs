@@ -176,14 +176,40 @@ fn validates_lock_extension_after_expansion() {
 }
 
 #[test]
-fn accepts_only_the_privacy_preserving_log_abstract_mode() {
-    assert!(validate_log_abstract("no").is_ok());
-    for value in ["", "No", "off", "yes", "all"] {
+fn accepts_the_supported_log_abstract_modes() {
+    for value in ["no", "yes", "all"] {
+        assert!(validate_log_abstract(value).is_ok(), "{value:?}");
+    }
+    for value in ["", "No", "off", "everything"] {
         assert_eq!(
             validate_log_abstract(value).unwrap_err(),
-            "LOGABSTRACT supports only 'no'; other values could log sensitive header values"
+            "LOGABSTRACT must be 'no', 'yes', or 'all'"
         );
     }
+}
+
+#[test]
+fn bounds_explicit_log_text_at_the_trace_value_limit() {
+    for length in [
+        crate::trace::MAX_TRACE_VALUE_SIZE - 1,
+        crate::trace::MAX_TRACE_VALUE_SIZE,
+    ] {
+        assert!(
+            AssignmentTarget::Log
+                .validate_resolved_value(&"x".repeat(length))
+                .is_ok(),
+            "{length}"
+        );
+    }
+    assert_eq!(
+        AssignmentTarget::Log
+            .validate_resolved_value(&"x".repeat(crate::trace::MAX_TRACE_VALUE_SIZE + 1))
+            .unwrap_err(),
+        format!(
+            "LOG value exceeds the hard limit of {} bytes",
+            crate::trace::MAX_TRACE_VALUE_SIZE
+        )
+    );
 }
 
 #[test]

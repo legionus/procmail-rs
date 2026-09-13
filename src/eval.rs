@@ -265,6 +265,11 @@ fn execute_unset(
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
 ) {
+    match unset.unset.target {
+        AssignmentTarget::Verbose => trace.set_verbose(false),
+        AssignmentTarget::LogAbstract => trace.set_log_abstract(crate::trace::LogAbstractMode::No),
+        _ => {}
+    }
     runtime.remove_with_trace(unset.unset.name.clone(), unset.line, unset.source, trace);
 }
 
@@ -303,6 +308,42 @@ impl ResolvedAssignment {
         runtime: &mut RuntimeVariables,
         trace: &mut impl TraceSink,
     ) -> Result<(), EvalError> {
+        if self.target == AssignmentTarget::Log {
+            trace.record(TraceEvent::Log {
+                line: self.source_line,
+                value: crate::trace::TraceValue::new(&self.value),
+            });
+            runtime.set_bytes(self.name, self.value);
+            return Ok(());
+        }
+        if self.target == AssignmentTarget::Verbose {
+            let text =
+                std::str::from_utf8(&self.value).map_err(|_| EvalError::RuntimeCondition {
+                    line: self.source_line,
+                    message: "VERBOSE must be a procmail boolean value".to_owned(),
+                })?;
+            let enabled = crate::trace::parse_procmail_boolean(text).ok_or_else(|| {
+                EvalError::RuntimeCondition {
+                    line: self.source_line,
+                    message: "VERBOSE must be a procmail boolean value".to_owned(),
+                }
+            })?;
+            trace.set_verbose(enabled);
+        }
+        if self.target == AssignmentTarget::LogAbstract {
+            let text =
+                std::str::from_utf8(&self.value).map_err(|_| EvalError::RuntimeCondition {
+                    line: self.source_line,
+                    message: "LOGABSTRACT must be 'no', 'yes', or 'all'".to_owned(),
+                })?;
+            let mode = crate::trace::LogAbstractMode::parse(text).ok_or_else(|| {
+                EvalError::RuntimeCondition {
+                    line: self.source_line,
+                    message: "LOGABSTRACT must be 'no', 'yes', or 'all'".to_owned(),
+                }
+            })?;
+            trace.set_log_abstract(mode);
+        }
         if self.target == AssignmentTarget::Shift {
             let text =
                 std::str::from_utf8(&self.value).map_err(|_| EvalError::RuntimeCondition {

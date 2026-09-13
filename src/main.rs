@@ -98,6 +98,24 @@ impl TraceSink for FilterTrace {
             Self::Enabled(trace) => trace.record(event),
         }
     }
+
+    fn set_verbose(&mut self, enabled: bool) {
+        if let Self::Enabled(trace) = self {
+            trace.set_verbose(enabled);
+        }
+    }
+
+    fn set_log_abstract(&mut self, mode: procmail_rs::trace::LogAbstractMode) {
+        if let Self::Enabled(trace) = self {
+            trace.set_log_abstract(mode);
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Self::Enabled(trace) = self {
+            trace.finish();
+        }
+    }
 }
 
 impl FilterTrace {
@@ -364,6 +382,7 @@ fn run() -> Result<u8, OperationalError> {
                 }
                 Err(OrderedExecutionError::Delivery(error)) => Err(error),
             };
+            trace.finish();
             if let Some(reason) = trace.stop_reason() {
                 eprintln!("procmail-rs: warning: trace stopped: {reason:?}");
             }
@@ -405,10 +424,12 @@ fn create_filter_trace(
         return FilterTrace::Disabled(NoTrace);
     }
     if dry_run || config.logfile().is_none() {
-        return FilterTrace::Enabled(BoundedTraceWriter::formatted(
+        return FilterTrace::Enabled(BoundedTraceWriter::runtime_formatted(
             Box::new(io::stderr()),
             detail,
             format,
+            dry_run || config.verbose(),
+            procmail_rs::trace::LogAbstractMode::No,
         ));
     }
     let path = config.logfile().unwrap_or_default();
@@ -441,10 +462,12 @@ fn create_filter_trace(
             }
         });
     match file {
-        Ok(file) => FilterTrace::Enabled(BoundedTraceWriter::formatted(
+        Ok(file) => FilterTrace::Enabled(BoundedTraceWriter::runtime_formatted(
             Box::new(file),
             detail,
             format,
+            config.verbose(),
+            procmail_rs::trace::LogAbstractMode::No,
         )),
         Err(error) => {
             eprintln!("procmail-rs: cannot open LOGFILE for trace: {error}");

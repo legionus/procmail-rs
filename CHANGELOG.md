@@ -9,6 +9,9 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
 
 ## Unreleased
 
+- Support bounded `LOG=value` output and statement-ordered `LOGABSTRACT=no`,
+  `yes`, and `all` delivery summaries without exposing message headers.
+
 - Add bounded procmail-style rc parsing and byte-oriented message filtering.
 - Add explicit Maildir and mboxrd delivery with selectable durability.
 - Add trusted external filters, command substitutions, runtime rc files, and

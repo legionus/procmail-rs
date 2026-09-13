@@ -71,7 +71,7 @@ fn known_assignment_values_are_validated_equally_at_root_and_in_blocks() {
         "LOCKEXT=bad/name",
         "TIMEOUT=0",
         "UMASK=8888",
-        "LOGABSTRACT=all",
+        "LOGABSTRACT=maybe",
     ] {
         let root = parse(&format!("{assignment}\n"))
             .unwrap()
@@ -707,15 +707,20 @@ fn validates_logabstract_after_static_and_conditional_expansion() {
     assert_eq!(assignment.value, "no");
     assert_eq!(assignment.target, AssignmentTarget::LogAbstract);
 
-    let error = parse("MODE=all\n:0\n{\nLOGABSTRACT=$MODE\n}\n")
+    let config = parse("MODE=all\n:0\n{\nLOGABSTRACT=$MODE\n}\n")
         .unwrap()
         .expand(&[])
-        .unwrap_err();
-    assert_eq!(error.line, 4);
-    assert_eq!(
-        error.message,
-        "LOGABSTRACT supports only 'no'; other values could log sensitive header values"
-    );
+        .unwrap();
+    let Statement::Recipe(recipe) = &config.statements[1] else {
+        panic!("expected block recipe");
+    };
+    let RecipeAction::Block(children) = &recipe.action else {
+        panic!("expected block action");
+    };
+    let Statement::Assignment(assignment) = &children[0] else {
+        panic!("expected LOGABSTRACT assignment");
+    };
+    assert_eq!(assignment.value, "$MODE");
 }
 
 #[test]
@@ -740,14 +745,17 @@ fn validates_runtime_logabstract_value_when_the_block_executes() {
             .unwrap(),
         "no"
     );
+    assert_eq!(
+        assignment
+            .resolve_with(|name| (name == "MATCH").then(|| "all".to_owned()))
+            .unwrap(),
+        "all"
+    );
     let error = assignment
-        .resolve_with(|name| (name == "MATCH").then(|| "all".to_owned()))
+        .resolve_with(|name| (name == "MATCH").then(|| "everything".to_owned()))
         .unwrap_err();
     assert_eq!(error.line, 3);
-    assert_eq!(
-        error.message,
-        "LOGABSTRACT supports only 'no'; other values could log sensitive header values"
-    );
+    assert_eq!(error.message, "LOGABSTRACT must be 'no', 'yes', or 'all'");
 }
 
 #[test]

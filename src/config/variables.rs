@@ -16,7 +16,6 @@ pub const UNSUPPORTED_PROCMAIL_VARIABLES: &[&str] = &[
     "ORGMAIL",
     "COMSAT",
     "DELIVERED",
-    "LOG",
     "DROPPRIVS",
     "MSGPREFIX",
     "NORESRETRY",
@@ -77,13 +76,10 @@ pub fn validate_lock_ext(value: &str) -> Result<(), String> {
 }
 
 pub fn validate_log_abstract(value: &str) -> Result<(), String> {
-    if value == "no" {
+    if matches!(value, "no" | "yes" | "all") {
         Ok(())
     } else {
-        Err(
-            "LOGABSTRACT supports only 'no'; other values could log sensitive header values"
-                .to_owned(),
-        )
+        Err("LOGABSTRACT must be 'no', 'yes', or 'all'".to_owned())
     }
 }
 
@@ -154,6 +150,7 @@ pub enum RcLimitVariable {
 pub enum AssignmentTarget {
     Maildir,
     LogFile,
+    Log,
     LogDetail,
     LogAbstract,
     Verbose,
@@ -188,6 +185,7 @@ pub(crate) enum AssignmentPath {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssignmentValueValidator {
     None,
+    Log,
     LockMethod,
     LockSleep,
     LockTimeout,
@@ -203,6 +201,16 @@ impl AssignmentValueValidator {
     fn validate(self, value: &str) -> Result<(), String> {
         match self {
             Self::None => Ok(()),
+            Self::Log => {
+                if value.len() <= crate::trace::MAX_TRACE_VALUE_SIZE {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "LOG value exceeds the hard limit of {} bytes",
+                        crate::trace::MAX_TRACE_VALUE_SIZE
+                    ))
+                }
+            }
             Self::LockMethod => validate_lock_method(value),
             Self::LockSleep => parse_lock_sleep_seconds(value).map(drop),
             Self::LockTimeout => parse_lock_timeout_seconds(value).map(drop),
@@ -223,7 +231,8 @@ impl AssignmentTarget {
                 super::MAX_PATH_EXPRESSION_LEN
             }
             Self::Shell | Self::ShellFlags | Self::Path => MAX_SHELL_SETTING_LEN,
-            Self::LogDetail
+            Self::Log
+            | Self::LogDetail
             | Self::LogAbstract
             | Self::Verbose
             | Self::Durability
@@ -245,6 +254,7 @@ impl AssignmentTarget {
 
     fn value_validator(self) -> AssignmentValueValidator {
         match self {
+            Self::Log => AssignmentValueValidator::Log,
             Self::LockMethod => AssignmentValueValidator::LockMethod,
             Self::LockSleep => AssignmentValueValidator::LockSleep,
             Self::LockTimeout => AssignmentValueValidator::LockTimeout,
@@ -290,7 +300,8 @@ impl AssignmentTarget {
             Self::Maildir => Some(AssignmentPath::Maildir),
             Self::LogFile => Some(AssignmentPath::LogFile),
             Self::LockFile => Some(AssignmentPath::LockFile),
-            Self::LogDetail
+            Self::Log
+            | Self::LogDetail
             | Self::LogAbstract
             | Self::Verbose
             | Self::Durability
@@ -333,6 +344,7 @@ impl AssignmentTarget {
             | Self::ProcessTimeout
             | Self::Umask
             | Self::Trap
+            | Self::Log
             | Self::LogAbstract => true,
             Self::LogFile
             | Self::LogDetail
@@ -348,6 +360,7 @@ impl AssignmentTarget {
             Self::RcLimit(_) | Self::LineBuf => true,
             Self::Maildir
             | Self::LogFile
+            | Self::Log
             | Self::LogDetail
             | Self::LogAbstract
             | Self::Verbose
@@ -387,6 +400,7 @@ impl AssignmentTarget {
             | Self::ProcessTimeout
             | Self::Umask
             | Self::Trap
+            | Self::Log
             | Self::LogAbstract
             | Self::Shift
             | Self::RcLimit(_) => true,
@@ -403,7 +417,8 @@ impl AssignmentTarget {
     pub(crate) fn uses_path_error_label(self) -> bool {
         match self {
             Self::Maildir | Self::LogFile => true,
-            Self::LogDetail
+            Self::Log
+            | Self::LogDetail
             | Self::LogAbstract
             | Self::Verbose
             | Self::Durability
@@ -596,6 +611,7 @@ pub fn variable_policy(name: &str) -> VariablePolicy {
     match name {
         "MAILDIR" => VariablePolicy::RcOnly(AssignmentTarget::Maildir),
         "LOGFILE" => VariablePolicy::RcOnly(AssignmentTarget::LogFile),
+        "LOG" => VariablePolicy::RcOnly(AssignmentTarget::Log),
         "LOGDETAIL" => VariablePolicy::RcOnly(AssignmentTarget::LogDetail),
         "LOGABSTRACT" => VariablePolicy::RcOnly(AssignmentTarget::LogAbstract),
         "VERBOSE" => VariablePolicy::RcOnly(AssignmentTarget::Verbose),
