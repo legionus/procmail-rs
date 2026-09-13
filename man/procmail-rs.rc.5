@@ -689,12 +689,12 @@ Filesystem paths reject NUL, empty components, \f[CR].\f[R],
 \f[CR]..\f[R], repeated separators, and unexpected trailing separators.
 .PP
 Linux keeps pending Maildir data in an unnamed temporary inode.
-FreeBSD uses exclusive named creation in \f[CR]tmp\f[R] and therefore
-also requires the Maildir and its three subdirectories to be owned by
-the current uid and not writable by group or other users.
-It checks the open file identity before publication and cleanup, but a
-hostile process with directory mutation access could still win a race
-between a check and a pathname operation.
+Other Unix systems use exclusive named creation in \f[CR]tmp\f[R] and
+therefore also require the Maildir and its three subdirectories to be
+owned by the current uid and not writable by group or other users.
+The portable backend checks the open file identity before publication
+and cleanup, but a hostile process with directory mutation access could
+still win a race between a check and a pathname operation.
 .SS Pipes and filters
 An action beginning with \f[CR]|\f[R] runs its remainder through the
 configured trusted shell.
@@ -1430,7 +1430,7 @@ mbox:archive
 \f[CR]DURABILITY=none\f[R], \f[CR]file\f[R], or \f[CR]full\f[R] selects
 publication sync points.
 Maildir uses atomic no\-replace publication: Linux moves an unnamed
-temporary inode through \f[CR]tmp\f[R], while FreeBSD links an
+temporary inode through \f[CR]tmp\f[R], while other Unix systems link an
 exclusively created named \f[CR]tmp\f[R] file into \f[CR]new\f[R].
 Mbox holds \f[CR]flock\f[R], records the original length, and attempts
 rollback after a failed append or sync.

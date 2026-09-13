@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-//! Minimal process-signal state for the supported Linux targets.
+//! Minimal process-signal state for the supported Unix targets.
 
 use std::io;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -32,10 +32,11 @@ impl ReceivedSignal {
 }
 
 pub fn install() -> io::Result<()> {
-    // Linux represents a simple handler in sa_sigaction and accepts a zeroed
-    // mask and flag word. Initialize the complete C value before exposing it
-    // to libc, then install only the handlers reviewed for this program. The
-    // handler itself must remain limited to lock-free atomic operations.
+    // Supported Unix libc implementations represent a simple handler in
+    // sa_sigaction and accept an empty mask and flag word. Initialize the
+    // complete C value before exposing it to libc, then install only the
+    // handlers reviewed for this program. The handler itself must remain
+    // limited to lock-free atomic operations.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = record_signal as *const () as usize;

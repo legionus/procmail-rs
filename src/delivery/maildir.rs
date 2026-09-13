@@ -17,8 +17,8 @@ use rustix::fs::{CWD, Mode, OFlags, fsync, openat};
 
 use super::{PendingSink, PublishedDelivery, SinkCommitError};
 
-#[cfg(target_os = "freebsd")]
-#[path = "maildir/freebsd.rs"]
+#[cfg(all(unix, not(target_os = "linux")))]
+#[path = "maildir/portable.rs"]
 mod platform;
 #[cfg(target_os = "linux")]
 #[path = "maildir/linux.rs"]
@@ -179,7 +179,7 @@ impl PlatformPublishError {
         }
     }
 
-    #[cfg(target_os = "freebsd")]
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn after(source: io::Error, published_name: String) -> Self {
         Self {
             source,

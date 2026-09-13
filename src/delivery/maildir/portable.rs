@@ -64,9 +64,10 @@ impl PendingFile {
         verify_named_file(&self.file, &self.directory, name)
             .map_err(PlatformPublishError::before)?;
 
-        // linkat is the FreeBSD no-replace publication operation. Unlike the
-        // Linux path, its source is a pathname, so checks on both sides detect
-        // substitutions except for the documented race during each syscall.
+        // linkat provides no-replace publication on Unix systems without the
+        // Linux unnamed-file path. Its source is a pathname, so checks on both
+        // sides detect substitutions except for the documented race during
+        // each syscall.
         linkat(&self.directory, name, new_dir, name, AtFlags::empty())
             .map_err(io_error)
             .map_err(PlatformPublishError::before)?;
@@ -126,7 +127,7 @@ pub(super) fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
     if FileType::from_raw_mode(metadata.st_mode) != FileType::CharacterDevice {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "FreeBSD random source is not a character device",
+            "system random source is not a character device",
         ));
     }
 
@@ -136,7 +137,7 @@ pub(super) fn fill_random(bytes: &mut [u8]) -> io::Result<()> {
             Ok(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    "FreeBSD random source returned end of file",
+                    "system random source returned end of file",
                 ));
             }
             Ok(count) => {
@@ -181,5 +182,5 @@ pub(super) fn validate_directories(
 }
 
 #[cfg(test)]
-#[path = "../../tests/delivery/maildir/freebsd.rs"]
+#[path = "../../tests/delivery/maildir/portable.rs"]
 mod tests;

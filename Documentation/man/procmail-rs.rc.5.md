@@ -579,12 +579,13 @@ Maildir directories must already contain `tmp`, `new`, and `cur`. Filesystem
 paths reject NUL, empty components, `.`, `..`, repeated separators, and
 unexpected trailing separators.
 
-Linux keeps pending Maildir data in an unnamed temporary inode. FreeBSD uses
-exclusive named creation in `tmp` and therefore also requires the Maildir and
-its three subdirectories to be owned by the current uid and not writable by
-group or other users. It checks the open file identity before publication and
-cleanup, but a hostile process with directory mutation access could still win
-a race between a check and a pathname operation.
+Linux keeps pending Maildir data in an unnamed temporary inode. Other Unix
+systems use exclusive named creation in `tmp` and therefore also require the
+Maildir and its three subdirectories to be owned by the current uid and not
+writable by group or other users. The portable backend checks the open file
+identity before publication and cleanup, but a hostile process with directory
+mutation access could still win a race between a check and a pathname
+operation.
 
 ## Pipes and filters
 
@@ -1262,9 +1263,9 @@ mbox:archive
 
 `DURABILITY=none`, `file`, or `full` selects publication sync points. Maildir
 uses atomic no-replace publication: Linux moves an unnamed temporary inode
-through `tmp`, while FreeBSD links an exclusively created named `tmp` file into
-`new`. Mbox holds `flock`, records the original length, and attempts rollback
-after a failed append or sync. No NFS-safety claim is made.
+through `tmp`, while other Unix systems link an exclusively created named
+`tmp` file into `new`. Mbox holds `flock`, records the original length, and
+attempts rollback after a failed append or sync. No NFS-safety claim is made.
 
 # LOGGING
 

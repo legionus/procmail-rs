@@ -3,14 +3,8 @@
 
 #![deny(unsafe_code)]
 
-#[cfg(not(any(
-    all(
-        target_os = "linux",
-        any(target_pointer_width = "32", target_pointer_width = "64")
-    ),
-    all(target_os = "freebsd", target_pointer_width = "64")
-)))]
-compile_error!("procmail-rs currently supports 32-bit and 64-bit Linux and 64-bit FreeBSD targets");
+#[cfg(not(all(unix, any(target_pointer_width = "32", target_pointer_width = "64"))))]
+compile_error!("procmail-rs currently supports 32-bit and 64-bit Unix targets");
 
 mod bounded_bytes;
 

@@ -70,9 +70,46 @@ jobs:
             cargo +stable check --locked
             cargo +stable test --locked
 
+  unix-cross:
+    name: ${{ matrix.platform }} ${{ matrix.architecture }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            architecture: aarch64
+            target: aarch64-apple-darwin
+          - platform: macOS
+            architecture: x86_64
+            target: x86_64-apple-darwin
+          - platform: FreeBSD
+            architecture: aarch64
+            target: aarch64-unknown-freebsd
+          - platform: FreeBSD
+            architecture: i686
+            target: i686-unknown-freebsd
+          - platform: illumos
+            architecture: x86_64
+            target: x86_64-unknown-illumos
+          - platform: NetBSD
+            architecture: x86_64
+            target: x86_64-unknown-netbsd
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install stable Rust and target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add --toolchain stable "${{ matrix.target }}"
+      # These checks cover API availability only. Linux and FreeBSD jobs run
+      # native tests for filesystem, mapping, locking, and process behavior.
+      - name: Check portable Unix build
+        run: cargo +stable check --locked --all-targets --target "${{ matrix.target }}"
+
   quality:
     name: Formatting, lint, documentation, and packaging
-    needs: [linux-64, linux-32, freebsd-64]
+    needs: [linux-64, linux-32, freebsd-64, unix-cross]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -96,7 +133,7 @@ jobs:
 
   audit:
     name: Dependencies, licenses, and unsafe audit
-    needs: [linux-64, linux-32, freebsd-64]
+    needs: [linux-64, linux-32, freebsd-64, unix-cross]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -124,7 +161,7 @@ jobs:
 
   fuzz:
     name: Nightly fuzz smoke tests
-    needs: [linux-64, linux-32, freebsd-64]
+    needs: [linux-64, linux-32, freebsd-64, unix-cross]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -142,7 +179,7 @@ jobs:
 
   delivery-stress:
     name: Performance and concurrent delivery
-    needs: [linux-64, linux-32, freebsd-64]
+    needs: [linux-64, linux-32, freebsd-64, unix-cross]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -158,7 +195,7 @@ jobs:
 
   msrv:
     name: Rust 1.85 compatibility
-    needs: [linux-64, linux-32, freebsd-64]
+    needs: [linux-64, linux-32, freebsd-64, unix-cross]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

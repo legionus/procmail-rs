@@ -17,7 +17,7 @@ impl TestMaildir {
     fn create() -> Self {
         let base = std::env::temp_dir();
         for attempt in 0..MAX_NAME_ATTEMPTS {
-            let path = base.join(format!("{}freebsd-test.{attempt}", unique_name().unwrap()));
+            let path = base.join(format!("{}portable-test.{attempt}", unique_name().unwrap()));
             match fs::create_dir(&path) {
                 Ok(()) => {
                     for component in ["tmp", "new", "cur"] {

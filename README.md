@@ -1,8 +1,8 @@
 # procmail-rs
 
-`procmail-rs` is an experimental mail filter for 32-bit and 64-bit Linux and
-64-bit FreeBSD. It validates or explains an rc file and filters one message
-from standard input into explicitly selected Maildir or mbox destinations.
+`procmail-rs` is an experimental mail filter for 32-bit and 64-bit Unix
+systems. It validates or explains an rc file and filters one message from
+standard input into explicitly selected Maildir or mbox destinations.
 
 The program does not provide an implicit system mailbox or fallback delivery.
 See [Documentation/Compatibility.md](Documentation/Compatibility.md) for the
@@ -17,8 +17,10 @@ external namespace, cgroup, or service policy when they need containment.
 
 ## Build
 
-The build requires Rust 1.85 or later and Cargo. Supported release targets are
-Linux with a 32-bit or 64-bit pointer width and 64-bit FreeBSD.
+The build requires Rust 1.85 or later and Cargo. Linux and FreeBSD have native
+test coverage. CI also checks compilation for 64-bit macOS, NetBSD, and illumos,
+32-bit FreeBSD, and AArch64 macOS and FreeBSD. Runtime behavior on those
+cross-compiled targets has not yet been exercised by this project.
 
 ```text
 cargo build --locked --release

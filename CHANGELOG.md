@@ -9,6 +9,9 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
 
 ## Unreleased
 
+- Compile on 32-bit and 64-bit Unix targets by sharing the named-file Maildir
+  backend across non-Linux systems.
+
 - Fold the static `explain` command into `check --explain` and support text or
   JSON plan output without reading a message.
 

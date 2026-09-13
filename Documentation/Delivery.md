@@ -45,13 +45,14 @@ one hard link is rejected.
 
 On Linux, Maildir data remains in an unnamed `O_TMPFILE` until it is linked
 into `tmp`, then a descriptor-relative no-replace rename publishes it in
-`new`. On FreeBSD, delivery creates a named file exclusively in `tmp`, links
-it into `new` without replacement, verifies that both names identify the open
-file, and removes the `tmp` name. The Maildir and all three subdirectories must
-be owned by the current uid and not writable by group or other users on
-FreeBSD. These checks reduce the pathname-replacement risk but cannot remove
-the race between a check and a pathname operation; Linux therefore remains
-the stronger backend against hostile concurrent directory mutation.
+`new`. On other Unix systems, delivery creates a named file exclusively in
+`tmp`, links it into `new` without replacement, verifies that both names
+identify the open file, and removes the `tmp` name. The Maildir and all three
+subdirectories must be owned by the current uid and not writable by group or
+other users when this portable backend is used. These checks reduce the
+pathname-replacement risk but cannot remove the race between a check and a
+pathname operation; Linux therefore remains the stronger backend against
+hostile concurrent directory mutation.
 
 A `full` directory-sync failure occurs after publication and is reported as
 such; retrying can create a duplicate. The implementation makes no claim about

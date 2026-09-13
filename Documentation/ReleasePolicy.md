@@ -39,8 +39,9 @@ All third-party CI actions are selected by a full commit identifier with a
 nearby release-tag comment. Review and update both together rather than using
 a moving tag.
 
-The supported release platforms are 32-bit and 64-bit Linux and 64-bit
-FreeBSD. Linux delivery is exercised directly by the main CI jobs, while a
-native FreeBSD VM job exercises its platform-specific Maildir publication.
-Other Unix systems and Windows remain deferred until their delivery behavior
-has dedicated implementation and runtime tests.
+The supported build targets are 32-bit and 64-bit Unix systems. Linux delivery
+is exercised directly by the main CI jobs, while a native FreeBSD VM job
+exercises the portable named-file Maildir publication. CI compile-checks macOS,
+NetBSD, illumos, and additional FreeBSD architectures, but does not claim that
+cross-compilation validates their filesystem, mapping, locking, durability, or
+process behavior. Windows remains outside the project scope.
