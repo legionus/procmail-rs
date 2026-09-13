@@ -70,7 +70,17 @@ fn help_is_available_without_user_or_configuration_lookup() {
             .unwrap();
         assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
         let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("usage: procmail-rs"), "{stdout}");
+        assert!(stdout.contains("Usage: procmail-rs"), "{stdout}");
+        assert!(
+            stdout.contains("  or:  procmail-rs filter [OPTION]..."),
+            "{stdout}"
+        );
+        assert!(stdout.contains("\n  check    validate"), "{stdout}");
+        assert!(stdout.contains("\n  --explain"), "{stdout}");
+        assert!(
+            stdout.contains("\n                    set the next positional parameter"),
+            "{stdout}"
+        );
         assert!(stdout.contains("--set NAME=VALUE"), "{stdout}");
         assert!(stdout.contains("-a, --argument VALUE"), "{stdout}");
         assert!(output.stderr.is_empty(), "{:?}", output.stderr);
@@ -210,12 +220,13 @@ fn check_and_explain_hide_command_assignment_details() {
         "PRIVATE=`printf output-secret`\n:0 h\nCAPTURED=| command-secret\n:0\nmaildir:selected\n",
     );
 
-    for action in ["check", "explain"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
-            .args([action, "--config"])
-            .arg(&path)
-            .output()
-            .unwrap();
+    for explain in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_procmail-rs"));
+        command.arg("check");
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.arg("--config").arg(&path).output().unwrap();
         assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
         assert_message_contents_absent(
             &output.stdout,
@@ -482,7 +493,7 @@ fn check_and_explain_accept_pipe_actions_without_executing_them() {
     assert!(!check_stderr.contains("secret"), "{check_stderr}");
 
     let explain = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
-        .args(["explain", "--config"])
+        .args(["check", "--explain", "--config"])
         .arg(&path)
         .output()
         .unwrap();
@@ -502,10 +513,15 @@ fn check_and_explain_accept_header_actions_without_reading_stdin() {
     let input_path = path.parent().unwrap().join("message.eml");
     fs::write(&input_path, b"Subject: stdin-secret\n\nbody").unwrap();
 
-    for command in ["check", "explain"] {
+    for explain in [false, true] {
         let mut input = fs::File::open(&input_path).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
-            .args([command, "--config"])
+        let mut command = Command::new(env!("CARGO_BIN_EXE_procmail-rs"));
+        command.arg("check");
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command
+            .arg("--config")
             .arg(&path)
             .stdin(Stdio::from(input.try_clone().unwrap()))
             .output()
@@ -528,7 +544,7 @@ fn check_and_explain_accept_header_actions_without_reading_stdin() {
         ] {
             assert!(!rendered.contains(private), "leaked {private:?}");
         }
-        if command == "explain" {
+        if explain {
             assert!(rendered.contains("action=headers"), "{rendered}");
             assert!(
                 rendered.contains("header-operations remove=1 set=1 add=1 prepend=1"),
@@ -2384,7 +2400,7 @@ fn explain_reports_safe_plan_without_reading_or_delivery() {
     let mut input = fs::File::open(&input_path).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
-        .args(["explain", "--config"])
+        .args(["check", "--explain", "--config"])
         .arg(&path)
         .stdin(Stdio::from(input.try_clone().unwrap()))
         .output()
@@ -2410,12 +2426,57 @@ fn explain_reports_safe_plan_without_reading_or_delivery() {
 }
 
 #[test]
+fn check_explain_can_render_the_static_plan_as_json() {
+    let path = config_file(":0 B\n* body-secret\nmaildir:private-destination\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--explain", "--format=json", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    let explanation = String::from_utf8(output.stdout).unwrap();
+    assert!(explanation.starts_with("{\"input\":"), "{explanation}");
+    assert!(explanation.contains("\"action\":\"maildir\""));
+    assert!(explanation.contains("\"kind\":\"body-regex\""));
+    assert!(!explanation.contains("body-secret"));
+    assert!(!explanation.contains("private-destination"));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn standalone_explain_command_is_rejected() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .arg("explain")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(78));
+}
+
+#[test]
+fn check_rejects_plan_format_without_explain() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["check", "--format=json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(78));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("--format with check requires --explain")
+    );
+}
+
+#[test]
 fn explain_reports_internal_stdout_failure() {
     let path = config_file(":0\nmaildir:unused\n");
     let failing_stdout = fs::File::options().write(true).open("/dev/full").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
-        .args(["explain", "--config"])
+        .args(["check", "--explain", "--config"])
         .arg(&path)
         .stdout(Stdio::from(failing_stdout))
         .stderr(Stdio::piped())

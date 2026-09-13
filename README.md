@@ -100,15 +100,16 @@ normalized list identifier. See the rc manual for their exact syntax.
 ## Commands
 
 ```text
-procmail-rs check   [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...
-procmail-rs explain [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...
+procmail-rs check   [--explain] [--format text|json]
+                    [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...
 procmail-rs filter  [--dry-run] [--format text|json]
                     [--detail metadata|values]
                     [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...
 ```
 
-`check` validates the configuration without reading a message. `explain`
-additionally prints a value-free description of the execution plan. `filter`
+`check` validates the configuration without reading a message. `--explain`
+additionally prints a value-free description of the execution plan in text or
+JSON format. `filter`
 reads one message from standard input and attempts the selected deliveries.
 Repeatable `-a` options initialize bounded positional parameters `$1`, `$2`,
 and so on; `$#` reports their count.
@@ -160,8 +161,8 @@ when their established meaning fits. Status 79 is specific to `procmail-rs`.
 | 79 | `PROCMAIL_RS_UNDELIVERED` | No final recipe delivered the original message. Copy recipes may already have published copies. | Apply an explicit fallback, quarantine, or rejection policy. Never interpret this status as successful delivery. |
 
 All diagnostics go to standard error. Successful `check` operations without
-dynamic-path warnings and successful `filter` operations are quiet. `explain`
-writes its requested plan description to standard output.
+dynamic-path warnings and successful `filter` operations are quiet.
+`check --explain` writes its requested plan description to standard output.
 
 ### MTA integration
 
@@ -281,7 +282,7 @@ so concurrent copy branches remain independent.
 Raw stdout is limited to the smaller of the active `LINEBUF` and the fixed
 ceiling for the assigned variable. Overflow and `TIMEOUT` fail the assignment
 without exposing a partial value; timeout is an error even when a capture
-recipe omits `w` and `W`. `check` and `explain` never execute these commands or
+recipe omits `w` and `W`. `check`, including `check --explain`, never executes these commands or
 display their text and values. See
 [Documentation/ShellExpressions.md](Documentation/ShellExpressions.md) for
 complete input, newline, status, and expansion details; compatibility
@@ -310,7 +311,7 @@ service-manager policy when containment is required.
 
 `TRAP` stores a bounded trusted-shell command. The last executed non-empty
 assignment runs after recipe processing and complete-input validation; an
-empty assignment disables it. `check` and `explain` report shell use but never
+empty assignment disables it. `check`, including `check --explain`, reports shell use but never
 execute the command. No trap runs for a configuration error, incomplete or
 rejected message input, or termination by a signal.
 

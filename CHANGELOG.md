@@ -9,6 +9,9 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
 
 ## Unreleased
 
+- Fold the static `explain` command into `check --explain` and support text or
+  JSON plan output without reading a message.
+
 - Support bounded `LOG=value` output and statement-ordered `LOGABSTRACT=no`,
   `yes`, and `all` delivery summaries without exposing message headers.
 

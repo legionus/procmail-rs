@@ -21,7 +21,7 @@ differences in regular expressions, trust checks, locking, and error handling.
 3. Run `procmail-rs check --config PATH`. Dynamic `INCLUDERC` and `SWITCHRC`
    paths are checked only when message processing reaches them, so exercise
    every message-selected branch separately.
-4. Run `procmail-rs explain --config PATH` and inspect the value-free execution
+4. Run `procmail-rs check --explain --config PATH` and inspect the value-free execution
    plan. Then replay representative copied messages into separate test
    destinations and compare results, exit statuses, and metadata-only logs.
    Use `filter --dry-run --format=text --detail=values` when you need the

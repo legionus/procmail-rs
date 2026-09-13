@@ -7,10 +7,8 @@ procmail-rs - bounded procmail-compatible mail filtering
 
 # SYNOPSIS
 
-**procmail-rs** **check** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
-[**-a** *ARGUMENT*]...
-
-**procmail-rs** **explain** [**--config** *PATH*] [**--set** *NAME=VALUE*]...
+**procmail-rs** **check** [**--explain**] [**--format** *FORMAT*]
+[**--config** *PATH*] [**--set** *NAME=VALUE*]...
 [**-a** *ARGUMENT*]...
 
 **procmail-rs** **filter** [**--dry-run**] [**--format** *FORMAT*]
@@ -52,12 +50,6 @@ exclude hostile pathname replacement between a check and an operation.
   `INCLUDERC` or `SWITCHRC` path produces a bounded warning and is checked only
   if **filter** later reaches it.
 
-**explain**
-
-: Perform the same validation as **check**, then write a value-free execution
-  plan to standard output. Commands are described by type but are not run and
-  their text is not printed.
-
 **filter**
 
 : Read one message from standard input, evaluate recipes in order, and perform
@@ -65,6 +57,18 @@ exclude hostile pathname replacement between a check and an operation.
   copy recipes remains undelivered.
 
 # OPTIONS
+
+**--explain**
+
+: With **check**, write a value-free static execution plan to standard output
+  after validation. Commands are described by type but are not run and their
+  text is not printed. This option is not accepted by **filter**.
+
+**--format** *FORMAT*
+
+: Select `text` or `json`. With **check**, this option requires **--explain**
+  and controls the static plan representation. With **filter**, it controls
+  the runtime trace representation.
 
 **--config** *PATH*
 
@@ -133,7 +137,7 @@ Validate the configuration, inspect its plan, and then filter a message:
 
 ```
 procmail-rs check --config rules.rc
-procmail-rs explain --config rules.rc
+procmail-rs check --explain --config rules.rc
 procmail-rs filter --config rules.rc <message.eml
 ```
 

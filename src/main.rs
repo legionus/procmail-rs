@@ -39,12 +39,12 @@ use delivery_runtime::{DeliveryRuntime, validate_maildir_path};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Check,
-    Explain,
     Filter,
 }
 
 struct Command {
     action: Action,
+    explain: bool,
     dry_run: bool,
     trace_format: TraceFormat,
     trace_detail: Option<TraceDetail>,
@@ -59,25 +59,27 @@ enum Invocation {
     Version,
 }
 
-const HELP: &str = "procmail-rs - bounded procmail-compatible mail filtering\n\n\
-usage: procmail-rs <check|explain|filter> [--dry-run] [--format FORMAT] [--detail DETAIL]\n\
-       [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...\n\
-       procmail-rs --help\n\
-       procmail-rs --version\n\n\
-commands:\n\
-  check    validate the statically reachable configuration without reading stdin\n\
-  explain  describe the bounded execution plan without reading stdin\n\
-  filter   read one message from stdin and deliver it to explicit destinations\n\n\
-options:\n\
-  --dry-run         evaluate filter without publishing delivery destinations\n\
-  --format FORMAT   trace format: text (default) or json\n\
-  --detail DETAIL   override LOGDETAIL: metadata or values\n\
-  --config PATH     override the automatically selected root rc file\n\
-  --set NAME=VALUE  provide one policy-checked external value (maximum 256)\n\
-  -a, --argument VALUE\n\
-                    set the next positional parameter ($1, $2, and so on)\n\
-  -h, --help        print this help text\n\
-  -V, --version     print the program version\n";
+const HELP: &str = concat!(
+    "procmail-rs - bounded procmail-compatible mail filtering\n\n",
+    "Usage: procmail-rs check [OPTION]...\n",
+    "  or:  procmail-rs filter [OPTION]...\n",
+    "  or:  procmail-rs --help\n",
+    "  or:  procmail-rs --version\n\n",
+    "Commands:\n",
+    "  check    validate the statically reachable configuration without reading stdin\n",
+    "  filter   read one message from stdin and deliver it to explicit destinations\n\n",
+    "Options:\n",
+    "  --explain         print the value-free static plan for check\n",
+    "  --dry-run         evaluate filter without publishing delivery destinations\n",
+    "  --format FORMAT   output format: text (default) or json\n",
+    "  --detail DETAIL   override LOGDETAIL: metadata or values\n",
+    "  --config PATH     override the automatically selected root rc file\n",
+    "  --set NAME=VALUE  provide one policy-checked external value (maximum 256)\n",
+    "  -a, --argument VALUE\n",
+    "                    set the next positional parameter ($1, $2, and so on)\n",
+    "  -h, --help        print this help text\n",
+    "  -V, --version     print the program version\n",
+);
 
 enum FilterTrace {
     Disabled(NoTrace),
@@ -268,10 +270,19 @@ fn run() -> Result<u8, OperationalError> {
         for warning in warnings {
             eprintln!("procmail-rs: warning: {warning}");
         }
-        if ExecutionPlan::compile(&config, None).has_external_commands() {
+        let plan = ExecutionPlan::compile(&config, None);
+        if plan.has_external_commands() {
             eprintln!(
                 "procmail-rs: warning: configuration contains external shell actions; no command was executed"
             );
+        }
+        if command.explain {
+            let mut stdout = io::stdout().lock();
+            write_plan_explanation(&plan.explain(), command.trace_format, &mut stdout).map_err(
+                |error| {
+                    OperationalError::Internal(format!("cannot write plan explanation: {error}"))
+                },
+            )?;
         }
         return Ok(ExitStatus::Success as u8);
     }
@@ -303,12 +314,6 @@ fn run() -> Result<u8, OperationalError> {
     let mut requested_status = None;
     let result = (|| match command.action {
         Action::Check => unreachable!(),
-        Action::Explain => {
-            let mut stdout = io::stdout().lock();
-            write_plan_explanation(&plan.explain(), &mut stdout).map_err(|error| {
-                OperationalError::Internal(format!("cannot write plan explanation: {error}"))
-            })
-        }
         Action::Filter => {
             let mut runtime = RuntimeVariables::default();
             runtime.set_system_hostname(hostname);
@@ -497,6 +502,17 @@ fn parse_requested_exit_code(runtime: &RuntimeVariables) -> Result<Option<u8>, O
 
 fn write_plan_explanation(
     explanation: &PlanExplanation,
+    format: TraceFormat,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    match format {
+        TraceFormat::Text => write_text_plan_explanation(explanation, writer),
+        TraceFormat::Json => write_json_plan_explanation(explanation, writer),
+    }
+}
+
+fn write_text_plan_explanation(
+    explanation: &PlanExplanation,
     writer: &mut impl Write,
 ) -> io::Result<()> {
     let requirements = explanation.requirements();
@@ -517,14 +533,7 @@ fn write_plan_explanation(
     // print regex text, assignment values, or destination paths because they
     // can contain credentials or other private configuration data.
     for recipe in explanation.recipes() {
-        let action = match recipe.action() {
-            ActionKindExplanation::Maildir => "maildir",
-            ActionKindExplanation::Mbox => "mbox",
-            ActionKindExplanation::File => "file",
-            ActionKindExplanation::Discard => "discard",
-            ActionKindExplanation::ExternalProgram => "external-program",
-            ActionKindExplanation::Headers => "headers",
-        };
+        let action = explanation_action_name(recipe.action());
         writeln!(
             writer,
             "recipe line={} copy={} assignments={} action={} deferred={}",
@@ -547,18 +556,7 @@ fn write_plan_explanation(
             )?;
         }
         for condition in recipe.conditions() {
-            let kind = match condition.kind() {
-                ConditionKindExplanation::ShellExpanded => "shell-expanded",
-                ConditionKindExplanation::HeaderRegex => "header-regex",
-                ConditionKindExplanation::BodyRegex => "body-regex",
-                ConditionKindExplanation::MessageRegex => "message-regex",
-                ConditionKindExplanation::VariableRegex => "variable-regex",
-                ConditionKindExplanation::Address => "address",
-                ConditionKindExplanation::Identifier => "identifier",
-                ConditionKindExplanation::Program => "program",
-                ConditionKindExplanation::SmallerThan => "smaller-than",
-                ConditionKindExplanation::LargerThan => "larger-than",
-            };
+            let kind = explanation_condition_name(condition.kind());
             writeln!(
                 writer,
                 "  condition kind={} negated={}",
@@ -568,6 +566,87 @@ fn write_plan_explanation(
         }
     }
     Ok(())
+}
+
+fn write_json_plan_explanation(
+    explanation: &PlanExplanation,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let requirements = explanation.requirements();
+    write!(
+        writer,
+        "{{\"input\":{{\"headers\":{},\"body\":{},\"end\":{}}},\"ordered_delivery\":{},\"recipes\":[",
+        requirements.needs_headers,
+        requirements.needs_body_contents,
+        requirements.needs_end_of_message,
+        explanation.requires_ordered_delivery()
+    )?;
+    for (recipe_index, recipe) in explanation.recipes().iter().enumerate() {
+        if recipe_index != 0 {
+            writer.write_all(b",")?;
+        }
+        write!(
+            writer,
+            "{{\"line\":{},\"copy\":{},\"assignments\":{},\"action\":\"{}\",\"deferred\":{}",
+            recipe.line(),
+            recipe.is_copy(),
+            recipe.assignment_count(),
+            explanation_action_name(recipe.action()),
+            recipe.defers_destination()
+        )?;
+        if let Some(operations) = recipe.header_operations() {
+            write!(
+                writer,
+                ",\"header_operations\":{{\"remove\":{},\"set\":{},\"add\":{},\"prepend\":{},\"rename\":{},\"extract\":{}}}",
+                operations.remove_count(),
+                operations.set_count(),
+                operations.add_count(),
+                operations.prepend_count(),
+                operations.rename_count(),
+                operations.extract_count()
+            )?;
+        }
+        writer.write_all(b",\"conditions\":[")?;
+        for (condition_index, condition) in recipe.conditions().iter().enumerate() {
+            if condition_index != 0 {
+                writer.write_all(b",")?;
+            }
+            write!(
+                writer,
+                "{{\"kind\":\"{}\",\"negated\":{}}}",
+                explanation_condition_name(condition.kind()),
+                condition.is_negated()
+            )?;
+        }
+        writer.write_all(b"]}")?;
+    }
+    writer.write_all(b"]}\n")
+}
+
+fn explanation_action_name(action: ActionKindExplanation) -> &'static str {
+    match action {
+        ActionKindExplanation::Maildir => "maildir",
+        ActionKindExplanation::Mbox => "mbox",
+        ActionKindExplanation::File => "file",
+        ActionKindExplanation::Discard => "discard",
+        ActionKindExplanation::ExternalProgram => "external-program",
+        ActionKindExplanation::Headers => "headers",
+    }
+}
+
+fn explanation_condition_name(condition: ConditionKindExplanation) -> &'static str {
+    match condition {
+        ConditionKindExplanation::ShellExpanded => "shell-expanded",
+        ConditionKindExplanation::HeaderRegex => "header-regex",
+        ConditionKindExplanation::BodyRegex => "body-regex",
+        ConditionKindExplanation::MessageRegex => "message-regex",
+        ConditionKindExplanation::VariableRegex => "variable-regex",
+        ConditionKindExplanation::Address => "address",
+        ConditionKindExplanation::Identifier => "identifier",
+        ConditionKindExplanation::Program => "program",
+        ConditionKindExplanation::SmallerThan => "smaller-than",
+        ConditionKindExplanation::LargerThan => "larger-than",
+    }
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -603,7 +682,6 @@ fn parse_args() -> Result<Invocation, String> {
             };
         }
         "check" => Action::Check,
-        "explain" => Action::Explain,
         "filter" => Action::Filter,
         _ => return Err(usage()),
     };
@@ -611,6 +689,8 @@ fn parse_args() -> Result<Invocation, String> {
     let mut supplied = Vec::new();
     let mut arguments = PositionalArguments::default();
     let mut dry_run = false;
+    let mut explain = false;
+    let mut format_specified = false;
     let mut trace_format = TraceFormat::Text;
     let mut trace_detail = None;
 
@@ -636,11 +716,18 @@ fn parse_args() -> Result<Invocation, String> {
                 }
                 dry_run = true;
             }
-            Some("--format") => {
-                if action != Action::Filter {
-                    return Err("--format may only be used with filter".into());
+            Some("--explain") => {
+                if action != Action::Check {
+                    return Err("--explain may only be used with check".into());
                 }
+                if explain {
+                    return Err("--explain may only be specified once".into());
+                }
+                explain = true;
+            }
+            Some("--format") => {
                 trace_format = parse_trace_format(args.next().ok_or_else(usage)?)?;
+                format_specified = true;
             }
             Some("--detail") => {
                 if action != Action::Filter {
@@ -649,10 +736,8 @@ fn parse_args() -> Result<Invocation, String> {
                 trace_detail = Some(parse_trace_detail(args.next().ok_or_else(usage)?)?);
             }
             Some(option) if option.starts_with("--format=") => {
-                if action != Action::Filter {
-                    return Err("--format may only be used with filter".into());
-                }
                 trace_format = parse_trace_format(option["--format=".len()..].into())?;
+                format_specified = true;
             }
             Some(option) if option.starts_with("--detail=") => {
                 if action != Action::Filter {
@@ -685,8 +770,13 @@ fn parse_args() -> Result<Invocation, String> {
         }
     }
 
+    if action == Action::Check && format_specified && !explain {
+        return Err("--format with check requires --explain".into());
+    }
+
     Ok(Invocation::Run(Command {
         action,
+        explain,
         dry_run,
         trace_format,
         trace_detail,
@@ -713,7 +803,7 @@ fn parse_trace_detail(value: std::ffi::OsString) -> Result<TraceDetail, String> 
 }
 
 fn usage() -> String {
-    "usage: procmail-rs <check|explain|filter> [--dry-run] [--format FORMAT] [--detail DETAIL] [--config PATH] [--set NAME=VALUE]... [-a ARGUMENT]...".into()
+    "Usage: procmail-rs check [OPTION]...\n  or:  procmail-rs filter [OPTION]...".into()
 }
 
 fn load_root_config(
