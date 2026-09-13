@@ -837,6 +837,9 @@ fn plan_statements_complete<T: TraceSink>(
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, context.runtime, context.trace)?;
             }
+            CompiledStatement::Unset(unset) => {
+                execute_unset(unset, context.runtime, context.trace);
+            }
             CompiledStatement::Host(assignment) => {
                 if !execute_host_assignment(assignment, context.runtime, context.trace)? {
                     context.execution.original_delivered = true;
@@ -894,6 +897,9 @@ where
             }
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, context.runtime, context.trace)?;
+            }
+            CompiledStatement::Unset(unset) => {
+                execute_unset(unset, context.runtime, context.trace);
             }
             CompiledStatement::Host(assignment) => {
                 if !execute_host_assignment(assignment, context.runtime, context.trace)? {

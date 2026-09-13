@@ -10,7 +10,7 @@ use super::{InputRequirements, PlanProperties};
 use crate::config::{
     ActionInput, Assignment, AssignmentTarget, CommandAssignment, ContinuationMode, ControlFlow,
     Destination, DestinationKind, HeaderAction, OutputEnding, PipeAction, Recipe, RecipeAction,
-    RecipeOptions, Statement,
+    RecipeOptions, Statement, Unset,
 };
 use crate::trace::VariableSource as TraceVariableSource;
 
@@ -60,9 +60,17 @@ pub(super) struct CompiledAssignment {
     pub(super) source: TraceVariableSource,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct CompiledUnset {
+    pub(super) unset: Unset,
+    pub(super) line: Option<usize>,
+    pub(super) source: TraceVariableSource,
+}
+
 #[derive(Debug)]
 pub(super) enum CompiledStatement {
     Assignment(CompiledAssignment),
+    Unset(CompiledUnset),
     CommandAssignment(CommandAssignment),
     Host(CompiledAssignment),
     Include(CompiledInclude),
@@ -111,6 +119,10 @@ fn statement_properties(statement: &CompiledStatement) -> PlanProperties {
             properties.has_external_commands =
                 assignment.assignment.target == AssignmentTarget::Trap;
         }
+        CompiledStatement::Unset(unset) => {
+            properties.requires_ordered_delivery = unset.unset.target == AssignmentTarget::LockFile;
+            properties.requires_preemptive_ordered_delivery = properties.requires_ordered_delivery;
+        }
         CompiledStatement::Host(_)
         | CompiledStatement::Include(_)
         | CompiledStatement::Switch(_) => {}
@@ -145,6 +157,13 @@ impl CompiledSequence {
                     } else {
                         preceding.push(CompiledStatement::Assignment(compiled));
                     }
+                }
+                Statement::Unset(unset) => {
+                    preceding.push(CompiledStatement::Unset(CompiledUnset {
+                        unset: unset.clone(),
+                        line: Some(unset.line),
+                        source: TraceVariableSource::RcFile,
+                    }))
                 }
                 Statement::CommandAssignment(assignment) => {
                     preceding.push(CompiledStatement::CommandAssignment(assignment.clone()))

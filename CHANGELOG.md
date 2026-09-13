@@ -23,6 +23,8 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
   runtime rc files and branch-local processing.
 - Add procmail-compatible standalone `"$@"` forwarding to external programs
   while preserving positional argument boundaries and empty values.
+- Add bare-name variable removal while preserving the difference between an
+  absent value and an explicitly empty assignment.
 - Add the procmail `$$`, `$?`, `$_`, and `$-` special parameters for the
   process id, last command status, current rc-file name, and `LASTFOLDER`.
 - Add human-readable and JSON trace formats, session-start records, resolved

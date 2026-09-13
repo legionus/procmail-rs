@@ -820,6 +820,25 @@ impl ConfigPreparer {
     fn prepare_statement(&mut self, statement: &mut Statement) -> Result<(), ExpansionError> {
         match statement {
             Statement::Assignment(assignment) => self.prepare_assignment(assignment),
+            Statement::Unset(unset) => {
+                if self.phase == PreparationPhase::Deferred
+                    && !unset.target.supports_conditional_assignment()
+                {
+                    return Err(ExpansionError::new(
+                        unset.line,
+                        format!("variable {} cannot be unset conditionally yet", unset.name),
+                    ));
+                }
+                self.known.remove(&unset.name);
+                self.dynamic.remove(&unset.name);
+                if unset.target == AssignmentTarget::Maildir {
+                    self.maildir = None;
+                }
+                if unset.target == AssignmentTarget::LineBuf {
+                    self.linebuf = super::DEFAULT_LINEBUF;
+                }
+                Ok(())
+            }
             Statement::CommandAssignment(assignment) => {
                 // Targets assigned by an earlier part are available to later
                 // parts of the same expression. Include every possible target
@@ -1171,6 +1190,9 @@ fn record_recipe_dynamic_names(recipe: &Recipe, dynamic: &mut BTreeSet<String>) 
                         } else {
                             dynamic.insert(assignment.name.clone());
                         }
+                    }
+                    Statement::Unset(unset) => {
+                        dynamic.insert(unset.name.clone());
                     }
                     Statement::Recipe(child) => record_recipe_dynamic_names(child, dynamic),
                     Statement::Include(_) | Statement::Switch(_) => {}

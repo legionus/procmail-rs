@@ -77,6 +77,14 @@ impl TraceConfig {
         let mut settings = Self::default();
         for statement in &config.statements {
             let Statement::Assignment(assignment) = statement else {
+                if let Statement::Unset(unset) = statement {
+                    match unset.target {
+                        AssignmentTarget::Verbose => settings.verbose = false,
+                        AssignmentTarget::LogFile => settings.logfile = None,
+                        AssignmentTarget::LogDetail => settings.detail = TraceDetail::Metadata,
+                        _ => {}
+                    }
+                }
                 continue;
             };
             match assignment.target {
@@ -459,6 +467,19 @@ fn render_json_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::R
             }
             output.write_char('}')
         }
+        TraceEvent::VariableUnset { line, name, source } => {
+            write!(
+                output,
+                "{{\"event\":\"variable-unset\",\"line\":{},\"name\":",
+                line.unwrap_or(0),
+            )?;
+            render_json_string(output, name.as_str().as_bytes())?;
+            write!(
+                output,
+                ",\"source\":\"{}\"}}",
+                variable_source_name(*source)
+            )
+        }
         TraceEvent::LastFolderUpdated => output.write_str("{\"event\":\"last-folder-updated\"}"),
         TraceEvent::ConditionEvaluated {
             recipe_line,
@@ -606,6 +627,14 @@ fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::
                 None => output.write_str("\" (value hidden)"),
             }
         }
+        TraceEvent::VariableUnset { line, name, .. } => match line {
+            Some(line) => write!(
+                output,
+                "procmail-rs: Unsetting at line {line} \"{}\"",
+                name.as_str()
+            ),
+            None => write!(output, "procmail-rs: Unsetting \"{}\"", name.as_str()),
+        },
         TraceEvent::LastFolderUpdated => output.write_str("procmail-rs: Updated LASTFOLDER"),
         TraceEvent::ConditionEvaluated {
             recipe_line,
@@ -907,6 +936,11 @@ pub enum TraceEvent {
         name: TraceName,
         source: VariableSource,
         value: Option<TraceValue>,
+    },
+    VariableUnset {
+        line: Option<usize>,
+        name: TraceName,
+        source: VariableSource,
     },
     LastFolderUpdated,
     ConditionEvaluated {

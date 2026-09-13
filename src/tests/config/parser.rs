@@ -319,6 +319,48 @@ fn parses_bare_host_as_an_empty_assignment() {
 }
 
 #[test]
+fn parses_bare_names_as_typed_unsets_but_preserves_bare_host() {
+    let config = parse("VALUE=present\nVALUE # remove it\nEMPTY=\nHOST\n").unwrap();
+
+    let Statement::Unset(unset) = &config.statements[1] else {
+        panic!("expected a typed unset statement");
+    };
+    assert_eq!(unset.line, 2);
+    assert_eq!(unset.name, "VALUE");
+    assert_eq!(unset.target, AssignmentTarget::User);
+
+    let Statement::Assignment(empty) = &config.statements[2] else {
+        panic!("expected an empty assignment");
+    };
+    assert!(empty.value.is_empty());
+
+    let Statement::Assignment(host) = &config.statements[3] else {
+        panic!("expected the special HOST assignment");
+    };
+    assert_eq!(host.target, AssignmentTarget::Host);
+}
+
+#[test]
+fn unsetting_parser_limits_restores_defaults_for_following_syntax() {
+    let long_value = "x".repeat(129);
+    let source = format!(
+        "LINEBUF=128\nLINEBUF\nVALUE={long_value}\nLIMIT_RC_RECIPES=0\nLIMIT_RC_RECIPES\n:0\n/dev/null\n"
+    );
+    assert!(parse(&source).is_ok());
+}
+
+#[test]
+fn rejects_protected_unsets_and_parser_limit_unsets_inside_blocks() {
+    for source in [
+        "PROCMAIL_VERSION\n",
+        ":0\n{\nLINEBUF\n}\n",
+        ":0\n{\nLIMIT_RC_RECIPES\n}\n",
+    ] {
+        assert!(parse(source).is_err(), "accepted {source:?}");
+    }
+}
+
+#[test]
 fn parses_non_empty_host_for_runtime_comparison() {
     let config = parse("HOST=elsewhere\n").unwrap();
     let Statement::Assignment(assignment) = &config.statements[0] else {

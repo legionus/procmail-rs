@@ -210,6 +210,30 @@ fn human_writer_explains_decisions_without_machine_field_names() {
 }
 
 #[test]
+fn unset_event_exposes_only_the_variable_name() {
+    let event = TraceEvent::VariableUnset {
+        line: Some(9),
+        name: TraceName::new("SECRET_NAME").unwrap(),
+        source: VariableSource::RcFile,
+    };
+    let mut text =
+        BoundedTraceWriter::formatted(Vec::new(), TraceDetail::Values, TraceFormat::Text);
+    text.record(event.clone());
+    assert_eq!(
+        String::from_utf8(text.into_inner()).unwrap(),
+        "procmail-rs: Unsetting at line 9 \"SECRET_NAME\"\n"
+    );
+
+    let mut json =
+        BoundedTraceWriter::formatted(Vec::new(), TraceDetail::Values, TraceFormat::Json);
+    json.record(event);
+    assert_eq!(
+        String::from_utf8(json.into_inner()).unwrap(),
+        "{\"event\":\"variable-unset\",\"line\":9,\"name\":\"SECRET_NAME\",\"source\":\"rc-file\"}\n"
+    );
+}
+
+#[test]
 fn bounded_writer_stops_before_exceeding_total_byte_limit() {
     let mut trace = BoundedTraceWriter::new(Vec::new());
     let event = variable_event(&"N".repeat(MAX_ASSIGNMENT_NAME_LEN));
@@ -288,6 +312,21 @@ fn tracing_is_disabled_without_an_explicit_verbose_assignment() {
             .failure_policy(),
         LogFailurePolicy::Advisory
     );
+}
+
+#[test]
+fn bare_trace_settings_restore_disabled_defaults() {
+    let config = crate::config::parse(
+        "VERBOSE=yes\nLOGFILE=/mail/filter.log\nLOGDETAIL=values\nVERBOSE\nLOGFILE\nLOGDETAIL\n",
+    )
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+
+    let settings = TraceConfig::from_config(&config).unwrap();
+    assert!(!settings.verbose());
+    assert_eq!(settings.logfile(), None);
+    assert_eq!(settings.detail(), TraceDetail::Metadata);
 }
 
 #[test]

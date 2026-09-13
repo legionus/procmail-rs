@@ -9,6 +9,27 @@ rc strings. The syntax resembles shell parameter expansion, but it does not
 perform field splitting, globbing, tilde expansion, arithmetic expansion, or
 general shell parsing.
 
+## Assignment and removal
+
+`NAME=value` sets a variable, including an explicitly empty value when nothing
+follows `=`. A bare `NAME` removes it. These states remain distinct for later
+parameter operations: `${NAME-word}` uses `word` only after removal, while an
+empty assignment requires the colon form `${NAME:-word}`.
+
+```text
+FOLDER=
+EMPTY_RESULT=${FOLDER-default}
+FOLDER
+UNSET_RESULT=${FOLDER-default}
+```
+
+Removal follows execution order through selected blocks, `INCLUDERC`, and
+`SWITCHRC`. Removing a setting with a documented default restores that default
+for later operations. Parser settings such as `LINEBUF` and `LIMIT_RC_*` may be
+removed only outside recipe blocks; the removal is charged against the
+preceding assignment limit before restoring the default. A bare `HOST` retains
+its special procmail meaning and is therefore not a removal statement.
+
 ## Variable references
 
 `$NAME` and `${NAME}` insert the current byte value. An unbraced reference

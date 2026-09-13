@@ -51,6 +51,12 @@ fn parses_lock_method_and_defaults_to_flock() {
         LockMethod::from_config(&invalid).unwrap_err(),
         "line 1: LOCKMETHOD must be 'flock' or 'dotlock'"
     );
+
+    let reset = crate::config::parse("LOCKMETHOD=dotlock\nLOCKMETHOD\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    assert_eq!(LockMethod::from_config(&reset).unwrap(), LockMethod::Flock);
 }
 
 #[test]

@@ -268,6 +268,22 @@ impl RuntimeVariables {
         self.values.insert(name.to_owned(), RuntimeValue::Removed);
     }
 
+    pub(crate) fn remove_with_trace(
+        &mut self,
+        name: String,
+        line: Option<usize>,
+        source: TraceVariableSource,
+        trace: &mut impl TraceSink,
+    ) {
+        let event = TraceName::new(&name)
+            .ok()
+            .map(|name| TraceEvent::VariableUnset { line, name, source });
+        self.remove(&name);
+        if let Some(event) = event {
+            trace.record(event);
+        }
+    }
+
     pub(crate) fn shift_positionals(&mut self, requested: usize) {
         let count = self
             .get("#")

@@ -36,23 +36,29 @@ impl Durability {
     pub fn from_config(config: &crate::config::Config) -> Result<Self, String> {
         let mut policy = Self::None;
         for statement in &config.statements {
-            let crate::config::Statement::Assignment(assignment) = statement else {
-                continue;
-            };
-            if assignment.target != crate::config::AssignmentTarget::Durability {
-                continue;
-            }
-            policy = match assignment.value.as_str() {
-                "none" => Self::None,
-                "file" => Self::File,
-                "full" => Self::Full,
-                _ => {
-                    return Err(format!(
-                        "line {}: invalid DURABILITY: expected 'none', 'file', or 'full'",
-                        assignment.line
-                    ));
+            match statement {
+                crate::config::Statement::Assignment(assignment)
+                    if assignment.target == crate::config::AssignmentTarget::Durability =>
+                {
+                    policy = match assignment.value.as_str() {
+                        "none" => Self::None,
+                        "file" => Self::File,
+                        "full" => Self::Full,
+                        _ => {
+                            return Err(format!(
+                                "line {}: invalid DURABILITY: expected 'none', 'file', or 'full'",
+                                assignment.line
+                            ));
+                        }
+                    };
                 }
-            };
+                crate::config::Statement::Unset(unset)
+                    if unset.target == crate::config::AssignmentTarget::Durability =>
+                {
+                    policy = Self::None;
+                }
+                _ => {}
+            }
         }
         Ok(policy)
     }

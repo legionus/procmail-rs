@@ -39,14 +39,16 @@ pub const MAX_ASSIGNMENT_VALUE_LEN: usize = 64 * 1024;
 pub fn umask_from_config(config: &Config) -> Result<u32, String> {
     let mut mask = DEFAULT_UMASK;
     for statement in &config.statements {
-        let Statement::Assignment(assignment) = statement else {
-            continue;
-        };
-        if assignment.target != AssignmentTarget::Umask {
-            continue;
+        match statement {
+            Statement::Assignment(assignment) if assignment.target == AssignmentTarget::Umask => {
+                mask = parse_umask(&assignment.value)
+                    .map_err(|message| format!("line {}: {message}", assignment.line))?;
+            }
+            Statement::Unset(unset) if unset.target == AssignmentTarget::Umask => {
+                mask = DEFAULT_UMASK;
+            }
+            _ => {}
         }
-        mask = parse_umask(&assignment.value)
-            .map_err(|message| format!("line {}: {message}", assignment.line))?;
     }
     Ok(mask)
 }
@@ -148,6 +150,21 @@ impl RcLimits {
         *slot = value;
         Ok(())
     }
+
+    pub(crate) fn reset(&mut self, kind: RcLimitVariable) {
+        let defaults = Self::default();
+        match kind {
+            RcLimitVariable::Assignments => self.assignments = defaults.assignments,
+            RcLimitVariable::Statements => self.statements = defaults.statements,
+            RcLimitVariable::Recipes => self.recipes = defaults.recipes,
+            RcLimitVariable::Conditions => self.conditions = defaults.conditions,
+            RcLimitVariable::Regexes => self.regexes = defaults.regexes,
+            RcLimitVariable::ConditionsPerRecipe => {
+                self.conditions_per_recipe = defaults.conditions_per_recipe;
+            }
+            RcLimitVariable::NestingDepth => self.nesting_depth = defaults.nesting_depth,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -200,17 +217,21 @@ impl Config {
     }
 
     pub fn maildir(&self) -> Option<&str> {
-        self.statements
-            .iter()
-            .rev()
-            .find_map(|statement| match statement {
+        let mut maildir = None;
+        for statement in &self.statements {
+            match statement {
                 Statement::Assignment(assignment)
                     if assignment.target == AssignmentTarget::Maildir =>
                 {
-                    Some(assignment.value.as_str())
+                    maildir = Some(assignment.value.as_str());
                 }
-                _ => None,
-            })
+                Statement::Unset(unset) if unset.target == AssignmentTarget::Maildir => {
+                    maildir = None;
+                }
+                _ => {}
+            }
+        }
+        maildir
     }
 
     pub(crate) fn initial_variables(&self) -> &[(String, String, VariableSource)] {
@@ -252,10 +273,18 @@ impl Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     Assignment(Assignment),
+    Unset(Unset),
     CommandAssignment(CommandAssignment),
     Include(RcFileExpression),
     Switch(RcFileExpression),
     Recipe(Recipe),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unset {
+    pub line: usize,
+    pub name: String,
+    pub target: AssignmentTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

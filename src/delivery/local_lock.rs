@@ -44,14 +44,20 @@ impl LockMethod {
     pub fn from_config(config: &crate::config::Config) -> Result<Self, String> {
         let mut method = Self::Flock;
         for statement in &config.statements {
-            let crate::config::Statement::Assignment(assignment) = statement else {
-                continue;
-            };
-            if assignment.target != crate::config::AssignmentTarget::LockMethod {
-                continue;
+            match statement {
+                crate::config::Statement::Assignment(assignment)
+                    if assignment.target == crate::config::AssignmentTarget::LockMethod =>
+                {
+                    method = Self::parse(&assignment.value)
+                        .map_err(|error| format!("line {}: {error}", assignment.line))?;
+                }
+                crate::config::Statement::Unset(unset)
+                    if unset.target == crate::config::AssignmentTarget::LockMethod =>
+                {
+                    method = Self::Flock;
+                }
+                _ => {}
             }
-            method = Self::parse(&assignment.value)
-                .map_err(|error| format!("line {}: {error}", assignment.line))?;
         }
         Ok(method)
     }
@@ -87,14 +93,16 @@ fn duration_from_config(
 ) -> Result<Duration, String> {
     let mut selected = default;
     for statement in &config.statements {
-        let crate::config::Statement::Assignment(assignment) = statement else {
-            continue;
-        };
-        if assignment.target != target {
-            continue;
+        match statement {
+            crate::config::Statement::Assignment(assignment) if assignment.target == target => {
+                selected = parse(&assignment.value)
+                    .map_err(|error| format!("line {}: {error}", assignment.line))?;
+            }
+            crate::config::Statement::Unset(unset) if unset.target == target => {
+                selected = default;
+            }
+            _ => {}
         }
-        selected = parse(&assignment.value)
-            .map_err(|error| format!("line {}: {error}", assignment.line))?;
     }
     Ok(selected)
 }

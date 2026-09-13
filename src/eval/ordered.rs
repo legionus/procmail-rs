@@ -736,6 +736,15 @@ where
                         .map_err(OrderedExecutionError::Delivery)?;
                 }
             }
+            CompiledStatement::Unset(unset) => {
+                execute_unset(unset, context.runtime, context.host.trace());
+                if unset.unset.target == AssignmentTarget::LockFile {
+                    context
+                        .host
+                        .replace_global_lock("", context.runtime)
+                        .map_err(OrderedExecutionError::Delivery)?;
+                }
+            }
             CompiledStatement::Host(assignment) => {
                 if !execute_host_assignment(assignment, context.runtime, context.host.trace())
                     .map_err(OrderedExecutionError::Evaluation)?

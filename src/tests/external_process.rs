@@ -548,6 +548,15 @@ fn parses_timeout_at_boundaries_and_in_statement_order() {
         process_timeout_from_config(&config).unwrap(),
         Duration::from_secs(2)
     );
+
+    let reset = crate::config::parse("TIMEOUT=2\nTIMEOUT\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    assert_eq!(
+        process_timeout_from_config(&reset).unwrap(),
+        DEFAULT_PROCESS_TIMEOUT
+    );
 }
 
 #[test]

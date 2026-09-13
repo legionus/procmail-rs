@@ -19,8 +19,11 @@ when execution reaches it and is subjected to the same aggregate limits.
 # LEXICAL RULES
 
 Blank lines and lines whose first non-whitespace byte is `#` are ignored.
-Assignments have the form `NAME=value`. A recipe begins with `:0`, contains
-zero or more condition lines beginning with `*`, and ends in one action.
+Assignments have the form `NAME=value`. A bare `NAME` removes the variable;
+`NAME=` instead retains an explicitly empty value. A recipe begins with `:0`,
+contains zero or more condition lines beginning with `*`, and ends in one
+action. Bare `HOST` keeps its special procmail behavior and does not remove the
+variable.
 
 A standalone comment may occur between recipe conditions. An assignment value
 is one shell-like word. After that word, optional whitespace followed by `#`
@@ -136,6 +139,24 @@ An ordinary assignment replaces the runtime value used by following
 statements. Top-level settings that affect parsing, such as `LINEBUF` and the
 `LIMIT_RC_*` family, apply only to following source text. Parser-limit
 assignments are rejected inside recipe blocks.
+
+A bare variable name removes its value in execution order. Removal remains
+visible after a selected block or `INCLUDERC`, while a copied branch retains
+its private variable state. It differs from assigning an empty value:
+
+```text
+FOLDER=
+EMPTY_RESULT=${FOLDER-default}
+FOLDER
+UNSET_RESULT=${FOLDER-default}
+```
+
+`EMPTY_RESULT` is empty and `UNSET_RESULT` is `default`. Removing a setting
+with a documented default restores that default for later operations. Removing
+`LINEBUF` or a `LIMIT_RC_*` name restores its parser default and is prohibited
+inside recipe blocks. The removal itself is checked against the assignment
+limit active before that line. Bare `HOST` retains its special procmail
+behavior instead of removing the variable.
 
 Backquotes run a trusted shell command when the assignment is reached. The
 command receives the complete current message. All trailing LF bytes are

@@ -302,6 +302,7 @@ impl RcFileLoader {
                         Err(_) => runtime.remove(&assignment.name),
                     }
                 }
+                Statement::Unset(unset) => runtime.remove(&unset.name),
                 Statement::Include(expression) | Statement::Switch(expression) => {
                     let statement_name = if matches!(statement, Statement::Include(_)) {
                         "INCLUDERC"
@@ -464,12 +465,16 @@ fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &st
             Statement::Assignment(assignment) if !assignment.target.allowed_in_runtime_rc() => {
                 return Err((assignment.line, assignment.name.as_str()));
             }
+            Statement::Unset(unset) if !unset.target.allowed_in_runtime_rc() => {
+                return Err((unset.line, unset.name.as_str()));
+            }
             Statement::Recipe(recipe) => {
                 if let RecipeAction::Block(children) = &recipe.action {
                     validate_runtime_settings(children)?;
                 }
             }
             Statement::Assignment(_)
+            | Statement::Unset(_)
             | Statement::CommandAssignment(_)
             | Statement::Include(_)
             | Statement::Switch(_) => {}

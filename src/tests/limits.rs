@@ -27,6 +27,16 @@ fn later_assignment_wins() {
 }
 
 #[test]
+fn bare_limit_name_restores_its_default() {
+    let config = config::parse("LIMIT_MSG_BODY=10K\nLIMIT_MSG_BODY\n").unwrap();
+
+    assert_eq!(
+        MessageLimits::from_config(&config).unwrap().body_size,
+        MessageLimits::default().body_size
+    );
+}
+
+#[test]
 fn rejects_values_above_hard_ceiling() {
     let config = config::parse("LIMIT_MSG_HEADERS=17M\n").unwrap();
 

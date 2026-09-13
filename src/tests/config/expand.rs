@@ -549,7 +549,10 @@ fn resolved_destination(config: &Config, statement_index: usize) -> Destination 
                     .unwrap();
             }
             Statement::Recipe(_) => {}
-            Statement::CommandAssignment(_) | Statement::Include(_) | Statement::Switch(_) => {}
+            Statement::Unset(_)
+            | Statement::CommandAssignment(_)
+            | Statement::Include(_)
+            | Statement::Switch(_) => {}
         }
     }
     panic!("statement is not a recipe");

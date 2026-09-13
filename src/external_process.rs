@@ -27,14 +27,18 @@ const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 pub fn process_timeout_from_config(config: &Config) -> Result<Duration, String> {
     let mut timeout = DEFAULT_PROCESS_TIMEOUT;
     for statement in &config.statements {
-        let Statement::Assignment(assignment) = statement else {
-            continue;
-        };
-        if assignment.target != AssignmentTarget::ProcessTimeout {
-            continue;
+        match statement {
+            Statement::Assignment(assignment)
+                if assignment.target == AssignmentTarget::ProcessTimeout =>
+            {
+                timeout = parse_process_timeout(&assignment.value)
+                    .map_err(|error| format!("line {}: {error}", assignment.line))?;
+            }
+            Statement::Unset(unset) if unset.target == AssignmentTarget::ProcessTimeout => {
+                timeout = DEFAULT_PROCESS_TIMEOUT;
+            }
+            _ => {}
         }
-        timeout = parse_process_timeout(&assignment.value)
-            .map_err(|error| format!("line {}: {error}", assignment.line))?;
     }
     Ok(timeout)
 }

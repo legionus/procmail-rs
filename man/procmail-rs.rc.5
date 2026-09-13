@@ -21,8 +21,12 @@ to the same aggregate limits.
 Blank lines and lines whose first non\-whitespace byte is \f[CR]#\f[R]
 are ignored.
 Assignments have the form \f[CR]NAME=value\f[R].
+A bare \f[CR]NAME\f[R] removes the variable; \f[CR]NAME=\f[R] instead
+retains an explicitly empty value.
 A recipe begins with \f[CR]:0\f[R], contains zero or more condition
 lines beginning with \f[CR]*\f[R], and ends in one action.
+Bare \f[CR]HOST\f[R] keeps its special procmail behavior and does not
+remove the variable.
 .PP
 A standalone comment may occur between recipe conditions.
 An assignment value is one shell\-like word.
@@ -228,6 +232,29 @@ statements.
 Top\-level settings that affect parsing, such as \f[CR]LINEBUF\f[R] and
 the \f[CR]LIMIT_RC_*\f[R] family, apply only to following source text.
 Parser\-limit assignments are rejected inside recipe blocks.
+.PP
+A bare variable name removes its value in execution order.
+Removal remains visible after a selected block or \f[CR]INCLUDERC\f[R],
+while a copied branch retains its private variable state.
+It differs from assigning an empty value:
+.IP
+.EX
+FOLDER=
+EMPTY_RESULT=${FOLDER\-default}
+FOLDER
+UNSET_RESULT=${FOLDER\-default}
+.EE
+.PP
+\f[CR]EMPTY_RESULT\f[R] is empty and \f[CR]UNSET_RESULT\f[R] is
+\f[CR]default\f[R].
+Removing a setting with a documented default restores that default for
+later operations.
+Removing \f[CR]LINEBUF\f[R] or a \f[CR]LIMIT_RC_*\f[R] name restores its
+parser default and is prohibited inside recipe blocks.
+The removal itself is checked against the assignment limit active before
+that line.
+Bare \f[CR]HOST\f[R] retains its special procmail behavior instead of
+removing the variable.
 .PP
 Backquotes run a trusted shell command when the assignment is reached.
 The command receives the complete current message.

@@ -83,6 +83,12 @@ fn reads_explicit_durability_policy_in_statement_order() {
         .expand(&[])
         .unwrap();
     assert_eq!(Durability::from_config(&config).unwrap(), Durability::None);
+
+    let reset = crate::config::parse("DURABILITY=full\nDURABILITY\n:0\nmaildir:box\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    assert_eq!(Durability::from_config(&reset).unwrap(), Durability::None);
 }
 
 #[test]

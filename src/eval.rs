@@ -58,7 +58,7 @@ pub use services::{OrderedExecutionHost, RecipeLockGuard};
 pub use test_services::ExecutionServices;
 use tree::{
     ActionExecution, CompiledAction, CompiledAssignment, CompiledNode, CompiledSequence,
-    CompiledStatement, SequenceState,
+    CompiledStatement, CompiledUnset, SequenceState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +237,7 @@ fn execute_statements(
             CompiledStatement::Assignment(assignment) => {
                 execute_assignment(assignment, runtime, trace)?;
             }
+            CompiledStatement::Unset(unset) => execute_unset(unset, runtime, trace),
             CompiledStatement::Host(assignment) => {
                 if !execute_host_assignment(assignment, runtime, trace)? {
                     return Ok(SequenceControl::EndRcFile);
@@ -257,6 +258,14 @@ fn execute_statements(
         }
     }
     Ok(SequenceControl::Continue)
+}
+
+fn execute_unset(
+    unset: &CompiledUnset,
+    runtime: &mut RuntimeVariables,
+    trace: &mut impl TraceSink,
+) {
+    runtime.remove_with_trace(unset.unset.name.clone(), unset.line, unset.source, trace);
 }
 
 fn execute_assignment(

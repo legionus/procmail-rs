@@ -17,7 +17,8 @@ use super::{
     MAX_REGEX_AST_NESTING, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS,
     MAX_REGEX_PATTERN_LEN, OutputEnding, ParseBudget, ParseError, PathExpression, PipeAction,
     RcFileExpression, RcLimits, RcParseCounts, Recipe, RecipeAction, RecipeOptions, RegexCondition,
-    ShellExpression, Statement, VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
+    ShellExpression, Statement, Unset, VariablePolicy, VariableSource, WriteErrorMode,
+    variable_policy,
 };
 
 #[cfg(test)]
@@ -220,6 +221,14 @@ impl ParseBudget {
         apply_rc_limit(assignment, &mut self.limits)?;
         apply_linebuf(assignment, &mut self.limits)
     }
+
+    fn apply_unset(&mut self, unset: &Unset) {
+        match unset.target {
+            AssignmentTarget::RcLimit(kind) => self.limits.reset(kind),
+            AssignmentTarget::LineBuf => self.limits.linebuf = super::DEFAULT_LINEBUF,
+            _ => {}
+        }
+    }
 }
 
 fn parse_statements(
@@ -314,6 +323,23 @@ fn parse_statements(
                 state.apply_assignment(assignment)?;
             }
             statements.push(statement);
+            index += 1;
+            continue;
+        }
+
+        if let Some(unset) = parse_unset(line, line_number)? {
+            state.charge_assignment(line_number, AssignmentUse::Statement)?;
+            if depth != 0 && unset.target.controls_rc_parsing() {
+                return Err(ParseError::new(
+                    line_number,
+                    format!(
+                        "variable {} cannot be unset inside a recipe block",
+                        unset.name
+                    ),
+                ));
+            }
+            state.apply_unset(&unset);
+            statements.push(Statement::Unset(unset));
             index += 1;
             continue;
         }
@@ -469,6 +495,51 @@ fn parse_assignment(line: &str, line_number: usize) -> Result<Option<Assignment>
         value,
         target,
         expansion: Some(parsed.expression),
+    }))
+}
+
+fn parse_unset(line: &str, line_number: usize) -> Result<Option<Unset>, ParseError> {
+    if line == "HOST" || line.contains('=') {
+        return Ok(None);
+    }
+    let (name, remainder) = line.find(char::is_whitespace).map_or((line, ""), |offset| {
+        (&line[..offset], line[offset..].trim_start())
+    });
+    if !remainder.is_empty() && !remainder.starts_with('#') {
+        return Ok(None);
+    }
+    if name.len() > MAX_ASSIGNMENT_NAME_LEN {
+        return Err(ParseError::new(
+            line_number,
+            format!("assignment name exceeds the hard limit of {MAX_ASSIGNMENT_NAME_LEN} bytes"),
+        ));
+    }
+    if name.is_empty()
+        || !name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphanumeric() && (index > 0 || !byte.is_ascii_digit())
+        })
+    {
+        return Ok(None);
+    }
+    let policy = variable_policy(name);
+    if policy == VariablePolicy::Unsupported {
+        return Err(ParseError::new(
+            line_number,
+            format!("procmail variable {name} is not supported"),
+        ));
+    }
+    let target = policy
+        .assignment_target(VariableSource::RcFile)
+        .ok_or_else(|| {
+            ParseError::new(
+                line_number,
+                format!("variable {name} cannot be unset in an rc file"),
+            )
+        })?;
+    Ok(Some(Unset {
+        line: line_number,
+        name: name.to_owned(),
+        target,
     }))
 }
 

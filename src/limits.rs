@@ -39,29 +39,50 @@ impl MessageLimits {
         let mut limits = Self::default();
 
         for statement in &config.statements {
-            let Statement::Assignment(assignment) = statement else {
-                continue;
-            };
-            let AssignmentTarget::MessageLimit(variable) = assignment.target else {
-                continue;
-            };
-            let (target, ceiling) = limit_target(&mut limits, variable);
-            let value = parse_size(&assignment.value).map_err(|reason| LimitConfigError {
-                line: assignment.line,
-                name: assignment.name.clone(),
-                reason,
-            })?;
-            if value > ceiling {
-                return Err(LimitConfigError {
-                    line: assignment.line,
-                    name: assignment.name.clone(),
-                    reason: format!("value exceeds the hard ceiling of {ceiling} bytes"),
-                });
+            match statement {
+                Statement::Assignment(assignment) => {
+                    let AssignmentTarget::MessageLimit(variable) = assignment.target else {
+                        continue;
+                    };
+                    let (target, ceiling) = limit_target(&mut limits, variable);
+                    let value =
+                        parse_size(&assignment.value).map_err(|reason| LimitConfigError {
+                            line: assignment.line,
+                            name: assignment.name.clone(),
+                            reason,
+                        })?;
+                    if value > ceiling {
+                        return Err(LimitConfigError {
+                            line: assignment.line,
+                            name: assignment.name.clone(),
+                            reason: format!("value exceeds the hard ceiling of {ceiling} bytes"),
+                        });
+                    }
+                    *target = value;
+                }
+                Statement::Unset(unset) => {
+                    let AssignmentTarget::MessageLimit(variable) = unset.target else {
+                        continue;
+                    };
+                    let (target, _) = limit_target(&mut limits, variable);
+                    *target = default_limit(variable);
+                }
+                _ => {}
             }
-            *target = value;
         }
 
         Ok(limits)
+    }
+}
+
+fn default_limit(variable: MessageLimitVariable) -> usize {
+    let limits = MessageLimits::default();
+    match variable {
+        MessageLimitVariable::MessageSize => limits.message_size,
+        MessageLimitVariable::HeadersSize => limits.headers_size,
+        MessageLimitVariable::BodySize => limits.body_size,
+        MessageLimitVariable::HeaderLineSize => limits.header_line_size,
+        MessageLimitVariable::HeaderFieldSize => limits.header_field_size,
     }
 }
 
