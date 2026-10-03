@@ -863,6 +863,17 @@ fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::
                 }
                 write!(output, " (recipe at line {recipe_line})")
             }
+            DeliveryStage::FailedIo(class, kind) => {
+                write!(
+                    output,
+                    "procmail-rs: Recipe at line {recipe_line}: {} delivery failed",
+                    human_destination_kind(*destination)
+                )?;
+                if let Some(path) = path {
+                    write!(output, " for \"{}\"", EscapedBytes::new(path.as_bytes()))?;
+                }
+                write!(output, ": {kind} ({})", failure_class_name(*class))
+            }
             DeliveryStage::Failed(class) => write!(
                 output,
                 "procmail-rs: Recipe at line {recipe_line}: {} delivery failed ({})",
@@ -1050,6 +1061,11 @@ fn render_delivery_stage(output: &mut impl fmt::Write, stage: DeliveryStage) -> 
         DeliveryStage::Preparing => output.write_str("preparing"),
         DeliveryStage::DryRun => output.write_str("dry-run"),
         DeliveryStage::Published => output.write_str("published"),
+        DeliveryStage::FailedIo(class, kind) => write!(
+            output,
+            "failed failure_class={} reason={kind}",
+            failure_class_name(class)
+        ),
         DeliveryStage::Failed(class) => {
             write!(output, "failed failure_class={}", failure_class_name(class))
         }
@@ -1319,6 +1335,9 @@ pub enum DeliveryStage {
     DryRun,
     Published,
     Failed(FailureClass),
+    // Retain only the typed cause: an arbitrary I/O error string may contain
+    // private paths or input bytes even when metadata-only tracing is active.
+    FailedIo(FailureClass, io::ErrorKind),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

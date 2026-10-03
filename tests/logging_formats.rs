@@ -28,6 +28,52 @@ fn create_maildir(path: &std::path::Path) {
 }
 
 #[test]
+fn maildir_type_error_reports_cause_and_respects_trace_detail() {
+    let base = temporary_directory("delivery-error");
+    let mailbox = base.join("private-destination-sentinel");
+    fs::write(&mailbox, b"existing mailbox\n").unwrap();
+    for format in ["text", "json"] {
+        for detail in ["metadata", "values"] {
+            let logfile = base.join("filter.log");
+            let config = base.join("rules.rc");
+            fs::write(&logfile, b"").unwrap();
+            fs::write(&config, format!(
+                "MAILDIR={}\nLOGFILE={}\nVERBOSE=yes\nLOGDETAIL={detail}\n:0\nprivate-destination-sentinel/\n",
+                base.display(), logfile.display()
+            )).unwrap();
+            let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+                .args(["filter", "--format", format, "--config"])
+                .arg(&config)
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"Subject: private-header-sentinel\n\nprivate-body-sentinel\n")
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(output.status.code(), Some(73), "{:?}", output.stderr);
+            let trace = fs::read_to_string(&logfile).unwrap();
+            assert!(trace.contains("not a directory"), "{trace}");
+            assert!(trace.contains("permanent"), "{trace}");
+            assert!(!trace.contains("transient"), "{trace}");
+            assert_eq!(
+                trace.contains("private-destination-sentinel"),
+                detail == "values",
+                "{trace}"
+            );
+            assert!(!trace.contains("private-header-sentinel"));
+            assert!(!trace.contains("private-body-sentinel"));
+            assert_eq!(fs::read(&mailbox).unwrap(), b"existing mailbox\n");
+        }
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn verbose_filter_writes_text_trace_to_logfile() {
     let base = temporary_directory("text");
     let selected = base.join("selected");

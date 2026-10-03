@@ -926,7 +926,7 @@ fn deliver_file_destination(
             let class = DeliveryFailureClass::from_io_error(&error);
             record_delivery(
                 &destination,
-                DeliveryStage::Failed(trace_failure_class(class)),
+                DeliveryStage::FailedIo(trace_failure_class(class), error.kind()),
                 trace,
             );
             OperationalError::delivery(
@@ -1051,13 +1051,14 @@ fn open_sink(
         DestinationKind::Maildir => {
             let path = Path::new(destination.path());
             let sink = MaildirSink::create(path, durability, mask).map_err(|error| {
+                let class = DeliveryFailureClass::from_io_error(&error);
                 record_delivery(
-                    unresolved,
-                    DeliveryStage::Failed(FailureClass::Transient),
+                    &destination,
+                    DeliveryStage::FailedIo(trace_failure_class(class), error.kind()),
                     trace,
                 );
                 OperationalError::delivery(
-                    DeliveryFailureClass::from_io_error(&error),
+                    class,
                     format!("cannot open Maildir {}: {error}", path.display()),
                 )
             })?;
