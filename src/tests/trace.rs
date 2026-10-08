@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
+use super::config::parse_procmail_boolean;
+use super::render::BoundedText;
 use super::*;
+use crate::config::MAX_ASSIGNMENT_NAME_LEN;
+use std::fmt::Write as _;
+use std::io;
 
 #[path = "trace/source_locations.rs"]
 mod source_locations;
+
+#[path = "trace/render_pipeline.rs"]
+mod render_pipeline;
 
 #[test]
 fn delivery_failure_renderers_preserve_typed_details_without_error_text() {
@@ -150,8 +158,9 @@ fn bounded_writer_emits_complete_records_with_accounted_sizes() {
 
     assert_eq!(trace.event_count(), 2);
     assert_eq!(trace.stop_reason(), None);
-    assert_eq!(trace.byte_count(), trace.writer.len());
+    let bytes = trace.byte_count();
     let output = String::from_utf8(trace.into_inner()).unwrap();
+    assert_eq!(bytes, output.len());
     assert_eq!(output.lines().count(), 2);
     assert!(output.contains("\"name\":\"MAILBOX\""));
 }
@@ -276,7 +285,8 @@ fn bounded_writer_stops_before_exceeding_total_byte_limit() {
 
     assert_eq!(trace.stop_reason(), Some(TraceStopReason::ByteLimit));
     assert!(trace.byte_count() <= MAX_TRACE_BYTES);
-    assert_eq!(trace.byte_count(), trace.writer.len());
+    let bytes = trace.byte_count();
+    assert_eq!(bytes, trace.into_inner().len());
 }
 
 #[test]

@@ -189,8 +189,12 @@ fn publication_tracker_reports_copies_and_resets_after_completion() {
 
     tracker.record(1, true).unwrap();
     assert!(tracker.finish().is_ok());
-    assert_eq!(tracker.published, 0);
-    assert!(!tracker.original_delivered);
+    let error = tracker.finish().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("published 0 copy destination(s)")
+    );
 }
 
 #[test]
