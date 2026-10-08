@@ -234,15 +234,20 @@ impl RcFileExpression {
         let expression = if let Some(expression) = self.expansion.as_ref() {
             expression
         } else {
-            parsed = parse_expression(&self.value, self.line)?;
+            parsed = parse_expression(&self.value, self.location.line())?;
             &parsed
         };
         // procmail treats MAILDIR as its current directory. Resolve against
         // its value at the moment the statement executes; when it is unset,
         // leave the path relative so the loader uses the process directory.
         let base = lookup("MAILDIR");
-        PathResolver::new(PathPurpose::RcFile, "rc file", self.line, base.as_deref())
-            .evaluate(expression, &mut lookup)
+        PathResolver::new(
+            PathPurpose::RcFile,
+            "rc file",
+            self.location.line(),
+            base.as_deref(),
+        )
+        .evaluate(expression, &mut lookup)
     }
 }
 
@@ -294,24 +299,6 @@ impl Destination {
     // variant together. Resolution may turn an unmarked file into mbox or
     // discard delivery, so duplicating these matches at call sites could
     // preserve stale preparation state or choose a different backend.
-    fn expression(&self) -> &PathExpression {
-        match self {
-            Self::Maildir(expression)
-            | Self::Mbox(expression)
-            | Self::File(expression)
-            | Self::Discard(expression) => expression,
-        }
-    }
-
-    fn expression_mut(&mut self) -> &mut PathExpression {
-        match self {
-            Self::Maildir(expression)
-            | Self::Mbox(expression)
-            | Self::File(expression)
-            | Self::Discard(expression) => expression,
-        }
-    }
-
     fn purpose(&self) -> PathPurpose {
         match self.kind() {
             super::DestinationKind::Maildir => PathPurpose::Maildir,
@@ -339,7 +326,7 @@ impl Destination {
         PathExpression {
             source,
             base: None,
-            line: expression.line,
+            location: expression.location.clone(),
             runtime_dependent: false,
             runtime_base: false,
             typed_destination: expression.typed_destination,
@@ -360,7 +347,7 @@ impl Destination {
         let expression = self.expression();
         PathResolver::destination(
             self.purpose(),
-            expression.line,
+            expression.location.line(),
             base,
             expression.typed_destination,
         )
@@ -374,7 +361,11 @@ impl Destination {
     }
 
     pub fn line(&self) -> usize {
-        self.expression().line
+        self.expression().location.line()
+    }
+
+    pub fn location(&self) -> &crate::source_location::SourceLocation {
+        self.expression().location()
     }
 
     pub(crate) fn resolve_ordered_output(
@@ -389,7 +380,7 @@ impl Destination {
             .is_some_and(ShellExpression::requires_ordered_evaluation)
         {
             return Err(ExpansionError::new(
-                expression.line,
+                expression.location.line(),
                 "destination has no ordered expression",
             ));
         }
@@ -414,7 +405,7 @@ impl Destination {
             .is_some_and(ShellExpression::requires_ordered_evaluation)
         {
             return Err(ExpansionError::new(
-                expression.line,
+                expression.location.line(),
                 "destination ordered expression has not executed",
             ));
         }
@@ -422,14 +413,15 @@ impl Destination {
         let compiled = if let Some(compiled) = expression.expansion.as_ref() {
             compiled
         } else {
-            parsed = parse_expression(&expression.source, expression.line)?;
+            parsed = parse_expression(&expression.source, expression.location.line())?;
             &parsed
         };
-        let expansion = bind_static_expression(compiled, expression.line, &mut lookup, 0)?;
+        let expansion =
+            bind_static_expression(compiled, expression.location.line(), &mut lookup, 0)?;
         let bound = PathExpression {
             source: expression.source.clone(),
             base: expression.base.clone(),
-            line: expression.line,
+            location: expression.location.clone(),
             runtime_dependent: expression_has_runtime(&expansion),
             runtime_base: expression.runtime_base,
             typed_destination: expression.typed_destination,
@@ -449,7 +441,7 @@ impl Destination {
             .is_some_and(ShellExpression::has_commands)
         {
             return Err(ExpansionError::new(
-                expression.line,
+                expression.location.line(),
                 "destination command substitution has not executed",
             ));
         }
@@ -457,7 +449,7 @@ impl Destination {
         let compiled = if let Some(compiled) = expression.expansion.as_ref() {
             compiled
         } else {
-            parsed = parse_expression(&expression.source, expression.line)?;
+            parsed = parse_expression(&expression.source, expression.location.line())?;
             &parsed
         };
         let runtime_base = expression.runtime_base.then(|| lookup("MAILDIR")).flatten();
@@ -490,13 +482,18 @@ impl PathExpression {
         let compiled = if let Some(compiled) = self.expansion.as_ref() {
             compiled
         } else {
-            parsed = parse_expression(&self.source, self.line)?;
+            parsed = parse_expression(&self.source, self.location.line())?;
             &parsed
         };
         let runtime_base = self.runtime_base.then(|| lookup("MAILDIR")).flatten();
         let base = runtime_base.as_deref().or(self.base.as_deref());
-        PathResolver::new(PathPurpose::Lockfile, "lockfile", self.line, base)
-            .evaluate(compiled, &mut lookup)
+        PathResolver::new(
+            PathPurpose::Lockfile,
+            "lockfile",
+            self.location.line(),
+            base,
+        )
+        .evaluate(compiled, &mut lookup)
     }
 }
 
@@ -901,15 +898,24 @@ impl ConfigPreparer {
                 Ok(())
             }
             Statement::Include(expression) | Statement::Switch(expression) => {
-                let parsed = parse_expression(&expression.value, expression.line)?;
-                reject_parameter_assignments(&parsed, expression.line, "runtime rc path")?;
+                let parsed = parse_expression(&expression.value, expression.location.line())?;
+                reject_parameter_assignments(
+                    &parsed,
+                    expression.location.line(),
+                    "runtime rc path",
+                )?;
                 if parsed.has_commands() {
                     return Err(ExpansionError::new(
-                        expression.line,
+                        expression.location.line(),
                         "command substitution is not supported in runtime rc path",
                     ));
                 }
-                validate_runtime_references(&parsed, expression.line, &self.known, &self.dynamic)?;
+                validate_runtime_references(
+                    &parsed,
+                    expression.location.line(),
+                    &self.known,
+                    &self.dynamic,
+                )?;
                 expression.expansion = Some(parsed);
                 mark_positional_dynamic(&mut self.dynamic);
                 Ok(())
@@ -1103,7 +1109,7 @@ impl ConfigPreparer {
     ) -> Result<(), ExpansionError> {
         let expression = destination.expression_mut();
         expression.base = self.maildir.clone();
-        expression.line = line;
+        expression.location = expression.location.at_line(line);
         if let Some(command_expression) = expression
             .expansion
             .as_ref()
@@ -1339,7 +1345,7 @@ fn prepare_lock_expression(
     let analysis = ExpressionAnalysis::new(&parsed, known, dynamic);
     analysis.validate_runtime_references(line)?;
     expression.base = maildir.map(str::to_owned);
-    expression.line = line;
+    expression.location = expression.location.at_line(line);
     expression.runtime_dependent = analysis.needs_runtime || analysis.references_dynamic;
     expression.runtime_base = expression.runtime_dependent;
     expression.expansion = Some(parsed);

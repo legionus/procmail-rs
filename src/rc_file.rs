@@ -50,6 +50,7 @@ pub struct LoadedRcConfig {
 pub struct RcFileError {
     path: PathBuf,
     message: String,
+    location: Option<crate::source_location::SourceLocation>,
     resource_limit: bool,
     not_found: bool,
 }
@@ -209,8 +210,11 @@ impl RcFileLoader {
         let loaded = self.load(Path::new(&path), depth)?;
         self.activate_runtime_limits(runtime, loaded.path())?;
         let mut next_parse_state = self.parse_state;
-        let config = config::parse_with_state(loaded.source(), &mut next_parse_state)
+        let mut config = config::parse_with_state(loaded.source(), &mut next_parse_state)
             .map_err(|error| parse_file_error(loaded.path(), error))?;
+        config
+            .set_source_file(loaded.path())
+            .map_err(|error| RcFileError::new(loaded.path(), error))?;
         self.parse_state = next_parse_state;
         validate_runtime_settings(&config.statements).map_err(|(line, name)| {
             RcFileError::new(
@@ -314,7 +318,11 @@ impl RcFileLoader {
                     {
                         Ok(path) => path,
                         Err(_) => {
-                            warnings.dynamic_path(depth, expression.line, statement_name)?;
+                            warnings.dynamic_path(
+                                depth,
+                                expression.location.line(),
+                                statement_name,
+                            )?;
                             continue;
                         }
                     };
@@ -405,11 +413,17 @@ struct RcCheckWarnings {
 }
 
 fn parse_file_error(path: &Path, error: config::ParseError) -> RcFileError {
-    let message = format!("invalid rc syntax: {error}");
-    if error.is_resource_limit() {
-        RcFileError::limit(path, message)
-    } else {
-        RcFileError::new(path, message)
+    let location = match crate::source_location::SourceLocation::for_file(path, error.line) {
+        Ok(location) => location,
+        Err(message) => return RcFileError::new(path, message),
+    };
+    let resource_limit = error.is_resource_limit();
+    RcFileError {
+        path: path.to_owned(),
+        message: error.message,
+        location: Some(location),
+        resource_limit,
+        not_found: false,
     }
 }
 
@@ -484,6 +498,15 @@ fn validate_runtime_settings(statements: &[Statement]) -> Result<(), (usize, &st
 }
 
 impl LoadedRcFile {
+    pub fn parse(&self) -> Result<Config, RcFileError> {
+        let mut config =
+            config::parse(self.source()).map_err(|error| parse_file_error(self.path(), error))?;
+        config
+            .set_source_file(self.path())
+            .map_err(|error| RcFileError::new(self.path(), error))?;
+        Ok(config)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -495,8 +518,11 @@ impl LoadedRcFile {
 
 impl LoadedRcConfig {
     #[cfg(any(feature = "fuzzing", test))]
-    pub(crate) fn from_config(path: PathBuf, config: Config) -> Self {
-        Self { path, config }
+    pub(crate) fn from_config(path: PathBuf, mut config: Config) -> Result<Self, RcFileError> {
+        config
+            .set_source_file(&path)
+            .map_err(|error| RcFileError::new(&path, error))?;
+        Ok(Self { path, config })
     }
 
     pub fn path(&self) -> &Path {
@@ -517,6 +543,7 @@ impl RcFileError {
         Self {
             path: path.to_owned(),
             message: message.into(),
+            location: None,
             resource_limit: false,
             not_found: false,
         }
@@ -526,6 +553,7 @@ impl RcFileError {
         Self {
             path: path.to_owned(),
             message: message.into(),
+            location: None,
             resource_limit: true,
             not_found: false,
         }
@@ -536,6 +564,7 @@ impl RcFileError {
         Self {
             path: path.to_owned(),
             message: error.to_string(),
+            location: None,
             resource_limit: false,
             not_found,
         }
@@ -549,13 +578,25 @@ impl RcFileError {
         self.not_found
     }
 
-    pub fn safe_message(&self) -> &str {
-        &self.message
+    pub fn safe_message(&self) -> std::borrow::Cow<'_, str> {
+        match &self.location {
+            Some(location) => format!(
+                "invalid rc syntax: line {}: {}",
+                location.line(),
+                self.message
+            )
+            .into(),
+            None => (&self.message).into(),
+        }
     }
 }
 
 impl fmt::Display for RcFileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(location) = &self.location {
+            return write!(formatter, "{location}: {}", self.message);
+        }
+
         write!(
             formatter,
             "cannot read {}: {}",

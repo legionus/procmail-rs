@@ -145,10 +145,13 @@ impl CompiledSequence {
                 recipe.execution_gate(state) && recipe.matches_ordered(context)?;
             let else_handled = recipe.else_handled(state, conditions_matched);
             let (action, control) = if conditions_matched {
-                context.host.trace().record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Selected,
-                });
+                context.host.trace().record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Selected,
+                    },
+                );
                 if recipe.is_waited_copy_block() {
                     self.execute_waited_copy_block(index, state, recipe, context)?
                 } else if recipe.is_unwaited_copy_block() {
@@ -157,10 +160,13 @@ impl CompiledSequence {
                     recipe.execute_ordered_action(context)?
                 }
             } else {
-                context.host.trace().record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Skipped,
-                });
+                context.host.trace().record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Skipped,
+                    },
+                );
                 (ActionExecution::NotAttempted, SequenceControl::Continue)
             };
             state.record(recipe.control, conditions_matched, action, else_handled);
@@ -247,11 +253,11 @@ impl CompiledSequence {
     {
         context
             .copy_budget
-            .reserve(recipe.line)
+            .reserve(recipe.location.line())
             .map_err(OrderedExecutionError::Evaluation)?;
         let mut branch_host = context.host.fork_copy_branch().ok_or_else(|| {
             OrderedExecutionError::Evaluation(EvalError::BackgroundCopyUnavailable {
-                line: recipe.line,
+                line: recipe.location.line(),
                 reason: "the execution host cannot create an isolated branch".to_owned(),
             })
         })?;
@@ -302,7 +308,7 @@ impl CompiledSequence {
                 })
                 .map_err(|error| {
                     OrderedExecutionError::Evaluation(EvalError::BackgroundCopyUnavailable {
-                        line: recipe.line,
+                        line: recipe.location.line(),
                         reason: error.to_string(),
                     })
                 })?;
@@ -312,13 +318,13 @@ impl CompiledSequence {
             let parent = self.execute_ordered_from(index + 1, parent_state, context);
             let joined = branch.join().map_err(|_| {
                 OrderedExecutionError::Evaluation(EvalError::BackgroundCopyUnavailable {
-                    line: recipe.line,
+                    line: recipe.location.line(),
                     reason: "the branch worker terminated unexpectedly".to_owned(),
                 })
             })?;
             context.published = context.published.checked_add(joined.2).ok_or_else(|| {
                 OrderedExecutionError::Evaluation(EvalError::BackgroundCopyUnavailable {
-                    line: recipe.line,
+                    line: recipe.location.line(),
                     reason: "published destination count overflows".to_owned(),
                 })
             })?;
@@ -389,7 +395,7 @@ impl CompiledNode {
                     let bytes = evaluate_shell_expression(
                         ShellExpressionInput {
                             expression,
-                            line,
+                            location: &condition.location.at_line(line),
                             value_name: "shell-expanded condition",
                             message: raw,
                             limit,
@@ -413,7 +419,7 @@ impl CompiledNode {
                     .ok_or(EvalError::BodyWasNotBuffered)
                     .map_err(OrderedExecutionError::Evaluation)?;
                 crate::trace::record_external_command(
-                    condition.line,
+                    &condition.location,
                     command,
                     context.host.trace(),
                 );
@@ -433,7 +439,7 @@ impl CompiledNode {
                     .map_err(OrderedExecutionError::Evaluation)?
             };
             condition.trace_result(
-                self.line,
+                self.location.line(),
                 index,
                 PartialMatch::from_bool(matched),
                 context.host.trace(),
@@ -464,7 +470,7 @@ impl CompiledNode {
                 let limit =
                     active_command_value_limit(context.runtime, action.target, action.line)?;
                 crate::trace::record_external_command(
-                    action.line,
+                    &self.location.at_line(action.line),
                     &action.command,
                     context.host.trace(),
                 );
@@ -488,7 +494,7 @@ impl CompiledNode {
                         context.runtime.set_bytes_with_trace(
                             action.name.clone(),
                             value,
-                            Some(action.line),
+                            Some(self.location.at_line(action.line)),
                             TraceVariableSource::RcFile,
                             context.host.trace(),
                         );
@@ -515,22 +521,24 @@ impl CompiledNode {
                     context.limits,
                 )
                 .map_err(|error| EvalError::HeaderEdit {
-                    line: self.line,
+                    line: self.location.line(),
                     message: error.to_string(),
                 })
                 .map_err(OrderedExecutionError::Evaluation)?;
                 let (edited, extractions) = applied.into_parts();
                 let message = Message::from_edited_header(edited, body)
                     .map_err(|error| EvalError::HeaderEdit {
-                        line: self.line,
+                        line: self.location.line(),
                         message: error.to_string(),
                     })
                     .map_err(OrderedExecutionError::Evaluation)?;
                 context.replace_message(message);
-                crate::trace::record_header_action(&action, context.host.trace());
-                context
-                    .runtime
-                    .apply_header_extractions(extractions, context.host.trace());
+                crate::trace::record_header_action(&action, &self.location, context.host.trace());
+                context.runtime.apply_header_extractions(
+                    extractions,
+                    &self.location,
+                    context.host.trace(),
+                );
                 context.action_succeeded(SequenceControl::Continue)
             }
             CompiledAction::Pipe { action, options } => {
@@ -556,7 +564,7 @@ impl CompiledNode {
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
                 crate::trace::record_external_command(
-                    self.line,
+                    &self.location,
                     &action.command,
                     context.host.trace(),
                 );
@@ -572,14 +580,15 @@ impl CompiledNode {
                             let message = replacement.ok_or_else(|| {
                                 OrderedExecutionError::Evaluation(
                                     EvalError::InvalidExternalActionResult {
-                                        line: self.line,
+                                        line: self.location.line(),
                                         reason: "filter completed without a replacement message",
                                     },
                                 )
                             })?;
-                            context.host.trace().record(
+                            context.host.trace().record_at(
+                                &self.location,
                                 crate::trace::TraceEvent::ExternalFilterReplaced {
-                                    recipe_line: self.line,
+                                    recipe_line: self.location.line(),
                                     bytes: message.as_bytes().len(),
                                 },
                             );
@@ -588,7 +597,7 @@ impl CompiledNode {
                         } else if replacement.is_some() {
                             Err(OrderedExecutionError::Evaluation(
                                 EvalError::InvalidExternalActionResult {
-                                    line: self.line,
+                                    line: self.location.line(),
                                     reason: "non-filter pipe returned a replacement message",
                                 },
                             ))
@@ -624,7 +633,7 @@ impl CompiledNode {
                     let bytes = evaluate_shell_expression(
                         ShellExpressionInput {
                             expression: parts,
-                            line: destination.line(),
+                            location: destination.location(),
                             value_name: "destination",
                             message,
                             limit,
@@ -762,7 +771,7 @@ where
             }
             CompiledStatement::Include(include) => {
                 let entered = include
-                    .enter(context.runtime, context.rc)
+                    .enter(context.runtime, context.rc, context.host.trace())
                     .map_err(OrderedExecutionError::Evaluation)?;
                 if let Some((sequence, path, child_context)) = entered
                     .sequence()
@@ -779,7 +788,7 @@ where
                 // immediately. Restoring the caller context matters when the
                 // switch belongs to a file entered through INCLUDERC.
                 let entered = switch
-                    .enter(context.runtime, context.rc)
+                    .enter(context.runtime, context.rc, context.host.trace())
                     .map_err(OrderedExecutionError::Evaluation)?;
                 if entered.is_empty() {
                     return Ok(SequenceControl::EndRcFile);
@@ -802,13 +811,14 @@ where
 }
 
 fn execute_command_assignment<H>(
-    assignment: &crate::config::CommandAssignment,
+    compiled: &super::tree::CompiledCommandAssignment,
     context: &mut OrderedTreeExecution<'_, H>,
 ) -> Result<(), OrderedExecutionError<H::Error>>
 where
     H: OrderedExecutionHost,
     H::Trace: TraceSink,
 {
+    let assignment = &compiled.assignment;
     let message = context
         .current_message
         .view(context.message)
@@ -819,7 +829,7 @@ where
     let value = evaluate_shell_expression(
         ShellExpressionInput {
             expression: &assignment.expression,
-            line: assignment.line,
+            location: &compiled.location,
             value_name: &assignment.name,
             message,
             limit,
@@ -833,7 +843,7 @@ where
         target: assignment.target,
         value,
         source_line: assignment.line,
-        trace_line: Some(assignment.line),
+        trace_location: Some(compiled.location.clone()),
         source: TraceVariableSource::RcFile,
     }
     .apply(context.runtime, context.host.trace())
@@ -842,7 +852,7 @@ where
 
 struct ShellExpressionInput<'a> {
     expression: &'a crate::config::ShellExpression,
-    line: usize,
+    location: &'a crate::source_location::SourceLocation,
     value_name: &'a str,
     message: &'a [u8],
     limit: usize,
@@ -857,7 +867,7 @@ where
     T: TraceSink,
 {
     let mut context = OrderedExpressionEvaluation {
-        line: input.line,
+        location: input.location,
         value_name: input.value_name,
         message: input.message,
         runtime,
@@ -868,7 +878,7 @@ where
         context.runtime.set_bytes_with_trace(
             name,
             value,
-            Some(input.line),
+            Some(input.location.clone()),
             TraceVariableSource::RcFile,
             context.host.trace(),
         );
@@ -877,7 +887,7 @@ where
 }
 
 struct OrderedExpressionEvaluation<'context, 'input, E, T> {
-    line: usize,
+    location: &'input crate::source_location::SourceLocation,
     value_name: &'input str,
     message: &'input [u8],
     runtime: &'context mut RuntimeVariables,
@@ -902,7 +912,7 @@ where
     }
 
     fn command(&mut self, command: &str, remaining: usize) -> Result<Vec<u8>, Self::Error> {
-        crate::trace::record_external_command(self.line, command, self.host.trace());
+        crate::trace::record_external_command(self.location, command, self.host.trace());
         let captured =
             self.host
                 .capture(
@@ -932,43 +942,48 @@ where
             .get_bytes(name)
             .ok_or_else(|| self.missing_variable(name))?;
         let mut escaped = Vec::new();
-        crate::config::expand::push_regex_escaped(&mut escaped, source, remaining, self.line)
-            .map_err(EvalError::Expansion)
-            .map_err(OrderedExecutionError::Evaluation)?;
+        crate::config::expand::push_regex_escaped(
+            &mut escaped,
+            source,
+            remaining,
+            self.location.line(),
+        )
+        .map_err(EvalError::Expansion)
+        .map_err(OrderedExecutionError::Evaluation)?;
         Ok(escaped)
     }
 
     fn missing_variable(&self, name: &str) -> Self::Error {
         OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
-            line: self.line,
+            line: self.location.line(),
             message: format!("variable {name} is not defined"),
         }))
     }
 
     fn required_parameter(&self, name: &str) -> Self::Error {
         OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
-            line: self.line,
+            line: self.location.line(),
             message: format!("parameter {name} is unset or empty"),
         }))
     }
 
     fn pattern_error(&self, error: crate::config::shell_pattern::PatternError) -> Self::Error {
         OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
-            line: self.line,
+            line: self.location.line(),
             message: error.to_string(),
         }))
     }
 
     fn unsupported_part(&self, _: UnsupportedPart) -> Self::Error {
         OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
-            line: self.line,
+            line: self.location.line(),
             message: "expression part is not supported during ordered evaluation".to_owned(),
         }))
     }
 
     fn depth_exceeded(&self) -> Self::Error {
         OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
-            line: self.line,
+            line: self.location.line(),
             message: format!(
                 "variable expansion exceeds the hard depth limit of {}",
                 crate::config::MAX_EXPANSION_DEPTH
@@ -978,7 +993,7 @@ where
 
     fn depth_overflow(&self) -> Self::Error {
         OrderedExecutionError::Evaluation(EvalError::Expansion(crate::config::ExpansionError {
-            line: self.line,
+            line: self.location.line(),
             message: "variable expansion depth overflows".to_owned(),
         }))
     }

@@ -70,13 +70,16 @@ fn sync_failure_is_traced_on_the_published_sink_not_the_next_sink() {
     assert!(!error.can_handle);
     assert_eq!(error.error.exit_code(), 75);
     assert_eq!(runtime.last_folder(), Some("/first/new/message"));
-    assert!(matches!(trace.events().last(), Some(TraceEvent::Delivery {
+    assert!(
+        matches!(trace.records().last().map(|record| &record.event), Some(TraceEvent::Delivery {
         recipe_line: 2, stage: DeliveryStage::Failure(actual), ..
-    }) if *actual == failure));
+    }) if *actual == failure)
+    );
     assert!(
         !trace
-            .events()
+            .records()
             .iter()
+            .map(|record| &record.event)
             .any(|event| matches!(event, TraceEvent::Delivery { recipe_line: 4, .. }))
     );
 }
@@ -129,7 +132,12 @@ fn streaming_write_failure_keeps_delivery_status_and_sink_location() {
     assert!(matches!(error, OperationalError::Delivery { failure, .. }
         if failure.operation == DeliveryOperation::Write && !failure.published));
     assert!(matches!(
-        trace.events(),
+        trace
+            .records()
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>()
+            .as_slice(),
         [TraceEvent::Delivery {
             recipe_line: 2,
             stage: DeliveryStage::Failure(_),
@@ -137,7 +145,7 @@ fn streaming_write_failure_keeps_delivery_status_and_sink_location() {
             ..
         }]
     ));
-    let rendered = format!("{:?}", trace.events());
+    let rendered = format!("{:?}", trace.records());
     for secret in [
         "private-error-sentinel",
         "private-header-sentinel",
@@ -213,7 +221,12 @@ fn publication_effects_use_the_visible_backend_result() {
     assert_eq!(count, 1);
     assert_eq!(runtime.last_folder(), Some("visible/new/message"));
     assert_eq!(
-        trace.events(),
+        trace
+            .records()
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>()
+            .as_slice(),
         [
             TraceEvent::Delivery {
                 recipe_line: 0,
@@ -246,7 +259,12 @@ fn publication_effects_distinguish_failures_before_and_after_visibility() {
     assert!(before.can_handle);
     assert_eq!(runtime.last_folder(), None);
     assert_eq!(
-        trace.events(),
+        trace
+            .records()
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>()
+            .as_slice(),
         [TraceEvent::Delivery {
             recipe_line: 0,
             destination: TraceDestinationKind::Maildir,
@@ -277,7 +295,7 @@ fn publication_effects_distinguish_failures_before_and_after_visibility() {
     assert!(!after.can_handle);
     assert_eq!(runtime.last_folder(), Some("visible/new/message"));
     assert!(
-        matches!(after_trace.events().last(), Some(TraceEvent::Delivery {
+        matches!(after_trace.records().last().map(|record| &record.event), Some(TraceEvent::Delivery {
         stage: DeliveryStage::Failure(actual), ..
     }) if *actual == failure)
     );

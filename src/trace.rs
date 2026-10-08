@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-//! Typed, value-free events used to explain filtering decisions.
+//! Typed, bounded records used to explain filtering decisions.
 
 use std::fmt;
 use std::fmt::Write as _;
@@ -11,6 +11,79 @@ use crate::config::MAX_ASSIGNMENT_NAME_LEN;
 use crate::config::{
     AssignmentTarget, Config, HeaderAction, HeaderExtractionMode, HeaderOperation, Statement,
 };
+use crate::source_location::SourceLocation;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceRecord {
+    pub event: TraceEvent,
+    pub location: SourceLocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcFileStatement {
+    Include,
+    Switch,
+}
+
+impl RcFileStatement {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Include => "INCLUDERC",
+            Self::Switch => "SWITCHRC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RcFileStage {
+    Loaded,
+    Empty,
+    Failed,
+}
+
+impl RcFileStage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Loaded => "loaded",
+            Self::Empty => "empty",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl From<TraceEvent> for TraceRecord {
+    fn from(event: TraceEvent) -> Self {
+        let location = SourceLocation::unknown(event.source_line().unwrap_or(0));
+        Self { event, location }
+    }
+}
+
+impl TraceEvent {
+    pub fn at(self, location: &SourceLocation, detail: TraceDetail) -> TraceRecord {
+        let location = location.at_line(self.source_line().unwrap_or(location.line()));
+        TraceRecord {
+            event: self,
+            location: location.for_trace(detail.includes_variable_values()),
+        }
+    }
+
+    fn source_line(&self) -> Option<usize> {
+        match self {
+            Self::VariableAssigned { line, .. } | Self::VariableUnset { line, .. } => *line,
+            Self::ConditionEvaluated { condition_line, .. } => Some(*condition_line),
+            Self::RecipeEvaluated { line, .. }
+            | Self::ExternalCommandExecuting { line, .. }
+            | Self::HeaderOperation { line, .. }
+            | Self::Log { line, .. }
+            | Self::RcFile { line, .. } => Some(*line),
+            Self::Delivery { recipe_line, .. }
+            | Self::ExternalCommand { recipe_line, .. }
+            | Self::ExternalFilterReplaced { recipe_line, .. }
+            | Self::DeliveryAbstract { recipe_line, .. } => Some(*recipe_line),
+            Self::SessionStarted { .. } | Self::LastFolderUpdated => None,
+        }
+    }
+}
 
 pub const MAX_TRACE_EVENT_SIZE: usize = 1024;
 pub const MAX_TRACE_EVENTS: usize = 16 * 1024;
@@ -205,7 +278,12 @@ pub trait TraceSink {
         TraceDetail::Metadata
     }
 
-    fn record(&mut self, event: TraceEvent);
+    fn record(&mut self, event: impl Into<TraceRecord>);
+
+    fn record_at(&mut self, location: &SourceLocation, event: TraceEvent) {
+        let detail = self.detail();
+        self.record(event.at(location, detail));
+    }
 
     fn set_verbose(&mut self, _enabled: bool) {}
 
@@ -233,12 +311,22 @@ impl LogAbstractMode {
     }
 }
 
-pub fn record_external_command(line: usize, command: &str, trace: &mut impl TraceSink) {
+pub fn record_external_command(
+    location: &SourceLocation,
+    command: &str,
+    trace: &mut impl TraceSink,
+) {
     let command = trace
         .detail()
         .includes_variable_values()
         .then(|| TraceValue::new(command.as_bytes()));
-    trace.record(TraceEvent::ExternalCommandExecuting { line, command });
+    trace.record_at(
+        location,
+        TraceEvent::ExternalCommandExecuting {
+            line: location.line(),
+            command,
+        },
+    );
 }
 
 pub fn record_session_start(trace: &mut impl TraceSink) {
@@ -249,7 +337,11 @@ pub fn record_session_start(trace: &mut impl TraceSink) {
     });
 }
 
-pub fn record_header_action(action: &HeaderAction, trace: &mut impl TraceSink) {
+pub fn record_header_action(
+    action: &HeaderAction,
+    source: &SourceLocation,
+    trace: &mut impl TraceSink,
+) {
     for operation in &action.operations {
         let (line, kind, name, argument, extraction_mode) = match operation {
             HeaderOperation::Remove { line, name } => {
@@ -288,13 +380,16 @@ pub fn record_header_action(action: &HeaderAction, trace: &mut impl TraceSink) {
         // The parser has already bounded and validated header and variable
         // names. Retain only those names here; header values must never enter
         // a trace event, including in high-detail mode.
-        trace.record(TraceEvent::HeaderOperation {
-            line,
-            kind,
-            name: TraceName(name.clone()),
-            argument: argument.map(|name| TraceName(name.to_owned())),
-            extraction_mode,
-        });
+        trace.record_at(
+            &source.at_line(line),
+            TraceEvent::HeaderOperation {
+                line,
+                kind,
+                name: TraceName(name.clone()),
+                argument: argument.map(|name| TraceName(name.to_owned())),
+                extraction_mode,
+            },
+        );
     }
 }
 
@@ -315,7 +410,7 @@ impl TraceDetail {
 pub struct NoTrace;
 
 impl TraceSink for NoTrace {
-    fn record(&mut self, _: TraceEvent) {}
+    fn record(&mut self, _: impl Into<TraceRecord>) {}
 }
 
 #[derive(Debug)]
@@ -328,7 +423,7 @@ pub struct BoundedTraceWriter<W> {
     format: TraceFormat,
     verbose: bool,
     abstract_mode: LogAbstractMode,
-    last_published: Option<(usize, DestinationKind, Option<TraceValue>)>,
+    last_published: Option<TraceRecord>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -423,18 +518,30 @@ impl<W: Write> TraceSink for BoundedTraceWriter<W> {
         self.detail
     }
 
-    fn record(&mut self, event: TraceEvent) {
+    fn record(&mut self, record: impl Into<TraceRecord>) {
+        let mut record = record.into();
+        record.location = record
+            .location
+            .for_trace(self.detail.includes_variable_values());
+        let event = &record.event;
         if let TraceEvent::Delivery {
             recipe_line,
             destination,
             stage: DeliveryStage::Published,
             path,
-        } = &event
+        } = event
         {
             match self.abstract_mode {
                 LogAbstractMode::No => {}
                 LogAbstractMode::Yes => {
-                    self.last_published = Some((*recipe_line, *destination, path.clone()));
+                    self.last_published = Some(TraceRecord {
+                        event: TraceEvent::DeliveryAbstract {
+                            recipe_line: *recipe_line,
+                            destination: *destination,
+                            path: path.clone(),
+                        },
+                        location: record.location.clone(),
+                    });
                 }
                 LogAbstractMode::All => {
                     let abstract_event = TraceEvent::DeliveryAbstract {
@@ -442,14 +549,17 @@ impl<W: Write> TraceSink for BoundedTraceWriter<W> {
                         destination: *destination,
                         path: path.clone(),
                     };
-                    self.write_event(&abstract_event);
+                    self.write_event(&TraceRecord {
+                        event: abstract_event,
+                        location: record.location.clone(),
+                    });
                 }
             }
         }
         if !self.verbose && !matches!(event, TraceEvent::Log { .. }) {
             return;
         }
-        self.write_event(&event);
+        self.write_event(&record);
     }
 
     fn set_verbose(&mut self, enabled: bool) {
@@ -465,18 +575,15 @@ impl<W: Write> TraceSink for BoundedTraceWriter<W> {
         if self.abstract_mode != LogAbstractMode::Yes {
             return;
         }
-        if let Some((recipe_line, destination, path)) = self.last_published.take() {
-            self.write_event(&TraceEvent::DeliveryAbstract {
-                recipe_line,
-                destination,
-                path,
-            });
+        if let Some(record) = self.last_published.take() {
+            self.write_event(&record);
         }
     }
 }
 
 impl<W: Write> BoundedTraceWriter<W> {
-    fn write_event(&mut self, event: &TraceEvent) {
+    fn write_event(&mut self, record: &TraceRecord) {
+        let event = &record.event;
         if self.stopped.is_some() {
             return;
         }
@@ -501,6 +608,9 @@ impl<W: Write> BoundedTraceWriter<W> {
             TraceFormat::Json => render_json_event(&mut rendered, event),
             TraceFormat::Text => render_human_event(&mut rendered, event),
         };
+        let formatted = formatted.and_then(|()| {
+            render_source_location(&mut rendered, self.format, &record.location, event)
+        });
         let needs_record_newline =
             self.format == TraceFormat::Json || !matches!(event, TraceEvent::Log { .. });
         if formatted.is_err() || needs_record_newline && rendered.write_char('\n').is_err() {
@@ -569,8 +679,69 @@ impl fmt::Write for BoundedText {
     }
 }
 
+fn render_source_location(
+    output: &mut BoundedText,
+    format: TraceFormat,
+    location: &SourceLocation,
+    event: &TraceEvent,
+) -> fmt::Result {
+    let Some(file) = location.file() else {
+        return Ok(());
+    };
+
+    match format {
+        TraceFormat::Json => {
+            // Every renderer finishes a JSON object. Extend that same bounded
+            // buffer so source and event cannot become separate log records.
+            if output.bytes.pop() != Some('}') {
+                return Err(fmt::Error);
+            }
+
+            output.write_str(",\"rc_file\":")?;
+            render_json_string(output, file.as_bytes())?;
+
+            if location.is_truncated() {
+                output.write_str(",\"rc_file_truncated\":true")?;
+            }
+
+            output.write_char('}')
+        }
+        TraceFormat::Text if !matches!(event, TraceEvent::Log { .. }) => {
+            write!(output, " [rc \"{}\"", EscapedBytes::new(file.as_bytes()))?;
+
+            if location.is_truncated() {
+                output.write_str(" [truncated]")?;
+            }
+
+            write!(output, ":{}]", location.line())
+        }
+        TraceFormat::Text => Ok(()),
+    }
+}
+
 fn render_json_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
     match event {
+        TraceEvent::RcFile {
+            line,
+            statement,
+            stage,
+            target,
+        } => {
+            write!(
+                output,
+                "{{\"event\":\"rc-file\",\"line\":{line},\"statement\":\"{}\",\"stage\":\"{}\"",
+                statement.name(),
+                stage.name()
+            )?;
+
+            if let Some(target) = target {
+                output.write_str(",\"target\":")?;
+                render_json_string(output, target.as_bytes())?;
+                write!(output, ",\"target_truncated\":{}", target.was_truncated())?;
+            }
+
+            output.write_char('}')
+        }
         TraceEvent::SessionStarted { pid, timestamp } => {
             write!(
                 output,
@@ -769,6 +940,34 @@ fn render_json_string(output: &mut impl fmt::Write, value: &[u8]) -> fmt::Result
 
 fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::Result {
     match event {
+        TraceEvent::RcFile {
+            line,
+            statement,
+            stage,
+            target,
+        } => {
+            write!(
+                output,
+                "procmail-rs: {} at line {line}: {}",
+                statement.name(),
+                stage.name()
+            )?;
+
+            if let Some(target) = target {
+                write!(
+                    output,
+                    " \"{}\"{}",
+                    EscapedBytes::new(target.as_bytes()),
+                    if target.was_truncated() {
+                        " [truncated]"
+                    } else {
+                        ""
+                    }
+                )?;
+            }
+
+            Ok(())
+        }
         TraceEvent::SessionStarted { pid, timestamp } => {
             write!(output, "procmail-rs: [{pid}] {timestamp}")
         }
@@ -1117,13 +1316,13 @@ fn render_external_stage(output: &mut impl fmt::Write, stage: ExternalCommandSta
 
 #[derive(Debug, Default)]
 pub struct MemoryTrace {
-    events: Vec<TraceEvent>,
+    records: Vec<TraceRecord>,
     truncated: bool,
 }
 
 impl MemoryTrace {
-    pub fn events(&self) -> &[TraceEvent] {
-        &self.events
+    pub fn records(&self) -> &[TraceRecord] {
+        &self.records
     }
 
     pub fn was_truncated(&self) -> bool {
@@ -1132,12 +1331,16 @@ impl MemoryTrace {
 }
 
 impl TraceSink for MemoryTrace {
-    fn record(&mut self, event: TraceEvent) {
+    fn record(&mut self, event: impl Into<TraceRecord>) {
         // Test traces still consume configuration-controlled events. Stop at
         // a fixed count instead of allowing a forgotten test sink to grow
         // without a limit during adversarial or fuzz-style execution.
-        if self.events.len() < MAX_MEMORY_TRACE_EVENTS {
-            self.events.push(event);
+        if self.records.len() < MAX_MEMORY_TRACE_EVENTS {
+            let mut record = event.into();
+            record.location = record
+                .location
+                .for_trace(self.detail().includes_variable_values());
+            self.records.push(record);
         } else {
             self.truncated = true;
         }
@@ -1146,12 +1349,18 @@ impl TraceSink for MemoryTrace {
 
 /// One filtering event in execution order.
 ///
-/// Events intentionally contain no message bytes, variable values, regular
-/// expression text, command arguments, or destination paths. A later renderer
-/// can therefore format the default trace without first trying to redact
-/// hostile or sensitive values.
+/// Metadata events omit values, expressions, commands, and paths before they
+/// reach a sink. Explicit values detail uses bounded prefixes, but never
+/// includes message bodies or extracted header values. Rc source positions
+/// belong to the enclosing `TraceRecord` and follow the same detail policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceEvent {
+    RcFile {
+        line: usize,
+        statement: RcFileStatement,
+        stage: RcFileStage,
+        target: Option<TraceValue>,
+    },
     SessionStarted {
         pid: u32,
         timestamp: String,

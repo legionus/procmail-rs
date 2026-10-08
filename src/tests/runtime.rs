@@ -104,14 +104,19 @@ fn traced_assignment_preserves_binary_storage_and_metadata_privacy() {
     runtime.set_bytes_with_trace(
         "VALUE".to_owned(),
         b"secret\xff".to_vec(),
-        Some(7),
+        Some(crate::source_location::SourceLocation::unknown(7)),
         TraceVariableSource::RcFile,
         &mut trace,
     );
 
     assert_eq!(runtime.get_bytes("VALUE"), Some(&b"secret\xff"[..]));
     assert!(matches!(
-        trace.events(),
+        trace
+            .records()
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>()
+            .as_slice(),
         [TraceEvent::VariableAssigned {
             line: Some(7),
             source: TraceVariableSource::RcFile,
@@ -259,7 +264,7 @@ fn failure_before_publication_does_not_change_last_folder() {
         .unwrap();
 
     assert_eq!(runtime.last_folder(), Some("previous"));
-    assert!(trace.events().is_empty());
+    assert!(trace.records().is_empty());
 }
 
 #[test]

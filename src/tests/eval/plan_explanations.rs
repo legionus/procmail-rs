@@ -101,7 +101,7 @@ fn forwards_evaluation_events_to_the_selected_sink() {
 
     assert!(matches!(result, HeaderEvaluation::Decided(_)));
     assert_eq!(
-        trace.events(),
+        trace.records().iter().map(|record| record.event.clone()).collect::<Vec<_>>().as_slice(),
         [
             TraceEvent::VariableAssigned {
                 line: Some(1),

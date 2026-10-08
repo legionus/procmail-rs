@@ -58,7 +58,7 @@ impl<T: TraceSink> TraceSink for SharedTrace<'_, T> {
             .detail()
     }
 
-    fn record(&mut self, event: TraceEvent) {
+    fn record(&mut self, event: impl Into<procmail_rs::trace::TraceRecord>) {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1154,12 +1154,15 @@ fn record_delivery(destination: &Destination, stage: DeliveryStage, trace: &mut 
         .detail()
         .includes_variable_values()
         .then(|| procmail_rs::trace::TraceValue::new(destination.path().as_bytes()));
-    trace.record(TraceEvent::Delivery {
-        recipe_line: destination.line(),
-        destination: destination_kind,
-        stage,
-        path,
-    });
+    trace.record_at(
+        destination.location(),
+        TraceEvent::Delivery {
+            recipe_line: destination.line(),
+            destination: destination_kind,
+            stage,
+            path,
+        },
+    );
 }
 
 pub(super) fn validate_maildir_path(path: &Path) -> Result<(), String> {

@@ -191,7 +191,12 @@ impl CompiledNode {
     ) -> Result<bool, EvalError> {
         for (index, condition) in self.conditions.iter().enumerate() {
             let matched = condition.matches_complete(message, runtime)?;
-            condition.trace_result(self.line, index, PartialMatch::from_bool(matched), trace);
+            condition.trace_result(
+                self.location.line(),
+                index,
+                PartialMatch::from_bool(matched),
+                trace,
+            );
             if !matched {
                 return Ok(false);
             }
@@ -231,7 +236,7 @@ fn execute_statements(
         match statement {
             CompiledStatement::CommandAssignment(assignment) => {
                 return Err(EvalError::ExternalActionUnsupported {
-                    line: assignment.line,
+                    line: assignment.location.line(),
                 });
             }
             CompiledStatement::Assignment(assignment) => {
@@ -270,7 +275,12 @@ fn execute_unset(
         AssignmentTarget::LogAbstract => trace.set_log_abstract(crate::trace::LogAbstractMode::No),
         _ => {}
     }
-    runtime.remove_with_trace(unset.unset.name.clone(), unset.line, unset.source, trace);
+    runtime.remove_with_trace(
+        unset.unset.name.clone(),
+        unset.location.clone(),
+        unset.source,
+        trace,
+    );
 }
 
 fn execute_assignment(
@@ -287,7 +297,7 @@ fn execute_assignment(
         target: assignment.assignment.target,
         value: value.into_bytes(),
         source_line: assignment.assignment.line,
-        trace_line: assignment.line,
+        trace_location: assignment.location.clone(),
         source: assignment.source,
     }
     .apply(runtime, trace)
@@ -298,7 +308,7 @@ struct ResolvedAssignment {
     target: AssignmentTarget,
     value: Vec<u8>,
     source_line: usize,
-    trace_line: Option<usize>,
+    trace_location: Option<crate::source_location::SourceLocation>,
     source: TraceVariableSource,
 }
 
@@ -309,10 +319,14 @@ impl ResolvedAssignment {
         trace: &mut impl TraceSink,
     ) -> Result<(), EvalError> {
         if self.target == AssignmentTarget::Log {
-            trace.record(TraceEvent::Log {
+            let event = TraceEvent::Log {
                 line: self.source_line,
                 value: crate::trace::TraceValue::new(&self.value),
-            });
+            };
+            match self.trace_location {
+                Some(location) => trace.record_at(&location, event),
+                None => trace.record(event),
+            }
             runtime.set_bytes(self.name, self.value);
             return Ok(());
         }
@@ -359,7 +373,7 @@ impl ResolvedAssignment {
             runtime.set_bytes_with_trace(
                 self.name,
                 self.value,
-                self.trace_line,
+                self.trace_location,
                 self.source,
                 trace,
             );
@@ -367,7 +381,13 @@ impl ResolvedAssignment {
             runtime.shift_positionals(amount);
             return Ok(());
         }
-        runtime.set_bytes_with_trace(self.name, self.value, self.trace_line, self.source, trace);
+        runtime.set_bytes_with_trace(
+            self.name,
+            self.value,
+            self.trace_location,
+            self.source,
+            trace,
+        );
         Ok(())
     }
 }
@@ -409,7 +429,7 @@ impl ExecutionPlan {
                         target: AssignmentTarget::User,
                         expansion: None,
                     },
-                    line: None,
+                    location: None,
                     source: match source {
                         crate::config::VariableSource::RcFile => TraceVariableSource::RcFile,
                         crate::config::VariableSource::CommandLine => {
@@ -424,7 +444,11 @@ impl ExecutionPlan {
                 })
             })
             .collect::<Vec<_>>();
-        let root = CompiledSequence::compile(&config.statements, &mut initial_statements);
+        let root = CompiledSequence::compile(
+            &config.statements,
+            &mut initial_statements,
+            &config.source_location,
+        );
 
         Self {
             root,

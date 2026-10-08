@@ -254,8 +254,9 @@ fn long_chain_reuses_the_preceding_condition_result() {
     assert_eq!(destinations(&delivery).len(), 66);
     assert_eq!(
         trace
-            .events()
+            .records()
             .iter()
+            .map(|record| &record.event)
             .filter(|event| matches!(event, TraceEvent::ConditionEvaluated { .. }))
             .count(),
         1

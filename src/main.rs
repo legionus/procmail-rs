@@ -10,9 +10,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use procmail_rs::config::{
-    self, MAX_COMMAND_LINE_VARIABLES, PositionalArguments, SuppliedVariable,
-};
+use procmail_rs::config::{MAX_COMMAND_LINE_VARIABLES, PositionalArguments, SuppliedVariable};
 use procmail_rs::configuration;
 use procmail_rs::delivery::{DeliveryFailure, DeliveryFailureClass};
 use procmail_rs::eval::{
@@ -24,9 +22,7 @@ use procmail_rs::message::Message;
 use procmail_rs::rc_file::{LoadedRcFile, RcFileLoader};
 use procmail_rs::runtime::RuntimeVariables;
 use procmail_rs::signal_state::{self, InterruptibleReader, ReceivedSignal};
-use procmail_rs::trace::{
-    BoundedTraceWriter, NoTrace, TraceDetail, TraceEvent, TraceFormat, TraceSink,
-};
+use procmail_rs::trace::{BoundedTraceWriter, NoTrace, TraceDetail, TraceFormat, TraceSink};
 use procmail_rs::user_identity::UserIdentity;
 
 mod command_log;
@@ -94,7 +90,7 @@ impl TraceSink for FilterTrace {
         }
     }
 
-    fn record(&mut self, event: TraceEvent) {
+    fn record(&mut self, event: impl Into<procmail_rs::trace::TraceRecord>) {
         match self {
             Self::Disabled(trace) => trace.record(event),
             Self::Enabled(trace) => trace.record(event),
@@ -248,8 +244,9 @@ fn run() -> Result<u8, OperationalError> {
     supplied.extend(command.supplied.iter().cloned());
     let (path, mut rc_loader, root_rc) =
         load_root_config(command.config.as_deref(), identity.home())?;
-    let config = config::parse(root_rc.source())
-        .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?
+    let config = root_rc
+        .parse()
+        .map_err(|error| OperationalError::Configuration(error.to_string()))?
         .expand_with_arguments(&supplied, &command.arguments)
         .map_err(|error| OperationalError::Configuration(format!("{}:{error}", path.display())))?;
     rc_loader

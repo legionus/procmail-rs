@@ -1157,7 +1157,7 @@ fn check_recursively_validates_statically_resolved_includes() {
 
     assert_eq!(output.status.code(), Some(78), "{:?}", output.stderr);
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("invalid rc syntax"), "{stderr}");
+    assert!(stderr.contains("malformed.rc:line 2:"), "{stderr}");
     assert!(stderr.contains("invalid regular expression"), "{stderr}");
     fs::remove_dir_all(base).unwrap();
 }

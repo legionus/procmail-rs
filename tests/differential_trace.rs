@@ -52,8 +52,9 @@ fn header_fallback_matches_reference_procmail_decisions() {
     // Source lines and patterns remain covered by native trace tests because
     // procmail's text log does not expose equivalent structured fields.
     let actual = trace
-        .events()
+        .records()
         .iter()
+        .map(|record| &record.event)
         .filter_map(common_event)
         .collect::<Vec<_>>()
         .join("\n")

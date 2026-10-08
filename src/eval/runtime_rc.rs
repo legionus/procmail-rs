@@ -10,6 +10,9 @@ use super::{CompiledSequence, EvalError};
 use crate::config::RcFileExpression;
 use crate::rc_file::{MAX_RC_TRANSITIONS, RuntimeRcLoader};
 use crate::runtime::RuntimeVariables;
+use crate::trace::{
+    RcFileStage, RcFileStatement as RuntimeRcStatement, TraceEvent, TraceSink, TraceValue,
+};
 
 const MAX_RC_DIAGNOSTIC_LEN: usize = 1024;
 pub const MAX_RUNTIME_RC_WARNINGS: usize = 128;
@@ -87,13 +90,14 @@ impl CompiledInclude {
     }
 
     pub(super) fn line(&self) -> usize {
-        self.expression.line
+        self.expression.location.line()
     }
 
     pub(super) fn enter<'state>(
         &self,
         runtime: &RuntimeVariables,
         context: RcExecutionContext<'state>,
+        trace: &mut impl TraceSink,
     ) -> Result<EnteredRuntimeRc<'state>, EvalError> {
         enter_runtime_rc(
             &self.expression,
@@ -101,6 +105,7 @@ impl CompiledInclude {
             RuntimeRcStatement::Include,
             runtime,
             context,
+            trace,
         )
     }
 }
@@ -120,13 +125,14 @@ impl CompiledSwitch {
     }
 
     pub(super) fn line(&self) -> usize {
-        self.expression.line
+        self.expression.location.line()
     }
 
     pub(super) fn enter<'state>(
         &self,
         runtime: &RuntimeVariables,
         context: RcExecutionContext<'state>,
+        trace: &mut impl TraceSink,
     ) -> Result<EnteredRuntimeRc<'state>, EvalError> {
         enter_runtime_rc(
             &self.expression,
@@ -134,6 +140,7 @@ impl CompiledSwitch {
             RuntimeRcStatement::Switch,
             runtime,
             context,
+            trace,
         )
     }
 }
@@ -172,21 +179,6 @@ pub(super) enum LoadedRuntimeRc {
         path: String,
         sequence: Box<CompiledSequence>,
     },
-}
-
-#[derive(Clone, Copy)]
-enum RuntimeRcStatement {
-    Include,
-    Switch,
-}
-
-impl RuntimeRcStatement {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Include => "INCLUDERC",
-            Self::Switch => "SWITCHRC",
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -287,7 +279,7 @@ fn load_runtime_rc(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_mut()
         .ok_or(EvalError::RuntimeRcLoaderUnavailable {
-            line: expression.line,
+            line: expression.location.line(),
             statement: statement_name,
         })?
         .load_runtime_config(expression, runtime, child_context.depth);
@@ -296,14 +288,14 @@ fn load_runtime_rc(
         Err(error) if error.is_resource_limit() => {
             return Err(EvalError::RuntimeRc(format!(
                 "line {}: {statement_name} resource limit: {}",
-                expression.line,
+                expression.location.line(),
                 error.safe_message()
             )));
         }
         Err(error) => {
             let mut diagnostic = format!(
                 "line {}: {statement_name} failed: {}",
-                expression.line,
+                expression.location.line(),
                 error.safe_message()
             );
             truncate_utf8(&mut diagnostic, MAX_RC_DIAGNOSTIC_LEN);
@@ -339,7 +331,9 @@ fn load_runtime_rc(
         .ok_or_else(|| EvalError::RuntimeRc("runtime rc path is not valid UTF-8".to_owned()))?;
     let path = path.to_owned();
     let mut preceding = Vec::new();
-    let sequence = CompiledSequence::compile(&loaded.into_config().statements, &mut preceding);
+    let config = loaded.into_config();
+    let sequence =
+        CompiledSequence::compile(&config.statements, &mut preceding, &config.source_location);
     let requirements = sequence.requirements();
     if requirements.needs_body_contents {
         context
@@ -367,8 +361,37 @@ fn enter_runtime_rc<'state>(
     statement: RuntimeRcStatement,
     runtime: &RuntimeVariables,
     context: RcExecutionContext<'state>,
+    trace: &mut impl TraceSink,
 ) -> Result<EnteredRuntimeRc<'state>, EvalError> {
-    let loaded = load_runtime_rc(expression, loaded_states, statement, runtime, context)?;
+    // Report the attempt even when loading fails. Bind it to the calling
+    // statement, not the loaded tree, and retain only typed status and an
+    // explicitly enabled bounded path; loader errors can contain private text.
+    let location = &expression.location;
+    let result = load_runtime_rc(expression, loaded_states, statement, runtime, context);
+    let (stage, target) = match &result {
+        Ok(loaded) => match loaded.as_ref() {
+            LoadedRuntimeRc::Sequence { path, .. } => (
+                RcFileStage::Loaded,
+                trace
+                    .detail()
+                    .includes_variable_values()
+                    .then(|| TraceValue::new(path.as_bytes())),
+            ),
+            LoadedRuntimeRc::Empty => (RcFileStage::Empty, None),
+            LoadedRuntimeRc::Failed => (RcFileStage::Failed, None),
+        },
+        Err(_) => (RcFileStage::Failed, None),
+    };
+    trace.record_at(
+        location,
+        TraceEvent::RcFile {
+            line: location.line(),
+            statement,
+            stage,
+            target,
+        },
+    );
+    let loaded = result?;
 
     // Compute the child context at the same boundary that owns the loaded
     // tree. This keeps depth checking identical in every evaluation mode and

@@ -87,6 +87,7 @@ pub const HARD_MAX_RC_STATEMENTS: usize = 65_536;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub statements: Vec<Statement>,
+    pub(crate) source_location: crate::source_location::SourceLocation,
     pub(crate) initial_variables: Vec<(String, String, VariableSource)>,
     pub(crate) parse_counts: RcParseCounts,
     pub(crate) initial_linebuf: usize,
@@ -298,7 +299,7 @@ pub struct CommandAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RcFileExpression {
-    pub line: usize,
+    pub location: crate::source_location::SourceLocation,
     pub value: String,
     pub(crate) expansion: Option<ShellExpression>,
 }
@@ -787,6 +788,24 @@ pub enum DestinationKind {
 }
 
 impl Destination {
+    fn expression(&self) -> &PathExpression {
+        match self {
+            Self::Maildir(expression)
+            | Self::Mbox(expression)
+            | Self::File(expression)
+            | Self::Discard(expression) => expression,
+        }
+    }
+
+    fn expression_mut(&mut self) -> &mut PathExpression {
+        match self {
+            Self::Maildir(expression)
+            | Self::Mbox(expression)
+            | Self::File(expression)
+            | Self::Discard(expression) => expression,
+        }
+    }
+
     pub fn kind(&self) -> DestinationKind {
         match self {
             Self::Maildir(_) => DestinationKind::Maildir,
@@ -812,7 +831,7 @@ impl Destination {
 pub struct PathExpression {
     pub(crate) source: String,
     pub(crate) base: Option<String>,
-    pub(crate) line: usize,
+    pub(crate) location: crate::source_location::SourceLocation,
     pub(crate) runtime_dependent: bool,
     pub(crate) runtime_base: bool,
     pub(crate) typed_destination: bool,
@@ -832,7 +851,7 @@ impl From<&str> for PathExpression {
         Self {
             source: source.to_owned(),
             base: None,
-            line: 0,
+            location: crate::source_location::SourceLocation::default(),
             runtime_dependent: false,
             runtime_base: false,
             typed_destination: false,
@@ -846,7 +865,7 @@ impl From<String> for PathExpression {
         Self {
             source,
             base: None,
-            line: 0,
+            location: crate::source_location::SourceLocation::default(),
             runtime_dependent: false,
             runtime_base: false,
             typed_destination: false,
@@ -856,12 +875,52 @@ impl From<String> for PathExpression {
 }
 
 impl PathExpression {
+    pub fn location(&self) -> &crate::source_location::SourceLocation {
+        &self.location
+    }
+
     pub fn source(&self) -> &str {
         &self.source
     }
 
     pub fn line(&self) -> usize {
-        self.line
+        self.location.line()
+    }
+}
+
+impl Config {
+    pub(crate) fn set_source_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let source = crate::source_location::SourceLocation::for_file(path, 0)?;
+
+        // Destinations outlive the file that selected them. Bind their source
+        // before expansion so publication never consults a different active rc
+        // file, including after an include returns or a copy branch runs.
+        fn bind(statements: &mut [Statement], source: &crate::source_location::SourceLocation) {
+            for statement in statements {
+                if let Statement::Include(expression) | Statement::Switch(expression) = statement {
+                    expression.location = source.at_line(expression.location.line());
+                }
+
+                if let Statement::Recipe(recipe) = statement {
+                    if let Some(lock) = &mut recipe.lock {
+                        lock.location = source.at_line(lock.location.line());
+                    }
+
+                    match &mut recipe.action {
+                        RecipeAction::Deliver(destination) => {
+                            let expression = destination.expression_mut();
+                            expression.location = source.at_line(expression.location.line());
+                        }
+                        RecipeAction::Block(statements) => bind(statements, source),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        bind(&mut self.statements, &source);
+        self.source_location = source;
+        Ok(())
     }
 }
 

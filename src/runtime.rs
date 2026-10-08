@@ -158,7 +158,7 @@ impl RuntimeVariables {
         &mut self,
         name: String,
         value: Vec<u8>,
-        line: Option<usize>,
+        location: Option<crate::source_location::SourceLocation>,
         source: TraceVariableSource,
         trace: &mut impl TraceSink,
     ) {
@@ -171,7 +171,7 @@ impl RuntimeVariables {
                 .includes_variable_values()
                 .then(|| TraceValue::new(&value));
             TraceEvent::VariableAssigned {
-                line,
+                line: location.as_ref().map(|location| location.line()),
                 name,
                 source,
                 value,
@@ -179,13 +179,17 @@ impl RuntimeVariables {
         });
         self.set_bytes(name, value);
         if let Some(event) = event {
-            trace.record(event);
+            match location {
+                Some(location) => trace.record_at(&location, event),
+                None => trace.record(event),
+            }
         }
     }
 
     pub(crate) fn apply_header_extractions(
         &mut self,
         extractions: Vec<crate::header_edit::HeaderExtraction>,
+        source: &crate::source_location::SourceLocation,
         trace: &mut impl TraceSink,
     ) {
         for extraction in extractions {
@@ -196,12 +200,15 @@ impl RuntimeVariables {
             // variable. Record the assignment itself, but never copy those
             // bytes into diagnostics in either trace detail mode.
             if let Some(name) = name {
-                trace.record(TraceEvent::VariableAssigned {
-                    line: Some(extraction.line),
-                    name,
-                    source: TraceVariableSource::RcFile,
-                    value: None,
-                });
+                trace.record_at(
+                    &source.at_line(extraction.line),
+                    TraceEvent::VariableAssigned {
+                        line: Some(extraction.line),
+                        name,
+                        source: TraceVariableSource::RcFile,
+                        value: None,
+                    },
+                );
             }
         }
     }
@@ -271,16 +278,23 @@ impl RuntimeVariables {
     pub(crate) fn remove_with_trace(
         &mut self,
         name: String,
-        line: Option<usize>,
+        location: Option<crate::source_location::SourceLocation>,
         source: TraceVariableSource,
         trace: &mut impl TraceSink,
     ) {
         let event = TraceName::new(&name)
             .ok()
-            .map(|name| TraceEvent::VariableUnset { line, name, source });
+            .map(|name| TraceEvent::VariableUnset {
+                line: location.as_ref().map(|location| location.line()),
+                name,
+                source,
+            });
         self.remove(&name);
         if let Some(event) = event {
-            trace.record(event);
+            match location {
+                Some(location) => trace.record_at(&location, event),
+                None => trace.record(event),
+            }
         }
     }
 

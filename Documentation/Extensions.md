@@ -131,6 +131,29 @@ See [Delivery.md](Delivery.md) for the filesystem consequences of each mode.
 delivery, locks, and `TRAP`. Text traces are intended for interactive diagnosis;
 JSON traces are intended for tools.
 
+Rc events carry the source file that owns the statement, including statements
+loaded through `INCLUDERC` and `SWITCHRC`. Returning from an include, switching
+files, and running a copied block do not change the source of an already selected
+delivery. The default metadata detail omits filenames. With `LOGDETAIL=values`
+or dry-run `--detail=values`, text records append the rc filename and line; JSON
+records add `rc_file`. Filenames use the same byte escaping and 256-byte prefix
+limit as other detailed values. Longer filenames have a text `[truncated]`
+marker or JSON `rc_file_truncated: true`.
+
+For example, when the root rc file contains `INCLUDERC=lists.rc` at line 5,
+and `lists.rc` sets `BOX` at line 2:
+
+```text
+procmail-rs: INCLUDERC at line 5: loaded "lists.rc" [rc "root.rc":5]
+procmail-rs: Assigning at line 2 "BOX=lists" [rc "lists.rc":2]
+```
+
+Include/switch records report `loaded`, `empty`, or `failed`. Their source is
+the calling statement; following events identify the loaded file. A delivery
+position refers to its destination action line. A final `LOGABSTRACT` record
+retains that same source. Literal text written by `LOG=value` is not decorated
+with a source annotation.
+
 ```text
 procmail-rs filter --dry-run --detail values \
     --config ~/.procmailrc <message.eml

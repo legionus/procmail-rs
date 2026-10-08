@@ -49,6 +49,7 @@ pub(crate) fn parse_with_state(input: &str, state: &mut ParseBudget) -> Result<C
 
     Ok(Config {
         statements,
+        source_location: crate::source_location::SourceLocation::default(),
         initial_variables: Vec::new(),
         parse_counts: state.counts_since(initial)?,
         initial_linebuf,
@@ -281,13 +282,13 @@ fn parse_statements(
             }
             let statement = if assignment.name == "INCLUDERC" {
                 Statement::Include(RcFileExpression {
-                    line: assignment.line,
+                    location: crate::source_location::SourceLocation::unknown(assignment.line),
                     value: assignment.value,
                     expansion: assignment.expansion,
                 })
             } else if assignment.name == "SWITCHRC" {
                 Statement::Switch(RcFileExpression {
-                    line: assignment.line,
+                    location: crate::source_location::SourceLocation::unknown(assignment.line),
                     value: assignment.value,
                     expansion: assignment.expansion,
                 })
@@ -809,7 +810,7 @@ fn destination_path_expression(
     Ok(PathExpression {
         source,
         base: None,
-        line,
+        location: crate::source_location::SourceLocation::unknown(line),
         runtime_dependent: expansion.is_some(),
         runtime_base: false,
         typed_destination,

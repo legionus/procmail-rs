@@ -352,16 +352,22 @@ impl CompiledSequence {
             let has_error_handler = self.has_error_handler(index);
 
             let control = if conditions_matched {
-                context.trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Selected,
-                });
+                context.trace.record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Selected,
+                    },
+                );
                 recipe.plan_action(has_error_handler, context)?
             } else {
-                context.trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Skipped,
-                });
+                context.trace.record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Skipped,
+                    },
+                );
                 SequenceControl::Continue
             };
             state.record(
@@ -413,10 +419,13 @@ impl CompiledSequence {
                 (PartialMatch::False, Vec::new())
             };
             if matched == PartialMatch::Deferred {
-                context.trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Deferred,
-                });
+                context.trace.record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Deferred,
+                    },
+                );
                 context.planning.frames.push(ContinuationFrame {
                     recipe_index: index,
                     state,
@@ -431,10 +440,13 @@ impl CompiledSequence {
             let else_handled = recipe.else_handled(state, conditions_matched);
             let has_error_handler = self.has_error_handler(index);
             if conditions_matched && recipe.delivery_defers_header(context.capture.is_some()) {
-                context.trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Deferred,
-                });
+                context.trace.record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Deferred,
+                    },
+                );
                 context.planning.frames.push(ContinuationFrame {
                     recipe_index: index,
                     state,
@@ -447,15 +459,19 @@ impl CompiledSequence {
             let mut action_execution = ActionExecution::NotAttempted;
             let control = if conditions_matched {
                 action_execution = ActionExecution::Succeeded;
-                context.trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Selected,
-                });
+                context.trace.record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Selected,
+                    },
+                );
                 match &recipe.action {
                     CompiledAction::Pipe { .. } => {
-                        return Err(
-                            EvalError::ExternalActionUnsupported { line: recipe.line }.into()
-                        );
+                        return Err(EvalError::ExternalActionUnsupported {
+                            line: recipe.location.line(),
+                        }
+                        .into());
                     }
                     CompiledAction::Capture { action, options } => {
                         let limit = super::ordered::active_command_value_limit::<E>(
@@ -463,12 +479,13 @@ impl CompiledSequence {
                             action.target,
                             action.line,
                         )?;
-                        let executor = context
-                            .capture
-                            .as_deref_mut()
-                            .ok_or(EvalError::ExternalActionUnsupported { line: recipe.line })?;
+                        let executor = context.capture.as_deref_mut().ok_or(
+                            EvalError::ExternalActionUnsupported {
+                                line: recipe.location.line(),
+                            },
+                        )?;
                         crate::trace::record_external_command(
-                            action.line,
+                            &recipe.location.at_line(action.line),
                             &action.command,
                             context.trace,
                         );
@@ -491,7 +508,7 @@ impl CompiledSequence {
                                 context.runtime.set_bytes_with_trace(
                                     action.name.clone(),
                                     value,
-                                    Some(action.line),
+                                    Some(recipe.location.at_line(action.line)),
                                     TraceVariableSource::RcFile,
                                     context.trace,
                                 );
@@ -519,15 +536,21 @@ impl CompiledSequence {
                             context.head.limits(),
                         )
                         .map_err(|error| EvalError::HeaderEdit {
-                            line: recipe.line,
+                            line: recipe.location.line(),
                             message: error.to_string(),
                         })?;
                         let (edited, extractions) = applied.into_parts();
                         context.head.replace_edited_header(edited);
-                        crate::trace::record_header_action(&action, context.trace);
-                        context
-                            .runtime
-                            .apply_header_extractions(extractions, context.trace);
+                        crate::trace::record_header_action(
+                            &action,
+                            &recipe.location,
+                            context.trace,
+                        );
+                        context.runtime.apply_header_extractions(
+                            extractions,
+                            &recipe.location,
+                            context.trace,
+                        );
                         HeaderControl::Continue
                     }
                     CompiledAction::Deliver { .. } => {
@@ -557,10 +580,13 @@ impl CompiledSequence {
                     }
                 }
             } else {
-                context.trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Skipped,
-                });
+                context.trace.record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Skipped,
+                    },
+                );
                 HeaderControl::Continue
             };
             if control == HeaderControl::Deferred {
@@ -631,16 +657,22 @@ impl CompiledSequence {
                     context.trace,
                 )?;
             let control = if conditions_matched {
-                context.trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Selected,
-                });
+                context.trace.record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Selected,
+                    },
+                );
                 recipe.plan_action(self.has_error_handler(frame.recipe_index), context)?
             } else {
-                context.trace.record(TraceEvent::RecipeEvaluated {
-                    line: recipe.line,
-                    decision: RecipeDecision::Skipped,
-                });
+                context.trace.record_at(
+                    &recipe.location,
+                    TraceEvent::RecipeEvaluated {
+                        line: recipe.location.line(),
+                        decision: RecipeDecision::Skipped,
+                    },
+                );
                 SequenceControl::Continue
             };
             (conditions_matched, control)
@@ -681,7 +713,7 @@ impl CompiledNode {
         for (index, condition) in self.conditions.iter().enumerate() {
             let matched = condition.matches_headers(head, runtime)?;
             if matched != PartialMatch::Deferred {
-                condition.trace_result(self.line, index, matched, trace);
+                condition.trace_result(self.location.line(), index, matched, trace);
             }
             match matched {
                 PartialMatch::False => {
@@ -711,7 +743,7 @@ impl CompiledNode {
                 None => {
                     let matched = condition.matches_complete(message, runtime)?;
                     condition.trace_result(
-                        self.line,
+                        self.location.line(),
                         index,
                         PartialMatch::from_bool(matched),
                         trace,
@@ -764,20 +796,24 @@ impl CompiledNode {
     ) -> Result<SequenceControl, EvalError> {
         match &self.action {
             CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => {
-                Err(EvalError::ExternalActionUnsupported { line: self.line })
+                Err(EvalError::ExternalActionUnsupported {
+                    line: self.location.line(),
+                })
             }
             CompiledAction::Deliver { .. } => {
                 self.plan_delivery(context.runtime, context.execution, has_error_handler)
             }
             CompiledAction::Block(children) => {
                 if self.lock.is_some() {
-                    return Err(EvalError::LocalLockExecutorUnavailable { line: self.line });
+                    return Err(EvalError::LocalLockExecutorUnavailable {
+                        line: self.location.line(),
+                    });
                 }
                 children.plan_complete(context)
             }
-            CompiledAction::Headers(_) => {
-                Err(EvalError::HeaderActionUnsupported { line: self.line })
-            }
+            CompiledAction::Headers(_) => Err(EvalError::HeaderActionUnsupported {
+                line: self.location.line(),
+            }),
         }
     }
 
@@ -800,7 +836,7 @@ impl CompiledNode {
             .map_err(EvalError::Expansion)?;
         let lock = self.resolve_lock(runtime).map_err(EvalError::Expansion)?;
         let copy = *continuation == ContinuationMode::Continue;
-        let umask = RuntimeSettings::at_line(runtime, self.line)
+        let umask = RuntimeSettings::at_line(runtime, self.location.line())
             .umask()
             .map_err(runtime_setting_eval_error)?;
         execution.deliveries.push(PlannedDelivery {
@@ -831,7 +867,7 @@ fn plan_statements_complete<T: TraceSink>(
         match statement {
             CompiledStatement::CommandAssignment(assignment) => {
                 return Err(EvalError::ExternalActionUnsupported {
-                    line: assignment.line,
+                    line: assignment.location.line(),
                 });
             }
             CompiledStatement::Assignment(assignment) => {
@@ -847,7 +883,7 @@ fn plan_statements_complete<T: TraceSink>(
                 }
             }
             CompiledStatement::Include(include) => {
-                let entered = include.enter(context.runtime, context.rc)?;
+                let entered = include.enter(context.runtime, context.rc, context.trace)?;
                 if let Some((sequence, path, child_rc)) = entered.sequence()? {
                     if context.execute_runtime_rc(sequence, path, child_rc)?
                         == SequenceControl::Stop
@@ -861,7 +897,7 @@ fn plan_statements_complete<T: TraceSink>(
                 // EndRcFile to unwind every enclosing recipe block. An
                 // INCLUDERC boundary consumes that result and resumes its
                 // caller, while the root treats it as end of processing.
-                let entered = switch.enter(context.runtime, context.rc)?;
+                let entered = switch.enter(context.runtime, context.rc, context.trace)?;
                 if entered.is_empty() {
                     return Ok(SequenceControl::EndRcFile);
                 }
@@ -891,7 +927,7 @@ where
         match statement {
             CompiledStatement::CommandAssignment(assignment) => {
                 return Err(EvalError::ExternalActionUnsupported {
-                    line: assignment.line,
+                    line: assignment.location.line(),
                 }
                 .into());
             }
@@ -908,7 +944,7 @@ where
                 }
             }
             CompiledStatement::Include(include) => {
-                let entered = include.enter(context.runtime, context.rc)?;
+                let entered = include.enter(context.runtime, context.rc, context.trace)?;
                 if let Some((sequence, path, child_rc)) = entered.sequence()? {
                     if sequence.requires_preemptive_ordered_delivery() {
                         context.planning.frames.clear();
@@ -946,7 +982,7 @@ where
                 // Requirements after this statement are unreachable after a
                 // successful switch. If the dynamic target needs the body,
                 // restart from the private root plan after staging it.
-                let entered = switch.enter(context.runtime, context.rc)?;
+                let entered = switch.enter(context.runtime, context.rc, context.trace)?;
                 if entered.is_empty() {
                     return Ok(HeaderControl::EndRcFile);
                 }

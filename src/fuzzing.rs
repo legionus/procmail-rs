@@ -407,10 +407,7 @@ impl RuntimeRcLoader for FuzzRcLoader {
         if path.is_empty() {
             return Ok(None);
         }
-        Ok(Some(LoadedRcConfig::from_config(
-            PathBuf::from(path),
-            self.config.clone(),
-        )))
+        LoadedRcConfig::from_config(PathBuf::from(path), self.config.clone()).map(Some)
     }
 }
 

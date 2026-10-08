@@ -12,6 +12,7 @@ use crate::config::{
     Destination, DestinationKind, HeaderAction, OutputEnding, PipeAction, Recipe, RecipeAction,
     RecipeOptions, Statement, Unset,
 };
+use crate::source_location::SourceLocation;
 use crate::trace::VariableSource as TraceVariableSource;
 
 #[derive(Debug)]
@@ -23,7 +24,7 @@ pub(super) struct CompiledSequence {
 
 #[derive(Debug)]
 pub(super) struct CompiledNode {
-    pub(super) line: usize,
+    pub(super) location: SourceLocation,
     pub(super) preceding_statements: Vec<CompiledStatement>,
     pub(super) lock: Option<crate::config::PathExpression>,
     pub(super) control: ControlFlow,
@@ -56,22 +57,28 @@ pub(super) enum CompiledAction {
 #[derive(Debug, Clone)]
 pub(super) struct CompiledAssignment {
     pub(super) assignment: Assignment,
-    pub(super) line: Option<usize>,
+    pub(super) location: Option<SourceLocation>,
     pub(super) source: TraceVariableSource,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledUnset {
     pub(super) unset: Unset,
-    pub(super) line: Option<usize>,
+    pub(super) location: Option<SourceLocation>,
     pub(super) source: TraceVariableSource,
+}
+
+#[derive(Debug)]
+pub(super) struct CompiledCommandAssignment {
+    pub(super) assignment: CommandAssignment,
+    pub(super) location: SourceLocation,
 }
 
 #[derive(Debug)]
 pub(super) enum CompiledStatement {
     Assignment(CompiledAssignment),
     Unset(CompiledUnset),
-    CommandAssignment(CommandAssignment),
+    CommandAssignment(CompiledCommandAssignment),
     Host(CompiledAssignment),
     Include(CompiledInclude),
     Switch(CompiledSwitch),
@@ -142,6 +149,7 @@ impl CompiledSequence {
     pub(super) fn compile(
         statements: &[Statement],
         preceding: &mut Vec<CompiledStatement>,
+        source: &SourceLocation,
     ) -> Self {
         let mut recipes = Vec::new();
         for statement in statements {
@@ -149,7 +157,7 @@ impl CompiledSequence {
                 Statement::Assignment(assignment) => {
                     let compiled = CompiledAssignment {
                         assignment: assignment.clone(),
-                        line: Some(assignment.line),
+                        location: Some(source.at_line(assignment.line)),
                         source: TraceVariableSource::RcFile,
                     };
                     if assignment.target == AssignmentTarget::Host {
@@ -161,15 +169,22 @@ impl CompiledSequence {
                 Statement::Unset(unset) => {
                     preceding.push(CompiledStatement::Unset(CompiledUnset {
                         unset: unset.clone(),
-                        line: Some(unset.line),
+                        location: Some(source.at_line(unset.line)),
                         source: TraceVariableSource::RcFile,
                     }))
                 }
-                Statement::CommandAssignment(assignment) => {
-                    preceding.push(CompiledStatement::CommandAssignment(assignment.clone()))
-                }
+                Statement::CommandAssignment(assignment) => preceding.push(
+                    CompiledStatement::CommandAssignment(CompiledCommandAssignment {
+                        assignment: assignment.clone(),
+                        location: source.at_line(assignment.line),
+                    }),
+                ),
                 Statement::Recipe(recipe) => {
-                    recipes.push(CompiledNode::compile(recipe, std::mem::take(preceding)));
+                    recipes.push(CompiledNode::compile(
+                        recipe,
+                        std::mem::take(preceding),
+                        source,
+                    ));
                 }
                 Statement::Include(expression) => preceding.push(CompiledStatement::Include(
                     CompiledInclude::new(expression.clone()),
@@ -276,7 +291,7 @@ impl CompiledSequence {
             match &recipe.action {
                 CompiledAction::Pipe { .. } | CompiledAction::Capture { .. } => {
                     explanations.push(RecipeExplanation {
-                        line: recipe.line,
+                        line: recipe.location.line(),
                         assignment_count,
                         conditions,
                         action: ActionKindExplanation::ExternalProgram,
@@ -297,7 +312,7 @@ impl CompiledSequence {
                         DestinationKind::Discard => ActionKindExplanation::Discard,
                     };
                     explanations.push(RecipeExplanation {
-                        line: recipe.line,
+                        line: recipe.location.line(),
                         assignment_count,
                         conditions,
                         action,
@@ -330,7 +345,7 @@ impl CompiledSequence {
                         }
                     }
                     explanations.push(RecipeExplanation {
-                        line: recipe.line,
+                        line: recipe.location.line(),
                         assignment_count,
                         conditions,
                         action: ActionKindExplanation::Headers,
@@ -353,27 +368,32 @@ impl CompiledNode {
         ) || matches!(&self.action, CompiledAction::Headers(_))
     }
 
-    fn compile(recipe: &Recipe, preceding_statements: Vec<CompiledStatement>) -> Self {
-        let conditions = compile_conditions(recipe);
-        let action = match &recipe.action {
-            RecipeAction::Pipe(action) => CompiledAction::Pipe {
-                action: action.clone(),
-                options: recipe.options,
-            },
-            RecipeAction::Capture(action) => CompiledAction::Capture {
-                action: action.clone(),
-                options: recipe.options,
-            },
-            RecipeAction::Deliver(destination) => CompiledAction::Deliver {
-                destination: destination.clone(),
-                continuation: recipe.options.continuation,
-                output_ending: recipe.options.output_ending,
-            },
-            RecipeAction::Block(statements) => {
-                CompiledAction::Block(CompiledSequence::compile(statements, &mut Vec::new()))
-            }
-            RecipeAction::Headers(action) => CompiledAction::Headers(action.clone()),
-        };
+    fn compile(
+        recipe: &Recipe,
+        preceding_statements: Vec<CompiledStatement>,
+        source: &SourceLocation,
+    ) -> Self {
+        let conditions = compile_conditions(recipe, source);
+        let action =
+            match &recipe.action {
+                RecipeAction::Pipe(action) => CompiledAction::Pipe {
+                    action: action.clone(),
+                    options: recipe.options,
+                },
+                RecipeAction::Capture(action) => CompiledAction::Capture {
+                    action: action.clone(),
+                    options: recipe.options,
+                },
+                RecipeAction::Deliver(destination) => CompiledAction::Deliver {
+                    destination: destination.clone(),
+                    continuation: recipe.options.continuation,
+                    output_ending: recipe.options.output_ending,
+                },
+                RecipeAction::Block(statements) => CompiledAction::Block(
+                    CompiledSequence::compile(statements, &mut Vec::new(), source),
+                ),
+                RecipeAction::Headers(action) => CompiledAction::Headers(action.clone()),
+            };
         let mut properties = action_properties(&action);
         if matches!(action, CompiledAction::Block(_))
             && recipe.options.continuation == ContinuationMode::Continue
@@ -394,7 +414,7 @@ impl CompiledNode {
             properties.requires_preemptive_ordered_delivery = true;
         }
         Self {
-            line: recipe.line,
+            location: source.at_line(recipe.line),
             preceding_statements,
             lock: recipe.lock.clone(),
             control: recipe.options.control,

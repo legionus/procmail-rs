@@ -103,7 +103,7 @@ fn ordered_header_evaluation_defers_before_the_first_action() {
     };
 
     assert!(continuation.pending_deliveries().is_empty());
-    assert!(trace.events().is_empty());
+    assert!(trace.records().is_empty());
     assert!(runtime.get("BOX").is_none());
 
     let delivery = plan
@@ -337,16 +337,18 @@ fn resume_does_not_repeat_the_header_prefix_trace() {
 
     assert_eq!(
         trace
-            .events()
+            .records()
             .iter()
+            .map(|record| &record.event)
             .filter(|event| matches!(event, TraceEvent::VariableAssigned { line: Some(1), .. }))
             .count(),
         1
     );
     assert_eq!(
         trace
-            .events()
+            .records()
             .iter()
+            .map(|record| &record.event)
             .filter(|event| matches!(
                 event,
                 TraceEvent::RecipeEvaluated {

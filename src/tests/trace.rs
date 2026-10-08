@@ -3,6 +3,9 @@
 
 use super::*;
 
+#[path = "trace/source_locations.rs"]
+mod source_locations;
+
 #[test]
 fn delivery_failure_renderers_preserve_typed_details_without_error_text() {
     use crate::delivery::{DeliveryFailure, DeliveryOperation};
@@ -100,16 +103,16 @@ fn memory_trace_preserves_order_and_stops_at_its_limit() {
         });
     }
 
-    assert_eq!(trace.events().len(), MAX_MEMORY_TRACE_EVENTS);
+    assert_eq!(trace.records().len(), MAX_MEMORY_TRACE_EVENTS);
     assert_eq!(
-        trace.events().first(),
+        trace.records().first().map(|record| &record.event),
         Some(&TraceEvent::RecipeEvaluated {
             line: 0,
             decision: RecipeDecision::Skipped,
         })
     );
     assert_eq!(
-        trace.events().last(),
+        trace.records().last().map(|record| &record.event),
         Some(&TraceEvent::RecipeEvaluated {
             line: MAX_MEMORY_TRACE_EVENTS - 1,
             decision: RecipeDecision::Skipped,

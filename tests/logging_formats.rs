@@ -7,6 +7,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "logging_formats/source_locations.rs"]
+mod source_locations;
+
 fn temporary_directory(name: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -232,10 +235,10 @@ fn json_format_emits_json_lines_with_requested_detail() {
     }
     assert!(trace.starts_with("{\"event\":\"session-start\","));
     assert!(trace.contains(
-        "{\"event\":\"variable-assigned\",\"line\":1,\"name\":\"BOX\",\"source\":\"rc-file\",\"value\":\"selected\",\"value_truncated\":false}"
+        &format!("{{\"event\":\"variable-assigned\",\"line\":1,\"name\":\"BOX\",\"source\":\"rc-file\",\"value\":\"selected\",\"value_truncated\":false,\"rc_file\":\"{}\"}}", config.display())
     ));
     assert!(trace.contains(
-        "{\"event\":\"header-operation\",\"line\":4,\"operation\":\"remove\",\"name\":\"X-Test\"}"
+        &format!("{{\"event\":\"header-operation\",\"line\":4,\"operation\":\"remove\",\"name\":\"X-Test\",\"rc_file\":\"{}\"}}", config.display())
     ));
     assert!(trace.contains("\"stage\":\"dry-run\",\"path\":"));
     fs::remove_dir_all(base).unwrap();

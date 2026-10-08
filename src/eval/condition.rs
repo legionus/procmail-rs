@@ -18,7 +18,7 @@ use crate::trace::{ConditionKind as TraceConditionKind, TraceEvent, TraceSink};
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledCondition {
-    pub(super) line: usize,
+    pub(super) location: crate::source_location::SourceLocation,
     negated: bool,
     kind: CompiledConditionKind,
     match_captures: Vec<usize>,
@@ -56,7 +56,10 @@ enum CompiledConditionKind {
     LargerThan(usize),
 }
 
-pub(super) fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
+pub(super) fn compile_conditions(
+    recipe: &Recipe,
+    source: &crate::source_location::SourceLocation,
+) -> Vec<CompiledCondition> {
     let area = match recipe.options.condition_input {
         ConditionInput::Headers => RegexArea::Headers,
         ConditionInput::Body => RegexArea::Body,
@@ -70,6 +73,7 @@ pub(super) fn compile_conditions(recipe: &Recipe) -> Vec<CompiledCondition> {
                 condition,
                 area,
                 recipe.options.case_mode == CaseMode::Sensitive,
+                source,
             )
         })
         .collect()
@@ -79,6 +83,7 @@ fn compile_condition(
     condition: &Condition,
     area: RegexArea,
     case_sensitive: bool,
+    source: &crate::source_location::SourceLocation,
 ) -> CompiledCondition {
     let trace_expression = match &condition.kind {
         ConditionKind::ShellExpanded(condition) => condition.source.clone(),
@@ -165,7 +170,7 @@ fn compile_condition(
         },
     };
     CompiledCondition {
-        line: condition.line,
+        location: source.at_line(condition.line),
         negated: condition.negated,
         kind,
         match_captures: regex_condition
@@ -294,10 +299,10 @@ impl CompiledCondition {
         // variable supplies a complete condition. Bound those repeated passes
         // so hostile runtime values cannot create unbounded reparsing work.
         for _ in 0..=crate::config::MAX_EXPANSION_DEPTH {
-            let expanded = expand(&condition, self.line)?;
+            let expanded = expand(&condition, self.location.line())?;
             let parsed = crate::config::parse_reparsed_condition(
                 expanded.trim_start(),
-                self.line,
+                self.location.line(),
                 *case_sensitive,
             )
             .map_err(|error| {
@@ -311,12 +316,12 @@ impl CompiledCondition {
                 condition = next;
                 continue;
             }
-            let mut compiled = compile_condition(&parsed, *area, *case_sensitive);
+            let mut compiled = compile_condition(&parsed, *area, *case_sensitive, &self.location);
             compiled.negated = negated;
             return Ok(Some(compiled));
         }
         Err(map_error(EvalError::RuntimeCondition {
-            line: self.line,
+            line: self.location.line(),
             message: format!(
                 "condition expansion exceeds the hard depth limit of {}",
                 crate::config::MAX_EXPANSION_DEPTH
@@ -364,15 +369,18 @@ impl CompiledCondition {
             .detail()
             .includes_variable_values()
             .then(|| crate::trace::TraceValue::new(self.trace_expression.as_bytes()));
-        trace.record(TraceEvent::ConditionEvaluated {
-            recipe_line,
-            condition_line: self.line,
-            condition_index,
-            kind,
-            negated: self.negated,
-            matched,
-            expression,
-        });
+        trace.record_at(
+            &self.location,
+            TraceEvent::ConditionEvaluated {
+                recipe_line,
+                condition_line: self.location.line(),
+                condition_index,
+                kind,
+                negated: self.negated,
+                matched,
+                expression,
+            },
+        );
     }
 
     pub(super) fn explain(&self) -> ConditionExplanation {
@@ -451,7 +459,7 @@ impl CompiledCondition {
             CompiledConditionKind::ShellExpanded { .. } => {
                 let resolved = self.resolve_shell_expansion(runtime)?.ok_or_else(|| {
                     EvalError::RuntimeCondition {
-                        line: self.line,
+                        line: self.location.line(),
                         message: "expanded condition did not resolve".to_owned(),
                     }
                 })?;
@@ -495,7 +503,9 @@ impl CompiledCondition {
                 self.regex_matches(regex, value.as_bytes(), runtime)?
             }
             CompiledConditionKind::Program { .. } => {
-                return Err(EvalError::ExternalConditionUnsupported { line: self.line });
+                return Err(EvalError::ExternalConditionUnsupported {
+                    line: self.location.line(),
+                });
             }
             CompiledConditionKind::SmallerThan(size) => message.len() < *size,
             CompiledConditionKind::LargerThan(size) => message.len() > *size,
@@ -540,7 +550,7 @@ impl CompiledCondition {
     fn structured_header_error(&self, error: StructuredVisitError<EvalError>) -> EvalError {
         match error {
             StructuredVisitError::Header(error) => EvalError::StructuredHeader {
-                line: self.line,
+                line: self.location.line(),
                 message: error.to_string(),
             },
             StructuredVisitError::Visitor(error) => error,
@@ -575,14 +585,14 @@ impl CompiledCondition {
             let end = captures
                 .get(0)
                 .ok_or_else(|| EvalError::RuntimeCondition {
-                    line: self.line,
+                    line: self.location.line(),
                     message: "compiled regular expression omitted its complete match".to_owned(),
                 })?
                 .end();
             let bytes = input
                 .get(start..end)
                 .ok_or_else(|| EvalError::RuntimeCondition {
-                    line: self.line,
+                    line: self.location.line(),
                     message: "compiled regular expression returned an invalid MATCH range"
                         .to_owned(),
                 })?;
