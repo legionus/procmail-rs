@@ -46,7 +46,7 @@ impl BackgroundCopyBudget {
 
 struct OrderedTreeExecution<'a, H: OrderedExecutionHost> {
     message: CompleteMessage<'a>,
-    current_message: CurrentMessage,
+    current_message: CurrentMessage<'a>,
     runtime: &'a mut RuntimeVariables,
     host: &'a mut H,
     published: usize,
@@ -388,8 +388,7 @@ impl CompiledNode {
                         .linebuf()
                         .map_err(runtime_setting_eval_error)
                         .map_err(OrderedExecutionError::Evaluation)?;
-                    let raw = message
-                        .raw()
+                    let raw = FinalMessage::new(message)
                         .ok_or(EvalError::BodyWasNotBuffered)
                         .map_err(OrderedExecutionError::Evaluation)?;
                     let bytes = evaluate_shell_expression(
@@ -397,7 +396,7 @@ impl CompiledNode {
                             expression,
                             location: &condition.location.at_line(line),
                             value_name: "shell-expanded condition",
-                            message: raw,
+                            message: raw.bytes(),
                             limit,
                         },
                         context.runtime,
@@ -515,7 +514,7 @@ impl CompiledNode {
                     .map_err(EvalError::Expansion)
                     .map_err(OrderedExecutionError::Evaluation)?;
                 let applied = crate::header_edit::apply_header_action(
-                    message.raw_header(),
+                    message.header_view(),
                     body.len(),
                     &action,
                     context.limits,
@@ -525,14 +524,25 @@ impl CompiledNode {
                     message: error.to_string(),
                 })
                 .map_err(OrderedExecutionError::Evaluation)?;
+                let header_changed = applied.changed_from(message.header_view());
                 let (edited, extractions) = applied.into_parts();
-                let message = Message::from_edited_header(edited, body)
-                    .map_err(|error| EvalError::HeaderEdit {
-                        line: self.location.line(),
-                        message: error.to_string(),
-                    })
+                let original_body = context
+                    .message
+                    .body()
+                    .ok_or(EvalError::BodyWasNotBuffered)
                     .map_err(OrderedExecutionError::Evaluation)?;
-                context.replace_message(message);
+
+                if header_changed {
+                    context
+                        .current_message
+                        .replace_header(edited, original_body, context.limits)
+                        .map_err(|error| EvalError::HeaderEdit {
+                            line: self.location.line(),
+                            message: error.to_string(),
+                        })
+                        .map_err(OrderedExecutionError::Evaluation)?;
+                }
+
                 crate::trace::record_header_action(&action, &self.location, context.host.trace());
                 context.runtime.apply_header_extractions(
                     extractions,
@@ -617,10 +627,7 @@ impl CompiledNode {
                 continuation,
                 output_ending,
             } => {
-                let message = context
-                    .current_message
-                    .view(context.message)
-                    .raw()
+                let message = FinalMessage::new(context.current_message.view(context.message))
                     .ok_or(EvalError::BodyWasNotBuffered)
                     .map_err(OrderedExecutionError::Evaluation)?;
                 let destination = if let Some(parts) = destination.command_expression() {
@@ -635,7 +642,7 @@ impl CompiledNode {
                             expression: parts,
                             location: destination.location(),
                             value_name: "destination",
-                            message,
+                            message: message.bytes(),
                             limit,
                         },
                         context.runtime,
@@ -819,10 +826,7 @@ where
     H::Trace: TraceSink,
 {
     let assignment = &compiled.assignment;
-    let message = context
-        .current_message
-        .view(context.message)
-        .raw()
+    let message = FinalMessage::new(context.current_message.view(context.message))
         .ok_or(EvalError::BodyWasNotBuffered)
         .map_err(OrderedExecutionError::Evaluation)?;
     let limit = active_command_value_limit(context.runtime, assignment.target, assignment.line)?;
@@ -831,7 +835,7 @@ where
             expression: &assignment.expression,
             location: &compiled.location,
             value_name: &assignment.name,
-            message,
+            message: message.bytes(),
             limit,
         },
         context.runtime,
@@ -854,7 +858,7 @@ struct ShellExpressionInput<'a> {
     expression: &'a crate::config::ShellExpression,
     location: &'a crate::source_location::SourceLocation,
     value_name: &'a str,
-    message: &'a [u8],
+    message: crate::message::MessageBytes<'a>,
     limit: usize,
 }
 
@@ -889,7 +893,7 @@ where
 struct OrderedExpressionEvaluation<'context, 'input, E, T> {
     location: &'input crate::source_location::SourceLocation,
     value_name: &'input str,
-    message: &'input [u8],
+    message: crate::message::MessageBytes<'input>,
     runtime: &'context mut RuntimeVariables,
     host: &'context mut dyn OrderedExecutionHost<Error = E, Trace = T>,
 }
@@ -1069,7 +1073,7 @@ impl ExecutionPlan {
         // bytes belong to mapped staging. Invoke completion while either
         // owner is still alive so callers such as TRAP can consume the final
         // message without allocating another message-sized buffer.
-        let Some(message) = context.current_message.view(context.message).raw() else {
+        let Some(message) = FinalMessage::new(context.current_message.view(context.message)) else {
             return Err(OrderedExecutionError::Evaluation(
                 EvalError::BodyWasNotBuffered,
             ));
@@ -1078,9 +1082,7 @@ impl ExecutionPlan {
             Ok(outcome) => CompletionState::Completed(*outcome),
             Err(error) => CompletionState::Failed(error),
         };
-        context
-            .host
-            .complete(FinalMessage::new(message), context.runtime, state);
+        context.host.complete(message, context.runtime, state);
         result
     }
 }

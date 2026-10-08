@@ -179,12 +179,13 @@ impl LockedMbox {
         flock(&self.file, FlockOperation::Unlock).map_err(io_error)
     }
 
-    pub fn append(
+    pub fn append<'a>(
         self,
-        message: &[u8],
+        message: impl Into<crate::message::MessageBytes<'a>>,
         output_ending: OutputEnding,
         durability: Durability,
     ) -> Result<PublishedDelivery, MboxAppendError> {
+        let message = message.into();
         self.append_with(durability, |file| {
             let postmark = Postmark::generated(SystemTime::now()).map_err(io::Error::other)?;
             write_record(&mut FdWriter(file), &postmark, message, output_ending)
@@ -340,31 +341,63 @@ impl std::error::Error for MboxAppendError {
     }
 }
 
-pub fn write_record(
+pub fn write_record<'a>(
     writer: &mut impl Write,
     postmark: &Postmark,
-    message: &[u8],
+    message: impl Into<crate::message::MessageBytes<'a>>,
     output_ending: OutputEnding,
 ) -> io::Result<()> {
+    let message = message.into();
     writer.write_all(postmark.as_bytes())?;
 
     // Quote directly from the input slices so one hostile line cannot cause a
     // second message-sized allocation. mboxrd adds one '>' to every physical
     // line whose first non-'>' bytes are exactly "From ".
-    let mut offset = 0usize;
-    while offset < message.len() {
-        let relative_end = message[offset..]
+    let [mut first, mut second] = message.parts();
+
+    while !first.is_empty() || !second.is_empty() {
+        if first.is_empty() {
+            first = second;
+            second = &[];
+        }
+
+        // A physical line can span both pieces, even in the From prefix.
+        // Keep it as two borrowed ranges rather than buffering an unbounded
+        // line or independently quoting pieces that are not line boundaries.
+        let (line_first, line_second) =
+            if let Some(index) = first.iter().position(|byte| *byte == b'\n') {
+                let (line, rest) = first.split_at(index + 1);
+                first = rest;
+                (line, &[][..])
+            } else {
+                let end = second
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(second.len(), |index| index + 1);
+                let line_first = first;
+                let (line_second, rest) = second.split_at(end);
+                first = &[];
+                second = rest;
+                (line_first, line_second)
+            };
+        let prefix = line_first
             .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(message.len() - offset, |index| index + 1);
-        let end = offset + relative_end;
-        let line = &message[offset..end];
-        let prefix = line.iter().take_while(|byte| **byte == b'>').count();
-        if line[prefix..].starts_with(b"From ") {
+            .chain(line_second)
+            .take_while(|byte| **byte == b'>')
+            .count();
+
+        if line_first
+            .iter()
+            .chain(line_second)
+            .skip(prefix)
+            .take(5)
+            .eq(b"From ".iter())
+        {
             writer.write_all(b">")?;
         }
-        writer.write_all(line)?;
-        offset = end;
+
+        writer.write_all(line_first)?;
+        writer.write_all(line_second)?;
     }
 
     // Add only the bytes needed for the next postmark and the normal empty-line

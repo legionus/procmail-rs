@@ -530,7 +530,7 @@ impl CompiledSequence {
                             .resolve_with(|name| context.runtime.get(name).map(str::to_owned))
                             .map_err(EvalError::Expansion)?;
                         let applied = crate::header_edit::apply_header_action(
-                            context.head.as_bytes(),
+                            context.head.header_view(),
                             0,
                             &action,
                             context.head.limits(),

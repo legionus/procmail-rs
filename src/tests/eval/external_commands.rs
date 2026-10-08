@@ -63,7 +63,7 @@ fn external_action_observes_edited_headers() {
             calls += 1;
             assert_eq!(input.header(), b"X-State: new\n\n");
             assert_eq!(input.body(), b"body");
-            assert_eq!(input.selected(), b"X-State: new\n\nbody");
+            assert_eq!(input.selected().parts().concat(), b"X-State: new\n\nbody");
             Ok::<_, DeliveryAttemptError<&str>>(None)
         }),
     )
@@ -391,7 +391,7 @@ fn successful_filter_replaces_bytes_for_later_conditions_and_delivery() {
                 external_calls += 1;
                 assert_eq!(action.command, "rewrite");
                 assert_eq!(options.action_mode, crate::config::ActionMode::Filter);
-                assert_eq!(input.selected(), original);
+                assert_eq!(input.selected().parts().concat(), original);
                 Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(replacement.to_vec())))
             }),
         )
@@ -543,7 +543,7 @@ fn failed_filter_keeps_old_message_for_error_handler() {
                 &mut trace,
             )
             .with_external_action(&mut |_, _, _, input, _, _| {
-                assert_eq!(input.selected(), original);
+                assert_eq!(input.selected().parts().concat(), original);
                 Err(DeliveryAttemptError::Recoverable("filter failed"))
             }),
         )
@@ -575,7 +575,7 @@ fn pipe_action_receives_only_its_selected_message_area() {
                     &mut trace,
                 )
                 .with_external_action(&mut |_, _, _, input, _, _| {
-                    assert_eq!(input.selected(), expected, "flags {flags}");
+                    assert_eq!(input.selected().parts().concat(), expected, "flags {flags}");
                     Ok::<_, DeliveryAttemptError<&str>>(Some(Message::from_bytes(
                         original.to_vec(),
                     )))

@@ -149,19 +149,58 @@ pub fn header_edit(data: &[u8]) {
     ) else {
         return;
     };
-    let (edited, extractions) = applied.into_parts();
-    let replacement = Message::from_edited_header(edited, message.body())
-        .expect("a validated header edit must form a bounded message");
+    let (mut edited, extractions) = applied.into_parts();
+
+    // Repeated transactions exercise retained holes, compaction and cache
+    // invalidation. Compare the same production action on its indexed version
+    // and serialized bytes; errors and extraction results must agree too.
+    for _ in 0..3 {
+        let raw = crate::header_edit::apply_header_action(
+            edited.as_bytes(),
+            message.body().len(),
+            action,
+            limits,
+        );
+        let indexed = crate::header_edit::apply_header_action(
+            crate::header_edit::HeaderView::Indexed(&edited),
+            message.body().len(),
+            action,
+            limits,
+        );
+
+        match (raw, indexed) {
+            (Ok(raw), Ok(indexed)) => {
+                let (raw, raw_extractions) = raw.into_parts();
+                let (next, next_extractions) = indexed.into_parts();
+                assert_eq!(raw.as_bytes(), next.as_bytes());
+                assert_eq!(raw.matching_header(), next.matching_header());
+                assert_eq!(raw_extractions, next_extractions);
+                edited = next;
+            }
+            (Err(raw), Err(indexed)) => {
+                assert_eq!(raw, indexed);
+                break;
+            }
+            _ => panic!("indexed and serialized header actions disagree"),
+        }
+    }
+
+    let replacement =
+        crate::message::MessageHead::from_edited_header(edited, message.body().len(), limits)
+            .expect("a validated header edit must form a bounded message");
 
     // Reparse the serialized result through bounded ingestion. This checks
     // that a successful edit preserved message framing and did not conceal a
     // limit violation that only the normal input path would detect.
     let reparsed = Message::read_from(
-        &mut BufReader::new(Cursor::new(replacement.as_bytes())),
+        &mut BufReader::new(std::io::Read::chain(
+            Cursor::new(replacement.as_bytes()),
+            Cursor::new(message.body()),
+        )),
         limits,
     )
     .expect("a validated edited message must pass the same input limits");
-    assert_eq!(reparsed.as_bytes(), replacement.as_bytes());
+    assert_eq!(reparsed.header(), replacement.as_bytes());
     assert_eq!(reparsed.body(), message.body());
     assert!(
         extractions
@@ -452,7 +491,7 @@ impl OrderedExecutionHost for FuzzExecutionHost {
     fn deliver(
         &mut self,
         destination: &crate::config::Destination,
-        _message: &[u8],
+        _message: crate::eval::FinalMessage<'_>,
         _output_ending: crate::config::OutputEnding,
         _lock: Option<&str>,
         runtime: &mut RuntimeVariables,
@@ -478,12 +517,9 @@ impl OrderedExecutionHost for FuzzExecutionHost {
         match self.choice(action.command.as_bytes())? {
             0 => Err(DeliveryAttemptError::Fatal(())),
             1 => Err(DeliveryAttemptError::Recoverable(())),
-            2 => Message::read_from(
-                &mut BufReader::new(Cursor::new(input.selected())),
-                MessageLimits::default(),
-            )
-            .map(Some)
-            .map_err(|_| DeliveryAttemptError::Recoverable(())),
+            2 => Message::read_from(&mut input.selected().reader(), MessageLimits::default())
+                .map(Some)
+                .map_err(|_| DeliveryAttemptError::Recoverable(())),
             _ => Ok(None),
         }
     }
@@ -491,7 +527,7 @@ impl OrderedExecutionHost for FuzzExecutionHost {
     fn capture(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: crate::message::MessageBytes<'_>,
         _output_ending: crate::config::OutputEnding,
         _options: Option<crate::config::RecipeOptions>,
         limit: usize,
@@ -500,16 +536,22 @@ impl OrderedExecutionHost for FuzzExecutionHost {
         match self.choice(command.as_bytes())? {
             0 => Err(DeliveryAttemptError::Fatal(())),
             1 => Err(DeliveryAttemptError::Recoverable(())),
-            _ => Ok(CapturedCommand::new(
-                input[..input.len().min(limit).min(64)].to_vec(),
-            )),
+            _ => {
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(
+                    &mut std::io::Read::take(input.reader(), limit.min(64) as u64),
+                    &mut bytes,
+                )
+                .unwrap();
+                Ok(CapturedCommand::new(bytes))
+            }
         }
     }
 
     fn external_condition(
         &mut self,
         command: &str,
-        _input: &[u8],
+        _input: crate::message::MessageBytes<'_>,
         _runtime: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<Self::Error>> {
         self.choice(command.as_bytes())

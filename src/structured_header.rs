@@ -4,6 +4,7 @@
 use std::fmt;
 
 use crate::config::{AddressField, IdentifierField};
+use crate::header_edit::HeaderView;
 
 pub(crate) const MAX_STRUCTURED_HEADER_VALUES: usize = 4096;
 
@@ -24,13 +25,13 @@ impl fmt::Display for StructuredHeaderError {
     }
 }
 
-pub(crate) fn any_address<E>(
-    header: &[u8],
+pub(crate) fn any_address<'a, E>(
+    header: impl Into<HeaderView<'a>>,
     wanted: &[AddressField],
     mut matches: impl FnMut(&[u8]) -> Result<bool, E>,
 ) -> Result<bool, StructuredVisitError<E>> {
     let mut count = 0usize;
-    visit_fields(header, |name, value| {
+    visit_fields(header.into(), |name, value| {
         let Some(_) = wanted
             .iter()
             .find(|field| name.eq_ignore_ascii_case(field.name().as_bytes()))
@@ -58,13 +59,13 @@ pub(crate) fn any_address<E>(
     })
 }
 
-pub(crate) fn any_identifier<E>(
-    header: &[u8],
+pub(crate) fn any_identifier<'a, E>(
+    header: impl Into<HeaderView<'a>>,
     field: IdentifierField,
     mut matches: impl FnMut(&[u8]) -> Result<bool, E>,
 ) -> Result<bool, StructuredVisitError<E>> {
     let mut count = 0usize;
-    visit_fields(header, |name, value| {
+    visit_fields(header.into(), |name, value| {
         if !name.eq_ignore_ascii_case(field.name().as_bytes()) {
             return Ok(false);
         }
@@ -85,55 +86,18 @@ pub(crate) fn any_identifier<E>(
 }
 
 fn visit_fields<E>(
-    header: &[u8],
+    header: HeaderView<'_>,
     mut visit: impl FnMut(&[u8], &[u8]) -> Result<bool, E>,
 ) -> Result<bool, E> {
-    let mut offset = 0usize;
-    let mut field_start = None;
-    while offset < header.len() {
-        let line_end = header[offset..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(header.len(), |end| offset + end + 1);
-        let line = &header[offset..line_end];
-        let content = line.strip_suffix(b"\n").unwrap_or(line);
-        let content = content.strip_suffix(b"\r").unwrap_or(content);
-        if content.is_empty() {
-            if let Some(start) = field_start {
-                if visit_field(&header[start..offset], &mut visit)? {
-                    return Ok(true);
-                }
-            }
-            return Ok(false);
-        }
-        if !matches!(line.first(), Some(b' ' | b'\t')) {
-            if let Some(start) = field_start.replace(offset) {
-                if visit_field(&header[start..offset], &mut visit)? {
-                    return Ok(true);
-                }
+    for field in header.fields() {
+        if let (Some(name), Some(value)) = (field.name, field.value()) {
+            if visit(name, value)? {
+                return Ok(true);
             }
         }
-        offset = line_end;
     }
-    if let Some(start) = field_start {
-        return visit_field(&header[start..], &mut visit);
-    }
-    Ok(false)
-}
 
-fn visit_field<E>(
-    field: &[u8],
-    visit: &mut impl FnMut(&[u8], &[u8]) -> Result<bool, E>,
-) -> Result<bool, E> {
-    let first_end = field
-        .iter()
-        .position(|byte| *byte == b'\n')
-        .unwrap_or(field.len());
-    let first = &field[..first_end];
-    let Some(colon) = first.iter().position(|byte| *byte == b':') else {
-        return Ok(false);
-    };
-    visit(&first[..colon], &field[colon + 1..])
+    Ok(false)
 }
 
 fn remove_comments_and_unfold(input: &[u8]) -> Option<Vec<u8>> {

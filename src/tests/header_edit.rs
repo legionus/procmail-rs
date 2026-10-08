@@ -7,11 +7,105 @@ use crate::config::HeaderValue;
 use crate::limits::MessageLimits;
 use crate::message::Message;
 
+#[path = "header_edit/indexed.rs"]
+mod indexed;
+
 fn value(source: &str) -> HeaderValue {
     HeaderValue {
         source: source.into(),
         expansion: None,
     }
+}
+
+#[test]
+fn arena_coalesces_physical_holes_and_splits_reused_space() {
+    let (fields, _, _) = split_fields(b"A: 111\nB: 222\nC: 333\nD: 444\n\n");
+    let mut store = HeaderStore::new(&fields, 28).unwrap();
+    store.remove(1);
+    store.remove(1);
+    assert_eq!(store.free, vec![7..21]);
+    store.insert(0, b"X: x\n").unwrap();
+    assert_eq!(store.fields[0].raw, 7..12);
+    assert_eq!(store.free, vec![12..21]);
+    assert_eq!(store.bytes.len(), 28);
+    assert_eq!(store.field(0).name, Some(b"X".as_slice()));
+    assert_eq!(store.field(1).bytes, b"A: 111\n");
+    assert_eq!(store.field(2).bytes, b"D: 444\n");
+}
+
+#[test]
+fn arena_compacts_fragmentation_without_changing_logical_order() {
+    let (fields, _, _) = split_fields(b"A: 111\nB: 222\nC: 333\nD: 444\n\n");
+    let mut store = HeaderStore::new(&fields, 28).unwrap();
+    store.remove(2);
+    store.remove(0);
+    store.insert(0, b"X: x\n").unwrap();
+    // Total holes fit the new field, but no single hole does. Physical order
+    // differs from output order after prepend; compaction must preserve both.
+    store.insert(1, b"Y: 12345\n").unwrap();
+    assert!(store.free.is_empty());
+    assert_eq!(store.bytes.len(), 28);
+    let output: Vec<u8> = (0..store.fields.len())
+        .flat_map(|index| store.field(index).bytes.iter().copied())
+        .collect();
+    assert_eq!(output, b"X: x\nY: 12345\nB: 222\nD: 444\n");
+    assert!(store.matches(2, b"b"));
+}
+
+#[test]
+fn arena_growth_checks_ceiling_before_appending() {
+    for size in [7, 8, 9] {
+        let mut store = HeaderStore::new(&[], 8).unwrap();
+        let bytes = vec![b'x'; size];
+        let result = store.insert(0, &bytes);
+
+        if size <= 8 {
+            result.unwrap();
+            assert_eq!(store.bytes.len(), size);
+        } else {
+            assert_eq!(
+                result,
+                Err(HeaderEditError::LimitExceeded {
+                    kind: MessageLimit::Headers,
+                    limit: 8,
+                })
+            );
+            assert!(store.bytes.is_empty());
+            assert!(store.fields.is_empty());
+        }
+    }
+}
+
+#[test]
+fn repeated_replacements_reuse_space_instead_of_accumulating_deleted_bytes() {
+    let (fields, _, _) = split_fields(b"A: first\nB: tail\n\n");
+    let mut store = HeaderStore::new(&fields, 17).unwrap();
+
+    for _ in 0..256 {
+        store.remove(0);
+        store.insert(0, b"A: next\n").unwrap();
+        assert!(store.bytes.len() <= 17);
+        assert!(store.free.len() <= store.fields.len());
+        assert_eq!(store.field(0).bytes, b"A: next\n");
+        assert_eq!(store.field(1).bytes, b"B: tail\n");
+    }
+}
+
+#[test]
+fn removal_can_restore_a_header_to_a_lowered_active_limit() {
+    let operations = action(vec![HeaderOperation::Remove {
+        line: 1,
+        name: "Long".into(),
+    }]);
+    let limits = MessageLimits {
+        headers_size: 6,
+        ..MessageLimits::default()
+    };
+    let edited = apply_header_action(b"Long: old value\nA: x\n\n", 0, &operations, limits)
+        .unwrap()
+        .into_parts()
+        .0;
+    assert_eq!(edited.as_bytes(), b"A: x\n\n");
 }
 
 fn action(operations: Vec<HeaderOperation>) -> HeaderAction {
@@ -284,25 +378,6 @@ fn set_appends_when_the_field_is_absent() {
     }]);
 
     assert_eq!(apply(header, 0, &action).as_bytes(), b"A: one\nB: two\n\n");
-}
-
-#[test]
-fn buffered_edit_preserves_body_and_preceding_message() {
-    let original = Message::from_bytes(b"A: old\nKeep: exact\n\nbinary:\xff\0body".to_vec());
-    let action = action(vec![HeaderOperation::Set {
-        line: 1,
-        name: "A".into(),
-        value: value("new"),
-    }]);
-    let edited = apply(original.header(), original.body().len(), &action);
-    let replacement = original.with_edited_header(edited).unwrap();
-
-    assert_eq!(replacement.header(), b"A: new\nKeep: exact\n\n");
-    assert_eq!(replacement.body(), b"binary:\xff\0body");
-    assert_eq!(
-        original.as_bytes(),
-        b"A: old\nKeep: exact\n\nbinary:\xff\0body"
-    );
 }
 
 #[test]

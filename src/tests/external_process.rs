@@ -200,9 +200,12 @@ fn body_action_input_uses_procmail_double_lf_ending() {
         (&b"body\n\n"[..], OutputEnding::Normalize, &b"body\n\n"[..]),
         (&b"body\n"[..], OutputEnding::Preserve, &b"body\n"[..]),
     ] {
-        let mut output = Vec::new();
-        write_action_input(&mut output, input, ending, false, true).unwrap();
-        assert_eq!(output, expected);
+        for split in 0..=input.len() {
+            let mut output = Vec::new();
+            let pieces = MessageBytes::new(&input[..split], &input[split..]);
+            write_action_input(&mut output, pieces, ending, false, true).unwrap();
+            assert_eq!(output, expected, "split {split}");
+        }
     }
 }
 

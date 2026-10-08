@@ -413,10 +413,10 @@ impl CompiledCondition {
                 self.regex_matches(regex, head.matching_header(), runtime)?
             }
             CompiledConditionKind::AddressRegex { fields, regex } => {
-                self.matches_addresses(head.as_bytes(), fields, regex, runtime)?
+                self.matches_addresses(head.header_view(), fields, regex, runtime)?
             }
             CompiledConditionKind::IdentifierRegex { field, regex } => {
-                self.matches_identifier(head.as_bytes(), *field, regex, runtime)?
+                self.matches_identifier(head.header_view(), *field, regex, runtime)?
             }
             CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
                 return Ok(PartialMatch::Deferred);
@@ -473,10 +473,10 @@ impl CompiledCondition {
                 runtime,
             )?,
             CompiledConditionKind::AddressRegex { fields, regex } => {
-                self.matches_addresses(message.raw_header(), fields, regex, runtime)?
+                self.matches_addresses(message.header_view(), fields, regex, runtime)?
             }
             CompiledConditionKind::IdentifierRegex { field, regex } => {
-                self.matches_identifier(message.raw_header(), *field, regex, runtime)?
+                self.matches_identifier(message.header_view(), *field, regex, runtime)?
             }
             CompiledConditionKind::BodyRegex(regex) => self.regex_matches(
                 regex,
@@ -515,7 +515,7 @@ impl CompiledCondition {
 
     fn matches_addresses(
         &self,
-        header: &[u8],
+        header: crate::header_edit::HeaderView<'_>,
         fields: &[AddressField],
         regex: &Regex,
         runtime: &mut RuntimeVariables,
@@ -532,7 +532,7 @@ impl CompiledCondition {
 
     fn matches_identifier(
         &self,
-        header: &[u8],
+        header: crate::header_edit::HeaderView<'_>,
         field: IdentifierField,
         regex: &Regex,
         runtime: &mut RuntimeVariables,

@@ -8,6 +8,70 @@ use crate::config::ActionInput;
 use crate::limits::MessageLimits;
 
 #[test]
+fn segmented_writes_propagate_failures_after_short_writes() {
+    struct FailsAfter {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+    impl Write for FailsAfter {
+        fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+            if self.bytes.len() == self.limit {
+                return Err(io::Error::other("injected write failure"));
+            }
+
+            let count = input.len().min(self.limit - self.bytes.len());
+            self.bytes.extend_from_slice(&input[..count]);
+            Ok(count)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    for limit in [3, 4, 5] {
+        let mut writer = FailsAfter {
+            bytes: Vec::new(),
+            limit,
+        };
+        let error = super::MessageBytes::new(b"head", b"body")
+            .write_to(&mut writer)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(writer.bytes, b"headbody"[..limit]);
+    }
+}
+
+#[test]
+fn segmented_bytes_preserve_every_split_and_suffix() {
+    let bytes = b"Subject: test\n\nFrom body\0\xff\n\n";
+
+    for split in 0..=bytes.len() {
+        let input = super::MessageBytes::new(&bytes[..split], &bytes[split..]);
+        let mut output = Vec::new();
+        input.write_to(&mut output).unwrap();
+        assert_eq!(output, bytes);
+        let mut read = Vec::new();
+        std::io::Read::read_to_end(&mut input.reader(), &mut read).unwrap();
+        assert_eq!(read, bytes);
+
+        for suffix in [
+            &b""[..],
+            &b"\n"[..],
+            &b"\n\n"[..],
+            &b"\xff\n\n"[..],
+            &b"wrong"[..],
+            bytes,
+        ] {
+            assert_eq!(
+                input.ends_with(suffix),
+                bytes.ends_with(suffix),
+                "split {split}"
+            );
+        }
+    }
+}
+
+#[test]
 fn full_filter_output_retains_the_owned_allocation_and_validates_new_limits() {
     let raw = b"Subject: one\n two\n\nbody";
     let output = Message::read_from(&mut Cursor::new(raw), MessageLimits::default()).unwrap();

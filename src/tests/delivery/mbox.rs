@@ -366,3 +366,21 @@ fn malformed_existing_bytes_are_not_parsed_or_rewritten() {
     assert!(bytes.ends_with(b"Subject: appended\n\nbody\n\n"));
     fs::remove_dir_all(directory).unwrap();
 }
+#[test]
+fn segmented_records_quote_lines_across_every_split() {
+    let postmark = Postmark::new(b"From sender Sat Jan  1 00:00:00 2022\n").unwrap();
+    let bytes = b"Subject: test\n\nFrom first\n>>From second\n>other\nlast";
+    let expected = b"From sender Sat Jan  1 00:00:00 2022\nSubject: test\n\n>From first\n>>>From second\n>other\nlast\n\n";
+
+    for split in 0..=bytes.len() {
+        let mut output = Vec::new();
+        write_record(
+            &mut output,
+            &postmark,
+            crate::message::MessageBytes::new(&bytes[..split], &bytes[split..]),
+            OutputEnding::Normalize,
+        )
+        .unwrap();
+        assert_eq!(output, expected, "split {split}");
+    }
+}

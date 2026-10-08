@@ -175,14 +175,15 @@ impl<E, T: TraceSink + Send> OrderedExecutionHost for ExecutionServices<'_, E, T
     fn deliver(
         &mut self,
         destination: &Destination,
-        message: &[u8],
+        message: FinalMessage<'_>,
         output_ending: OutputEnding,
         lock: Option<&str>,
         runtime: &mut RuntimeVariables,
     ) -> Result<(), DeliveryAttemptError<Self::Error>> {
+        let bytes = message.bytes().parts().concat();
         (self.delivery)(
             destination,
-            message,
+            &bytes,
             output_ending,
             lock,
             runtime,
@@ -204,15 +205,17 @@ impl<E, T: TraceSink + Send> OrderedExecutionHost for ExecutionServices<'_, E, T
     fn capture(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: crate::message::MessageBytes<'_>,
         output_ending: OutputEnding,
         options: Option<RecipeOptions>,
         limit: usize,
         runtime: &mut RuntimeVariables,
     ) -> Result<CapturedCommand, DeliveryAttemptError<Self::Error>> {
+        let mut bytes = Vec::new();
+        input.write_to(&mut bytes).unwrap();
         self.capture.as_deref_mut().unwrap()(
             command,
-            input,
+            &bytes,
             output_ending,
             options,
             limit,
@@ -224,10 +227,12 @@ impl<E, T: TraceSink + Send> OrderedExecutionHost for ExecutionServices<'_, E, T
     fn external_condition(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: crate::message::MessageBytes<'_>,
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<Self::Error>> {
-        self.external_condition.as_deref_mut().unwrap()(command, input, runtime, self.trace)
+        let mut bytes = Vec::new();
+        input.write_to(&mut bytes).unwrap();
+        self.external_condition.as_deref_mut().unwrap()(command, &bytes, runtime, self.trace)
     }
 
     fn replace_global_lock(

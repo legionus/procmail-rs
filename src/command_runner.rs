@@ -20,7 +20,7 @@ use procmail_rs::external_process::{
     run_program_with_timeout, run_trap_with_timeout,
 };
 use procmail_rs::limits::MessageLimits;
-use procmail_rs::message::Message;
+use procmail_rs::message::{Message, MessageBytes};
 use procmail_rs::runtime::{RuntimeSettings, RuntimeVariables};
 
 use super::{ExitStatus, OperationalError};
@@ -60,7 +60,7 @@ enum ChildStatusPolicy {
 #[derive(Debug, Clone, Copy)]
 struct CommandRequest<'a> {
     command: &'a str,
-    input: &'a [u8],
+    input: MessageBytes<'a>,
     input_selection: InputSelection,
     output_ending: OutputEnding,
     output: OutputHandling,
@@ -168,12 +168,13 @@ impl CommandRunner {
         }
     }
 
-    pub fn condition(
+    pub fn condition<'a>(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: impl Into<MessageBytes<'a>>,
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<OperationalError>> {
+        let input = input.into();
         let request = CommandRequest {
             command,
             input,
@@ -194,15 +195,16 @@ impl CommandRunner {
             .accepted())
     }
 
-    pub fn capture(
+    pub fn capture<'a>(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: impl Into<MessageBytes<'a>>,
         output_ending: OutputEnding,
         recipe_options: Option<RecipeOptions>,
         limit: usize,
         runtime: &mut RuntimeVariables,
     ) -> Result<CapturedCommand, DeliveryAttemptError<OperationalError>> {
+        let input = input.into();
         let request = CommandRequest {
             command,
             input,
@@ -296,14 +298,15 @@ impl CommandRunner {
         }
     }
 
-    fn start_unwaited_action(
+    fn start_unwaited_action<'a>(
         &mut self,
         command: &str,
         options: RecipeOptions,
-        input: &[u8],
+        input: impl Into<MessageBytes<'a>>,
         lock: Option<Box<dyn RecipeLockGuard>>,
         runtime: &mut RuntimeVariables,
     ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
+        let input = input.into();
         self.background_budget
             .reserve()
             .map_err(recoverable_error)?;
@@ -354,7 +357,13 @@ impl CommandRunner {
         Ok(())
     }
 
-    pub fn trap(&mut self, message: &[u8], runtime: &mut RuntimeVariables, provisional_status: u8) {
+    pub fn trap<'a>(
+        &mut self,
+        message: impl Into<MessageBytes<'a>>,
+        runtime: &mut RuntimeVariables,
+        provisional_status: u8,
+    ) {
+        let message = message.into();
         let Some(command) = runtime.get("TRAP").filter(|command| !command.is_empty()) else {
             return;
         };
@@ -459,12 +468,13 @@ impl CommandRunner {
         }
     }
 
-    fn run_trap(
+    fn run_trap<'a>(
         &mut self,
         command: &str,
-        message: &[u8],
+        message: impl Into<MessageBytes<'a>>,
         runtime: &RuntimeVariables,
     ) -> Result<ProgramRun, String> {
+        let message = message.into();
         let prepared = prepare_environment(runtime, "TRAP")?;
         let (stdout, stderr) = trap_output(runtime);
         run_trap_with_timeout(
@@ -608,13 +618,14 @@ fn record_command_status(
     runtime.set_last_command_status(status);
 }
 
-fn write_stdout(
-    input: &[u8],
+fn write_stdout<'a>(
+    input: impl Into<MessageBytes<'a>>,
     options: RecipeOptions,
     runtime: &mut RuntimeVariables,
 ) -> Result<Option<Message>, DeliveryAttemptError<OperationalError>> {
+    let input = input.into();
     let mut stdout = io::stdout().lock();
-    let result = stdout.write_all(input).and_then(|()| {
+    let result = input.write_to(&mut stdout).and_then(|()| {
         if options.output_ending == OutputEnding::Normalize && !input.ends_with(b"\n") {
             stdout.write_all(b"\n")?;
         }

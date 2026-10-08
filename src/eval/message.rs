@@ -4,9 +4,11 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::config::{ActionInput, ConditionInput};
-use crate::message::Message;
+use crate::header_edit::{EditedHeader, HeaderEditError, HeaderView};
+use crate::limits::MessageLimits;
 #[cfg(test)]
 use crate::message::StreamedMessage;
+use crate::message::{Message, MessageBytes, MessageHead};
 
 #[derive(Debug, Clone, Copy)]
 pub struct MatchingMessage<'a> {
@@ -99,13 +101,13 @@ impl<'a> MappedMessageInput<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ExternalActionInput<'a> {
-    pub(super) selected: &'a [u8],
+    pub(super) selected: MessageBytes<'a>,
     pub(super) header: &'a [u8],
     pub(super) body: &'a [u8],
 }
 
 impl ExternalActionInput<'_> {
-    pub fn selected(&self) -> &[u8] {
+    pub fn selected(&self) -> MessageBytes<'_> {
         self.selected
     }
 
@@ -119,25 +121,131 @@ impl ExternalActionInput<'_> {
 }
 
 #[derive(Debug)]
-pub(super) struct OwnedCompleteMessage {
-    pub(super) message: Message,
-    matching: OnceLock<PreparedMatchingMessage>,
+pub(super) struct OwnedCompleteMessage<'input> {
+    version: MessageVersion<'input>,
+    matching: OnceLock<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+enum BodyBacking<'input> {
+    Original(&'input [u8]),
+    Filter(Arc<Message>),
+}
+
+impl BodyBacking<'_> {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Original(bytes) => bytes,
+            Self::Filter(message) => message.body(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum MessageVersion<'input> {
+    Whole(Arc<Message>),
+    Headers {
+        head: MessageHead,
+        body: BodyBacking<'input>,
+        len: usize,
+    },
+}
+
+impl OwnedCompleteMessage<'_> {
+    fn header_view(&self) -> HeaderView<'_> {
+        match &self.version {
+            MessageVersion::Whole(message) => HeaderView::Raw(message.header()),
+            MessageVersion::Headers { head, .. } => head.header_view(),
+        }
+    }
+    fn header(&self) -> &[u8] {
+        match &self.version {
+            MessageVersion::Whole(message) => message.header(),
+            MessageVersion::Headers { head, .. } => head.as_bytes(),
+        }
+    }
+
+    fn matching_header(&self) -> &[u8] {
+        match &self.version {
+            MessageVersion::Whole(message) => message.matching_header(),
+            MessageVersion::Headers { head, .. } => head.matching_header(),
+        }
+    }
+
+    fn body(&self) -> &[u8] {
+        match &self.version {
+            MessageVersion::Whole(message) => message.body(),
+            MessageVersion::Headers { body, .. } => body.bytes(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.version {
+            MessageVersion::Whole(message) => message.len(),
+            MessageVersion::Headers { len, .. } => *len,
+        }
+    }
+
+    fn full(&self) -> &[u8] {
+        // A regex may cross the header/body boundary, so it needs one range.
+        // Delivery and ordinary header edits borrow the pieces instead. This
+        // cache belongs to an immutable version and is shared by copy branches.
+        if let MessageVersion::Whole(message) = &self.version {
+            if self.header() == self.matching_header() {
+                return message.as_bytes();
+            }
+        }
+
+        self.matching.get_or_init(|| {
+            let mut bytes = Vec::with_capacity(self.len());
+            bytes.extend_from_slice(self.matching_header());
+            bytes.extend_from_slice(self.body());
+            bytes
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct CurrentMessage {
-    replacement: Option<Arc<OwnedCompleteMessage>>,
+pub(super) struct CurrentMessage<'input> {
+    replacement: Option<Arc<OwnedCompleteMessage<'input>>>,
 }
 
-impl CurrentMessage {
+impl<'input> CurrentMessage<'input> {
     pub(super) fn replace(&mut self, message: Message) {
         // A new version owns a fresh cache. Copy branches can share this
         // immutable version and its eventual full regex view without copying
         // the body; replacing one branch cannot invalidate another branch.
         self.replacement = Some(Arc::new(OwnedCompleteMessage {
-            message,
+            version: MessageVersion::Whole(Arc::new(message)),
             matching: OnceLock::new(),
         }));
+    }
+
+    pub(super) fn replace_header(
+        &mut self,
+        edited: EditedHeader,
+        original_body: &'input [u8],
+        limits: MessageLimits,
+    ) -> Result<(), HeaderEditError> {
+        // Retain the body owner directly rather than the preceding header
+        // version. Repeated edits must not form a chain that keeps old headers
+        // and full-message caches alive. The mapped original outlives execution;
+        // filter output has an Arc owner shared with any still-running branch.
+        let body = match self.replacement.as_deref().map(|owned| &owned.version) {
+            Some(MessageVersion::Whole(message)) => BodyBacking::Filter(message.clone()),
+            Some(MessageVersion::Headers { body, .. }) => body.clone(),
+            None => BodyBacking::Original(original_body),
+        };
+        let head = MessageHead::from_edited_header(edited, body.bytes().len(), limits)?;
+        let len = head
+            .len()
+            .checked_add(body.bytes().len())
+            .ok_or(HeaderEditError::SizeOverflow)?;
+        self.replacement = Some(Arc::new(OwnedCompleteMessage {
+            version: MessageVersion::Headers { head, body, len },
+            matching: OnceLock::new(),
+        }));
+        Ok(())
     }
 
     pub(super) fn view<'a>(&'a self, original: CompleteMessage<'a>) -> CompleteMessage<'a> {
@@ -159,22 +267,54 @@ impl CurrentMessage {
 
 #[derive(Debug, Clone, Copy)]
 pub struct FinalMessage<'a> {
-    bytes: &'a [u8],
+    storage: FinalStorage<'a>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FinalStorage<'a> {
+    Bytes(&'a [u8]),
+    Version(&'a OwnedCompleteMessage<'a>),
 }
 
 impl<'a> FinalMessage<'a> {
-    pub(super) fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes }
+    pub(super) fn new(view: CompleteMessage<'a>) -> Option<Self> {
+        let storage = match view {
+            CompleteMessage::Owned(owned) => FinalStorage::Version(owned),
+            CompleteMessage::Mapped { raw, .. } => FinalStorage::Bytes(raw),
+            #[cfg(test)]
+            CompleteMessage::Buffered { message, .. } => FinalStorage::Bytes(message.as_bytes()),
+            #[cfg(test)]
+            CompleteMessage::Streamed(_) => return None,
+        };
+        Some(Self { storage })
     }
 
-    pub fn as_bytes(self) -> &'a [u8] {
-        self.bytes
+    pub fn len(self) -> usize {
+        match self.storage {
+            FinalStorage::Bytes(bytes) => bytes.len(),
+            FinalStorage::Version(owned) => owned.len(),
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn write_to(self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        self.bytes().write_to(writer)
+    }
+
+    pub fn bytes(self) -> MessageBytes<'a> {
+        match self.storage {
+            FinalStorage::Bytes(bytes) => bytes.into(),
+            FinalStorage::Version(owned) => MessageBytes::new(owned.header(), owned.body()),
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum CompleteMessage<'a> {
-    Owned(&'a OwnedCompleteMessage),
+    Owned(&'a OwnedCompleteMessage<'a>),
     #[cfg(test)]
     Buffered {
         message: &'a Message,
@@ -213,20 +353,15 @@ fn matching_views_are_valid(
 }
 
 impl<'a> CompleteMessage<'a> {
-    pub(super) fn raw(self) -> Option<&'a [u8]> {
+    pub(super) fn header_view(self) -> HeaderView<'a> {
         match self {
-            Self::Owned(owned) => Some(owned.message.as_bytes()),
-            #[cfg(test)]
-            Self::Buffered { message, .. } => Some(message.as_bytes()),
-            #[cfg(test)]
-            Self::Streamed(_) => None,
-            Self::Mapped { raw, .. } => Some(raw),
+            Self::Owned(owned) => owned.header_view(),
+            _ => HeaderView::Raw(self.raw_header()),
         }
     }
-
     pub(super) fn raw_header(self) -> &'a [u8] {
         match self {
-            Self::Owned(owned) => owned.message.header(),
+            Self::Owned(owned) => owned.header(),
             #[cfg(test)]
             Self::Buffered { message, .. } => message.header(),
             #[cfg(test)]
@@ -237,19 +372,19 @@ impl<'a> CompleteMessage<'a> {
         }
     }
 
-    pub(super) fn action_input(self, input: ActionInput) -> Option<&'a [u8]> {
+    pub(super) fn action_input(self, input: ActionInput) -> Option<MessageBytes<'a>> {
         match input {
-            ActionInput::Message => self.raw(),
-            ActionInput::Headers => Some(self.raw_header()),
-            ActionInput::Body => self.body(),
+            ActionInput::Message => Some(FinalMessage::new(self)?.bytes()),
+            ActionInput::Headers => Some(self.raw_header().into()),
+            ActionInput::Body => self.body().map(Into::into),
         }
     }
 
-    pub(super) fn program_input(self, input: ConditionInput) -> Option<&'a [u8]> {
+    pub(super) fn program_input(self, input: ConditionInput) -> Option<MessageBytes<'a>> {
         match input {
-            ConditionInput::Headers => Some(self.raw_header()),
-            ConditionInput::Body => self.body(),
-            ConditionInput::Message => self.raw(),
+            ConditionInput::Headers => Some(self.raw_header().into()),
+            ConditionInput::Body => self.body().map(Into::into),
+            ConditionInput::Message => Some(FinalMessage::new(self)?.bytes()),
         }
     }
 
@@ -263,7 +398,7 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn header_bytes(self) -> &'a [u8] {
         match self {
-            Self::Owned(owned) => owned.message.matching_header(),
+            Self::Owned(owned) => owned.matching_header(),
             #[cfg(test)]
             Self::Buffered { message, .. } => message.matching_header(),
             #[cfg(test)]
@@ -279,7 +414,7 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn body(self) -> Option<&'a [u8]> {
         match self {
-            Self::Owned(owned) => Some(owned.message.body()),
+            Self::Owned(owned) => Some(owned.body()),
             #[cfg(test)]
             Self::Buffered { message, .. } => Some(message.body()),
             #[cfg(test)]
@@ -292,21 +427,7 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn full(self) -> Option<&'a [u8]> {
         match self {
-            Self::Owned(owned) => {
-                // Every consumer obtains full matching bytes through this
-                // view. Preparing lazily here keeps callers from accidentally
-                // using raw folded headers or allocating for header/body-only
-                // conditions. Shared branches initialize the cache once.
-                let matching = owned
-                    .matching
-                    .get_or_init(|| PreparedMatchingMessage::new(&owned.message, true));
-                Some(
-                    matching
-                        .full
-                        .as_deref()
-                        .unwrap_or_else(|| owned.message.as_bytes()),
-                )
-            }
+            Self::Owned(owned) => Some(owned.full()),
             #[cfg(test)]
             Self::Buffered {
                 message,
@@ -322,7 +443,7 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn len(self) -> usize {
         match self {
-            Self::Owned(owned) => owned.message.len(),
+            Self::Owned(owned) => owned.len(),
             #[cfg(test)]
             Self::Buffered { message, .. } => message.len(),
             #[cfg(test)]

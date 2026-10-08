@@ -125,7 +125,7 @@ impl OrderedExecutionHost for BenchmarkHost {
     fn deliver(
         &mut self,
         destination: &Destination,
-        message: &[u8],
+        message: FinalMessage<'_>,
         _: OutputEnding,
         _: Option<&str>,
         runtime: &mut RuntimeVariables,
@@ -147,11 +147,14 @@ impl OrderedExecutionHost for BenchmarkHost {
             return Ok(None);
         }
 
-        let bytes = if options.action_input == ActionInput::Body {
-            [&b"\n"[..], input.selected()].concat()
-        } else {
-            input.selected().to_vec()
-        };
+        let mut bytes = Vec::new();
+        if options.action_input == ActionInput::Body {
+            bytes.push(b'\n');
+        }
+        input
+            .selected()
+            .write_to(&mut bytes)
+            .map_err(|error| DeliveryAttemptError::Fatal(error.to_string()))?;
         let limits = MessageLimits::default();
         let output = Message::read_from(&mut Cursor::new(bytes), limits)
             .map_err(|error| DeliveryAttemptError::Fatal(error.to_string()))?;
@@ -169,7 +172,7 @@ impl OrderedExecutionHost for BenchmarkHost {
     fn capture(
         &mut self,
         _: &str,
-        _: &[u8],
+        _: procmail_rs::message::MessageBytes<'_>,
         _: OutputEnding,
         _: Option<RecipeOptions>,
         _: usize,
@@ -181,7 +184,7 @@ impl OrderedExecutionHost for BenchmarkHost {
     fn external_condition(
         &mut self,
         _: &str,
-        _: &[u8],
+        _: procmail_rs::message::MessageBytes<'_>,
         _: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<String>> {
         Ok(false)
@@ -209,6 +212,6 @@ impl OrderedExecutionHost for BenchmarkHost {
         _: &mut RuntimeVariables,
         _: CompletionState<'_, String>,
     ) {
-        black_box(message.as_bytes());
+        black_box(message.bytes());
     }
 }

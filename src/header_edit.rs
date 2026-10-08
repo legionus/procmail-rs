@@ -2,6 +2,7 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use crate::config::{
@@ -14,11 +15,12 @@ use crate::header_value::{
 use crate::limits::MessageLimits;
 use crate::message::MessageLimit;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EditedHeader {
-    bytes: Vec<u8>,
-    limits: MessageLimits,
-}
+mod storage;
+pub(crate) use storage::{EditedHeader, HeaderView};
+use storage::{
+    Field, HeaderStorage, HeaderStore, preferred_line_ending, serialized_size, split_fields,
+    validate_aggregate_size,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeaderExtraction {
@@ -34,24 +36,19 @@ pub(crate) struct AppliedHeaderAction {
 }
 
 impl AppliedHeaderAction {
+    pub(crate) fn changed_from(&self, source: HeaderView<'_>) -> bool {
+        match source {
+            HeaderView::Indexed(header) => !Arc::ptr_eq(&header.storage, &self.header.storage),
+            HeaderView::Raw(bytes) => !self
+                .header
+                .parts()
+                .flatten()
+                .copied()
+                .eq(bytes.iter().copied()),
+        }
+    }
     pub(crate) fn into_parts(self) -> (EditedHeader, Vec<HeaderExtraction>) {
         (self.header, self.extractions)
-    }
-}
-
-impl EditedHeader {
-    #[cfg(test)]
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub(crate) fn into_bytes_for_body(self, body_len: usize) -> Result<Vec<u8>, HeaderEditError> {
-        validate_edited_header(&self.bytes, body_len, self.limits)?;
-        Ok(self.bytes)
-    }
-
-    pub(crate) fn into_streaming_bytes(self) -> Vec<u8> {
-        self.bytes
     }
 }
 
@@ -94,102 +91,90 @@ impl fmt::Display for HeaderEditError {
 
 impl std::error::Error for HeaderEditError {}
 
-#[derive(Clone)]
-struct Field<'a> {
-    bytes: &'a [u8],
-    name: Option<&'a [u8]>,
-}
-
-enum EditedField<'a> {
-    Borrowed(Field<'a>),
-    Added(Vec<u8>),
-}
-
-impl EditedField<'_> {
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Self::Borrowed(field) => field.bytes,
-            Self::Added(bytes) => bytes,
-        }
-    }
-
-    fn matches(&self, name: &[u8]) -> bool {
-        match self {
-            Self::Borrowed(field) => field
-                .name
-                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name)),
-            Self::Added(bytes) => bytes
-                .iter()
-                .position(|byte| *byte == b':')
-                .is_some_and(|colon| bytes[..colon].eq_ignore_ascii_case(name)),
-        }
-    }
-}
-
 /// Apply already parsed operations to a bounded header section.
 ///
 /// Operations run in source order. `remove` deletes every matching field,
 /// including folded continuation lines. `set` replaces the first matching
 /// field at its existing position and deletes later duplicates; when absent,
 /// it appends the field. `add` appends and `prepend` inserts at the beginning.
-pub(crate) fn apply_header_action(
-    header: &[u8],
+pub(crate) fn apply_header_action<'a>(
+    source: impl Into<HeaderView<'a>>,
     body_len: usize,
     action: &HeaderAction,
     limits: MessageLimits,
 ) -> Result<AppliedHeaderAction, HeaderEditError> {
-    let (fields, separator, line_ending) = split_fields(header);
-    let mut edited: Vec<EditedField<'_>> = fields.into_iter().map(EditedField::Borrowed).collect();
+    let source = source.into();
+    let mut header = match source {
+        HeaderView::Indexed(header) => header.clone(),
+        HeaderView::Raw(bytes) => {
+            let (fields, separator, line_ending) = split_fields(bytes);
+            let store = HeaderStore::new(&fields, limits.headers_size.max(bytes.len()))?;
+            EditedHeader {
+                storage: Arc::new(HeaderStorage {
+                    store,
+                    separator: separator.to_vec(),
+                    line_ending,
+                    size: bytes.len(),
+                    raw: OnceLock::new(),
+                    matching: OnceLock::new(),
+                }),
+                limits,
+            }
+        }
+    };
+    header.limits = limits;
+    let line_ending = header.storage.line_ending;
     let mut extractions = Vec::new();
 
-    // Keeping edits as whole physical byte ranges prevents a folded field
-    // from being separated from its continuation lines. Operations are
-    // applied sequentially so a later operation sees every earlier change.
+    // A shared index is borrowed for extraction and no-op edits. Only a real
+    // mutation creates private storage; validation and extraction publication
+    // happen before accepting it, so failures cannot alter a copied branch.
     for operation in &action.operations {
         match operation {
             HeaderOperation::Remove { name, .. } => {
-                edited.retain(|field| !field.matches(name.as_bytes()));
+                if (0..header.storage.store.fields.len())
+                    .any(|index| header.storage.store.matches(index, name.as_bytes()))
+                {
+                    header.store_mut().remove_matching(name.as_bytes());
+                }
             }
             HeaderOperation::Set { name, value, .. } => {
                 let replacement = make_field(name, &value.source, line_ending)?;
-                if let Some(first) = edited
-                    .iter()
-                    .position(|field| field.matches(name.as_bytes()))
-                {
-                    edited[first] = EditedField::Added(replacement);
-                    let mut seen = false;
-                    edited.retain(|field| {
-                        if !field.matches(name.as_bytes()) {
-                            return true;
-                        }
-                        if !seen {
-                            seen = true;
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                } else {
-                    edited.push(EditedField::Added(replacement));
+                let store = &header.storage.store;
+                let mut matching =
+                    (0..store.fields.len()).filter(|index| store.matches(*index, name.as_bytes()));
+                let first = matching.next();
+                let unchanged = first.is_some_and(|index| store.field(index).bytes == replacement)
+                    && matching.next().is_none();
+
+                if !unchanged {
+                    let store = header.store_mut();
+                    let position = first.unwrap_or(store.fields.len());
+                    store.remove_matching(name.as_bytes());
+                    store.insert(position, &replacement)?;
                 }
             }
             HeaderOperation::Add { name, value, .. } => {
-                edited.push(EditedField::Added(make_field(
-                    name,
-                    &value.source,
-                    line_ending,
-                )?));
+                let field = make_field(name, &value.source, line_ending)?;
+                let store = header.store_mut();
+                store.insert(store.fields.len(), &field)?;
             }
             HeaderOperation::Prepend { name, value, .. } => {
-                edited.insert(
-                    0,
-                    EditedField::Added(make_field(name, &value.source, line_ending)?),
-                );
+                let field = make_field(name, &value.source, line_ending)?;
+                header.store_mut().insert(0, &field)?;
             }
             HeaderOperation::Rename { from, to, .. } => {
-                for field in &mut edited {
-                    if field.matches(from.as_bytes()) {
-                        *field = EditedField::Added(rename_field(field.bytes(), to)?);
+                for index in 0..header.storage.store.fields.len() {
+                    let store = &header.storage.store;
+
+                    if store.matches(index, from.as_bytes()) {
+                        let replacement = rename_field(store.field(index), to)?;
+
+                        if store.field(index).bytes != replacement {
+                            let store = header.store_mut();
+                            store.remove(index);
+                            store.insert(index, &replacement)?;
+                        }
                     }
                 }
             }
@@ -199,12 +184,12 @@ pub(crate) fn apply_header_action(
                 target,
                 mode,
             } => {
-                let value = edited
-                    .iter()
-                    .find(|field| field.matches(name.as_bytes()))
+                let store = &header.storage.store;
+                let value = (0..store.fields.len())
+                    .find(|index| store.matches(*index, name.as_bytes()))
                     .map_or_else(
                         || Ok(Vec::new()),
-                        |field| extract_value(field.bytes(), *mode),
+                        |index| extract_value(store.field(index), *mode),
                     )?;
                 extractions.push(HeaderExtraction {
                     line: *line,
@@ -213,34 +198,72 @@ pub(crate) fn apply_header_action(
                 });
             }
         }
-        validate_aggregate_size(&edited, separator, line_ending, body_len, limits)?;
+
+        validate_aggregate_size(
+            &header.storage.store,
+            &header.storage.separator,
+            line_ending,
+            body_len,
+            limits,
+        )?;
     }
 
-    let size = serialized_size(&edited, separator, line_ending)?;
-    let mut result = Vec::with_capacity(size);
-    for field in edited {
-        if !result.is_empty() && !result.ends_with(b"\n") {
-            result.extend_from_slice(joining_line_ending(&result, line_ending));
-        }
-        result.extend_from_slice(field.bytes());
+    let size = serialized_size(
+        &header.storage.store,
+        &header.storage.separator,
+        line_ending,
+    )?;
+
+    if let Some(storage) = Arc::get_mut(&mut header.storage) {
+        storage.size = size;
     }
-    result.extend_from_slice(separator);
-    validate_edited_header(&result, body_len, limits)?;
+
+    header.validate(body_len, limits)?;
+
+    // Orphan continuations can join a prepended field, and a missing newline
+    // needs an inserted delimiter before another field. Reindex these malformed
+    // boundaries after validation so future preferences cannot change existing
+    // delimiters or disagree with the checked serialized size.
+    let store = &header.storage.store;
+    let needs_reindex = (1..store.fields.len()).any(|index| {
+        matches!(store.field(index).bytes.first(), Some(b' ' | b'\t'))
+            || !store.field(index - 1).bytes.ends_with(b"\n")
+    });
+
+    if needs_reindex {
+        let bytes = header.as_bytes();
+        let (fields, separator, line_ending) = split_fields(bytes);
+        let store = HeaderStore::new(&fields, limits.headers_size)?;
+        header.storage = Arc::new(HeaderStorage {
+            store,
+            separator: separator.to_vec(),
+            line_ending,
+            size,
+            raw: OnceLock::new(),
+            matching: OnceLock::new(),
+        });
+    }
+
+    // Removed fields or a newly inserted delimiter can change the first
+    // physical newline. Later actions must choose exactly the ending a fresh
+    // parse would observe, without serializing merely to make that choice.
+    let line_ending = preferred_line_ending(header.parts());
+
+    if let Some(storage) = Arc::get_mut(&mut header.storage) {
+        storage.line_ending = line_ending;
+    }
+
     Ok(AppliedHeaderAction {
-        header: EditedHeader {
-            bytes: result,
-            limits,
-        },
+        header,
         extractions,
     })
 }
 
-fn rename_field(field: &[u8], name: &str) -> Result<Vec<u8>, HeaderEditError> {
-    let colon = field
-        .iter()
-        .position(|byte| *byte == b':')
-        .unwrap_or(field.len());
-    let suffix = field.get(colon..).unwrap_or_default();
+fn rename_field(field: Field<'_>, name: &str) -> Result<Vec<u8>, HeaderEditError> {
+    let suffix = field
+        .name
+        .and_then(|old| field.bytes.get(old.len()..))
+        .unwrap_or_default();
     let size = name
         .len()
         .checked_add(suffix.len())
@@ -251,19 +274,8 @@ fn rename_field(field: &[u8], name: &str) -> Result<Vec<u8>, HeaderEditError> {
     Ok(renamed)
 }
 
-fn extract_value(field: &[u8], mode: HeaderExtractionMode) -> Result<Vec<u8>, HeaderEditError> {
-    let first_line_end = field
-        .iter()
-        .position(|byte| *byte == b'\n')
-        .map_or(field.len(), |offset| offset + 1);
-    let colon = field[..first_line_end]
-        .iter()
-        .position(|byte| *byte == b':')
-        .unwrap_or(first_line_end);
-    let value = colon
-        .checked_add(1)
-        .and_then(|start| field.get(start..))
-        .unwrap_or_default();
+fn extract_value(field: Field<'_>, mode: HeaderExtractionMode) -> Result<Vec<u8>, HeaderEditError> {
+    let value = field.value().unwrap_or_default();
     match mode {
         HeaderExtractionMode::Raw => {
             let value = strip_line_ending(value);
@@ -321,108 +333,6 @@ fn extraction_length_error(_: BoundedBytesError) -> HeaderEditError {
     }
 }
 
-fn serialized_size(
-    fields: &[EditedField<'_>],
-    separator: &[u8],
-    line_ending: &[u8],
-) -> Result<usize, HeaderEditError> {
-    let mut size = 0usize;
-    let mut previous = None;
-    for field in fields {
-        if let Some(previous) = previous.filter(|bytes: &&[u8]| !bytes.ends_with(b"\n")) {
-            size = size
-                .checked_add(joining_line_ending(previous, line_ending).len())
-                .ok_or(HeaderEditError::SizeOverflow)?;
-        }
-        size = size
-            .checked_add(field.bytes().len())
-            .ok_or(HeaderEditError::SizeOverflow)?;
-        previous = Some(field.bytes());
-    }
-    size.checked_add(separator.len())
-        .ok_or(HeaderEditError::SizeOverflow)
-}
-
-fn joining_line_ending<'a>(previous: &[u8], preferred: &'a [u8]) -> &'a [u8] {
-    // A lone CR at the end of hostile input is header data, but appending LF
-    // would turn it into an empty CRLF line and move following fields into the
-    // body. Insert a complete CRLF delimiter so the old CR remains non-empty
-    // header data and editing cannot change the message boundary.
-    if previous.ends_with(b"\r") && preferred == b"\n" {
-        b"\r\n"
-    } else {
-        preferred
-    }
-}
-
-fn validate_aggregate_size(
-    fields: &[EditedField<'_>],
-    separator: &[u8],
-    line_ending: &[u8],
-    body_len: usize,
-    limits: MessageLimits,
-) -> Result<(), HeaderEditError> {
-    let headers = serialized_size(fields, separator, line_ending)?;
-    check_limit(headers, limits.headers_size, MessageLimit::Headers)?;
-    let message = headers
-        .checked_add(body_len)
-        .ok_or(HeaderEditError::SizeOverflow)?;
-    check_limit(message, limits.message_size, MessageLimit::Message)
-}
-
-fn validate_edited_header(
-    header: &[u8],
-    body_len: usize,
-    limits: MessageLimits,
-) -> Result<(), HeaderEditError> {
-    check_limit(header.len(), limits.headers_size, MessageLimit::Headers)?;
-    let message = header
-        .len()
-        .checked_add(body_len)
-        .ok_or(HeaderEditError::SizeOverflow)?;
-    check_limit(message, limits.message_size, MessageLimit::Message)?;
-
-    let mut field_size = 0usize;
-    let mut cursor = 0usize;
-    while cursor < header.len() {
-        let end = header[cursor..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(header.len(), |offset| cursor + offset + 1);
-        let line = &header[cursor..end];
-        check_limit(
-            line.len(),
-            limits.header_line_size,
-            MessageLimit::HeaderLine,
-        )?;
-        if line == b"\n" || line == b"\r\n" {
-            break;
-        }
-        field_size = if matches!(line.first(), Some(b' ' | b'\t')) {
-            field_size
-                .checked_add(line.len())
-                .ok_or(HeaderEditError::SizeOverflow)?
-        } else {
-            line.len()
-        };
-        check_limit(
-            field_size,
-            limits.header_field_size,
-            MessageLimit::HeaderField,
-        )?;
-        cursor = end;
-    }
-    Ok(())
-}
-
-fn check_limit(size: usize, limit: usize, kind: MessageLimit) -> Result<(), HeaderEditError> {
-    if size > limit {
-        Err(HeaderEditError::LimitExceeded { kind, limit })
-    } else {
-        Ok(())
-    }
-}
-
 fn make_field(name: &str, value: &str, line_ending: &[u8]) -> Result<Vec<u8>, HeaderEditError> {
     serialize_generated_header(name, value, line_ending).map_err(|error| match error {
         GeneratedHeaderError::InvalidValue => HeaderEditError::InvalidGeneratedValue,
@@ -431,75 +341,6 @@ fn make_field(name: &str, value: &str, line_ending: &[u8]) -> Result<Vec<u8>, He
         },
         GeneratedHeaderError::SizeOverflow => HeaderEditError::SizeOverflow,
     })
-}
-
-fn split_fields(header: &[u8]) -> (Vec<Field<'_>>, &[u8], &[u8]) {
-    let separator_start = header_separator_start(header).unwrap_or(header.len());
-    let content = &header[..separator_start];
-    let separator = &header[separator_start..];
-    let line_ending = content.iter().position(|byte| *byte == b'\n').map_or_else(
-        || {
-            if separator.starts_with(b"\r\n") {
-                b"\r\n".as_slice()
-            } else {
-                b"\n".as_slice()
-            }
-        },
-        |newline| {
-            if newline > 0 && content[newline - 1] == b'\r' {
-                b"\r\n".as_slice()
-            } else {
-                b"\n".as_slice()
-            }
-        },
-    );
-    let mut fields = Vec::new();
-    let mut start = 0usize;
-    let mut cursor = 0usize;
-
-    while cursor < content.len() {
-        let end = content[cursor..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(content.len(), |offset| cursor + offset + 1);
-        let continuation = matches!(content.get(cursor), Some(b' ' | b'\t'));
-        if cursor != start && !continuation {
-            fields.push(field_from_bytes(&content[start..cursor]));
-            start = cursor;
-        }
-        cursor = end;
-    }
-    if start < content.len() {
-        fields.push(field_from_bytes(&content[start..]));
-    }
-    (fields, separator, line_ending)
-}
-
-fn field_from_bytes(bytes: &[u8]) -> Field<'_> {
-    let first_line_end = bytes
-        .iter()
-        .position(|byte| *byte == b'\n')
-        .unwrap_or(bytes.len());
-    let name = bytes[..first_line_end]
-        .iter()
-        .position(|byte| *byte == b':')
-        .map(|colon| &bytes[..colon]);
-    Field { bytes, name }
-}
-
-fn header_separator_start(header: &[u8]) -> Option<usize> {
-    let mut line_start = 0usize;
-    while line_start < header.len() {
-        let newline = header[line_start..]
-            .iter()
-            .position(|byte| *byte == b'\n')?;
-        let line_end = line_start.checked_add(newline)?.checked_add(1)?;
-        if &header[line_start..line_end] == b"\n" || &header[line_start..line_end] == b"\r\n" {
-            return Some(line_start);
-        }
-        line_start = line_end;
-    }
-    None
 }
 
 #[cfg(test)]

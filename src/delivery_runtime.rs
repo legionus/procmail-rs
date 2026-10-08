@@ -112,7 +112,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
     fn deliver(
         &mut self,
         destination: &Destination,
-        message: &[u8],
+        message: FinalMessage<'_>,
         output_ending: OutputEnding,
         lock: Option<&str>,
         runtime: &mut RuntimeVariables,
@@ -187,7 +187,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
     fn capture(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: procmail_rs::message::MessageBytes<'_>,
         output_ending: OutputEnding,
         options: Option<RecipeOptions>,
         limit: usize,
@@ -204,7 +204,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
     fn external_condition(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: procmail_rs::message::MessageBytes<'_>,
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<Self::Error>> {
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
@@ -297,7 +297,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
             return;
         }
         self.command_runner
-            .trap(message.as_bytes(), runtime, completion_exit_status(state));
+            .trap(message.bytes(), runtime, completion_exit_status(state));
     }
 }
 

@@ -7,7 +7,7 @@ use super::*;
 
 pub(super) fn deliver_one_sink(
     destination: &Destination,
-    message: &[u8],
+    message: FinalMessage<'_>,
     durability: Durability,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
@@ -18,7 +18,8 @@ pub(super) fn deliver_one_sink(
         .map_err(OrderedStepError::before_publication)?;
     let mut sink = open_sink(destination, durability, mask, runtime, trace)
         .map_err(OrderedStepError::before_publication)?;
-    sink.write_all(message)
+    message
+        .write_to(&mut sink)
         .map_err(|error| {
             report_delivery_failure(
                 destination,
@@ -57,7 +58,7 @@ pub(super) fn deliver_one_sink(
 
 pub(super) fn deliver_file_destination(
     unresolved: &Destination,
-    message: &[u8],
+    message: FinalMessage<'_>,
     output_ending: procmail_rs::config::OutputEnding,
     durability: Durability,
     runtime: &mut RuntimeVariables,
@@ -92,7 +93,7 @@ pub(super) fn deliver_file_destination(
     let path = Path::new(destination.path());
     let locked =
         prepare_mbox(&destination, runtime, trace).map_err(OrderedStepError::before_publication)?;
-    match locked.append(message, output_ending, durability) {
+    match locked.append(message.bytes(), output_ending, durability) {
         Ok(published) => apply_publication(
             PublicationAttempt::published(PublicationResult::Delivery(&published)),
             PublicationDestinations::One(&destination),

@@ -6,8 +6,69 @@ use std::io::{BufRead, Read, Write};
 use std::ops::Range;
 
 use crate::config::ActionInput;
-use crate::header_edit::{EditedHeader, HeaderEditError};
+use crate::header_edit::{EditedHeader, HeaderEditError, HeaderView};
 use crate::limits::MessageLimits;
+
+/// Borrowed input pieces; writing or reading them does not join the body.
+#[derive(Debug, Clone, Copy)]
+pub struct MessageBytes<'a> {
+    parts: [&'a [u8]; 2],
+}
+
+impl<'a> MessageBytes<'a> {
+    pub fn new(first: &'a [u8], second: &'a [u8]) -> Self {
+        Self {
+            parts: [first, second],
+        }
+    }
+
+    pub fn reader(self) -> std::io::Chain<std::io::Cursor<&'a [u8]>, std::io::Cursor<&'a [u8]>> {
+        std::io::Cursor::new(self.parts[0]).chain(std::io::Cursor::new(self.parts[1]))
+    }
+
+    pub fn parts(self) -> [&'a [u8]; 2] {
+        self.parts
+    }
+
+    pub fn write_to(self, writer: &mut impl Write) -> std::io::Result<()> {
+        for part in self.parts {
+            writer.write_all(part)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn ends_with(self, suffix: &[u8]) -> bool {
+        self.parts
+            .into_iter()
+            .rev()
+            .flat_map(|part| part.iter().rev())
+            .take(suffix.len())
+            .eq(suffix.iter().rev())
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.parts.iter().all(|part| part.is_empty())
+    }
+}
+
+impl<'a> From<&'a [u8]> for MessageBytes<'a> {
+    fn from(bytes: &'a [u8]) -> Self {
+        Self::new(bytes, &[])
+    }
+}
+
+impl<'a, const N: usize> From<&'a [u8; N]> for MessageBytes<'a> {
+    fn from(bytes: &'a [u8; N]) -> Self {
+        Self::from(bytes.as_slice())
+    }
+}
+
+impl<'a> From<&'a Vec<u8>> for MessageBytes<'a> {
+    fn from(bytes: &'a Vec<u8>) -> Self {
+        Self::from(bytes.as_slice())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -19,9 +80,15 @@ pub struct Message {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageHead {
-    raw: Vec<u8>,
+    backing: HeaderBacking,
     matching_header: Option<Vec<u8>>,
     limits: MessageLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeaderBacking {
+    Input(Vec<u8>),
+    Indexed(EditedHeader),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,37 +99,6 @@ pub struct StreamedMessage {
 }
 
 impl Message {
-    #[cfg(test)]
-    pub(crate) fn with_edited_header(&self, edited: EditedHeader) -> Result<Self, HeaderEditError> {
-        Self::from_edited_header(edited, self.body())
-    }
-
-    pub(crate) fn from_edited_header(
-        edited: EditedHeader,
-        body: &[u8],
-    ) -> Result<Self, HeaderEditError> {
-        let header = edited.into_bytes_for_body(body.len())?;
-        let total = header
-            .len()
-            .checked_add(body.len())
-            .ok_or(HeaderEditError::SizeOverflow)?;
-        let body_start = header.len();
-        let matching_header = normalize_folded_header(&header);
-
-        // Build the complete replacement before returning it so callers keep
-        // the preceding message when size arithmetic fails. Only the header
-        // is changed; the existing body bytes are copied without parsing.
-        let mut raw = Vec::with_capacity(total);
-        raw.extend_from_slice(&header);
-        raw.extend_from_slice(body);
-        Ok(Self {
-            raw,
-            header: 0..body_start,
-            body: body_start..total,
-            matching_header,
-        })
-    }
-
     pub fn from_filter_output(
         header: &[u8],
         body: &[u8],
@@ -191,7 +227,7 @@ impl Message {
 
         let matching_header = normalize_folded_header(&raw);
         Ok(MessageHead {
-            raw,
+            backing: HeaderBacking::Input(raw),
             matching_header,
             limits,
         })
@@ -199,9 +235,22 @@ impl Message {
 }
 
 impl MessageHead {
+    pub(crate) fn from_edited_header(
+        edited: EditedHeader,
+        body_len: usize,
+        limits: MessageLimits,
+    ) -> Result<Self, HeaderEditError> {
+        edited.validate(body_len, limits)?;
+        Ok(Self {
+            backing: HeaderBacking::Indexed(edited),
+            matching_header: None,
+            limits,
+        })
+    }
+
     pub(crate) fn replace_edited_header(&mut self, edited: EditedHeader) {
-        self.raw = edited.into_streaming_bytes();
-        self.matching_header = normalize_folded_header(&self.raw);
+        self.backing = HeaderBacking::Indexed(edited);
+        self.matching_header = None;
     }
 
     pub(crate) fn limits(&self) -> MessageLimits {
@@ -209,61 +258,93 @@ impl MessageHead {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.raw
+        match &self.backing {
+            HeaderBacking::Input(raw) => raw,
+            HeaderBacking::Indexed(header) => header.as_bytes(),
+        }
+    }
+
+    pub(crate) fn header_view(&self) -> HeaderView<'_> {
+        match &self.backing {
+            HeaderBacking::Input(raw) => HeaderView::Raw(raw),
+            HeaderBacking::Indexed(header) => HeaderView::Indexed(header),
+        }
     }
 
     pub fn matching_header(&self) -> &[u8] {
-        self.matching_header.as_deref().unwrap_or(&self.raw)
+        match &self.backing {
+            HeaderBacking::Input(raw) => self.matching_header.as_deref().unwrap_or(raw),
+            HeaderBacking::Indexed(header) => header.matching_header(),
+        }
     }
 
     pub fn take_matching_header(&mut self) -> Option<Vec<u8>> {
-        self.matching_header.take()
+        match &self.backing {
+            HeaderBacking::Input(_) => self.matching_header.take(),
+            HeaderBacking::Indexed(header) => header.normalized().map(<[u8]>::to_vec),
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.raw.len()
+        match &self.backing {
+            HeaderBacking::Input(raw) => raw.len(),
+            HeaderBacking::Indexed(header) => header.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.raw.is_empty()
+        self.len() == 0
     }
 
-    pub fn read_body(mut self, reader: &mut impl BufRead) -> Result<Message, MessageReadError> {
-        let body_start = self.raw.len();
-        read_body(reader, &self.limits, body_start, &mut self.raw, true, None)?;
-        let body_end = self.raw.len();
+    fn into_serialized_parts(self) -> (Vec<u8>, Option<Vec<u8>>, MessageLimits) {
+        let (raw, matching) = match self.backing {
+            HeaderBacking::Input(raw) => (raw, self.matching_header),
+            HeaderBacking::Indexed(header) => {
+                let matching = header.normalized().map(<[u8]>::to_vec);
+                (header.into_streaming_bytes(), matching)
+            }
+        };
+        (raw, matching, self.limits)
+    }
+
+    pub fn read_body(self, reader: &mut impl BufRead) -> Result<Message, MessageReadError> {
+        let (mut raw, matching_header, limits) = self.into_serialized_parts();
+        let body_start = raw.len();
+        read_body(reader, &limits, body_start, &mut raw, true, None)?;
+        let body_end = raw.len();
 
         Ok(Message {
             header: 0..body_start,
             body: body_start..body_end,
-            matching_header: self.matching_header,
-            raw: self.raw,
+            matching_header,
+            raw,
         })
     }
 
     pub fn read_body_to(
-        mut self,
+        self,
         reader: &mut impl BufRead,
         writer: &mut impl Write,
     ) -> Result<Message, MessageReadError> {
-        writer.write_all(&self.raw)?;
-        let body_start = self.raw.len();
+        let (mut raw, matching_header, limits) = self.into_serialized_parts();
+        writer.write_all(&raw)?;
+        let body_start = raw.len();
         let mut total = body_start;
         read_body(
             reader,
-            &self.limits,
+            &limits,
             body_start,
-            &mut self.raw,
+            &mut raw,
             true,
             Some((&mut total, writer)),
         )?;
-        let body_end = self.raw.len();
+        let body_end = raw.len();
 
         Ok(Message {
             header: 0..body_start,
             body: body_start..body_end,
-            matching_header: self.matching_header,
-            raw: self.raw,
+            matching_header,
+            raw,
         })
     }
 
@@ -272,20 +353,21 @@ impl MessageHead {
         reader: &mut impl BufRead,
         writer: &mut impl Write,
     ) -> Result<StreamedMessage, MessageReadError> {
-        writer.write_all(&self.raw)?;
-        let mut total = self.raw.len();
+        let (raw, matching_header, limits) = self.into_serialized_parts();
+        writer.write_all(&raw)?;
+        let mut total = raw.len();
         read_body(
             reader,
-            &self.limits,
-            self.raw.len(),
+            &limits,
+            raw.len(),
             &mut Vec::new(),
             false,
             Some((&mut total, writer)),
         )?;
 
         Ok(StreamedMessage {
-            header: self.raw,
-            matching_header: self.matching_header,
+            header: raw,
+            matching_header,
             len: total,
         })
     }

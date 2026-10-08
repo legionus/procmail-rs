@@ -15,7 +15,7 @@ pub trait OrderedExecutionHost {
     fn deliver(
         &mut self,
         destination: &Destination,
-        message: &[u8],
+        message: FinalMessage<'_>,
         output_ending: OutputEnding,
         lock: Option<&str>,
         runtime: &mut RuntimeVariables,
@@ -31,7 +31,7 @@ pub trait OrderedExecutionHost {
     fn capture(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: crate::message::MessageBytes<'_>,
         output_ending: OutputEnding,
         options: Option<RecipeOptions>,
         limit: usize,
@@ -40,7 +40,7 @@ pub trait OrderedExecutionHost {
     fn external_condition(
         &mut self,
         command: &str,
-        input: &[u8],
+        input: crate::message::MessageBytes<'_>,
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<Self::Error>>;
     fn replace_global_lock(

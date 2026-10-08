@@ -41,7 +41,7 @@ impl OrderedExecutionHost for RecorderHost<'_> {
     fn deliver(
         &mut self,
         destination: &Destination,
-        _: &[u8],
+        _: FinalMessage<'_>,
         _: OutputEnding,
         _: Option<&str>,
         _: &mut RuntimeVariables,
@@ -65,7 +65,7 @@ impl OrderedExecutionHost for RecorderHost<'_> {
     fn capture(
         &mut self,
         _: &str,
-        _: &[u8],
+        _: procmail_rs::message::MessageBytes<'_>,
         _: OutputEnding,
         _: Option<RecipeOptions>,
         _: usize,
@@ -77,7 +77,7 @@ impl OrderedExecutionHost for RecorderHost<'_> {
     fn external_condition(
         &mut self,
         _: &str,
-        _: &[u8],
+        _: procmail_rs::message::MessageBytes<'_>,
         _: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<Self::Error>> {
         panic!("fixture unexpectedly requested an external condition")

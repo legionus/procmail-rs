@@ -18,7 +18,7 @@ use crate::config::{ActionInput, AssignmentTarget, Config, OutputEnding, Stateme
 use crate::environment::{ProcessEnvironment, ShellPolicy};
 use crate::external_command::{ChildExit, CommandOutcome, FilterOutput, InputWrite};
 use crate::limits::MessageLimits;
-use crate::message::{Message, MessageReadError};
+use crate::message::{Message, MessageBytes, MessageReadError};
 
 pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(960);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -87,7 +87,7 @@ struct ProgramIoOptions {
 
 #[derive(Clone, Copy)]
 struct ProcessInput<'a> {
-    bytes: &'a [u8],
+    bytes: MessageBytes<'a>,
     output_ending: OutputEnding,
     append_lf: bool,
     body_input: bool,
@@ -529,14 +529,15 @@ fn complete_child(input_write: InputWrite, status: ExitStatus, timed_out: bool) 
     }
 }
 
-pub fn run_filter(
+pub fn run_filter<'a>(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,
     command: &str,
-    input: &[u8],
+    input: impl Into<MessageBytes<'a>>,
     options: FilterOptions,
     stderr: Stdio,
 ) -> Result<FilterRun, ExternalProcessError> {
+    let input = input.into();
     let lifecycle = ChildLifecycle::spawn(
         policy,
         environment,
@@ -571,14 +572,15 @@ pub fn run_filter(
     })
 }
 
-pub fn run_program_with_timeout(
+pub fn run_program_with_timeout<'a>(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,
     command: &str,
-    input: &[u8],
+    input: impl Into<MessageBytes<'a>>,
     options: ProgramOptions,
     stderr: Stdio,
 ) -> Result<ProgramRun, ExternalProcessError> {
+    let input = input.into();
     // Original procmail closes stdout for a regular pipe delivery. The safe
     // standard process API cannot request a closed descriptor, so discard it
     // here while the shared runner remains able to route TRAP output.
@@ -598,14 +600,15 @@ pub fn run_program_with_timeout(
     )
 }
 
-pub fn run_program_in_background(
+pub fn run_program_in_background<'a>(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,
     command: &str,
-    input: &[u8],
+    input: impl Into<MessageBytes<'a>>,
     options: ProgramOptions,
     stderr: Stdio,
 ) -> Result<BackgroundProgramRun, ExternalProcessError> {
+    let input = input.into();
     let (child_sender, child_receiver) = std::sync::mpsc::sync_channel(1);
     let waiter = thread::Builder::new()
         .name("procmail-rs-command-wait".to_owned())
@@ -669,14 +672,15 @@ pub fn run_program_in_background(
     })
 }
 
-pub fn run_capture_with_timeout(
+pub fn run_capture_with_timeout<'a>(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,
     command: &str,
-    input: &[u8],
+    input: impl Into<MessageBytes<'a>>,
     options: CaptureOptions,
     stderr: Stdio,
 ) -> Result<CaptureRun, ExternalProcessError> {
+    let input = input.into();
     let (mut output_reader, output_writer) = UnixStream::pair()
         .map_err(|error| process_error(format!("cannot create command output channel: {error}")))?;
     output_reader
@@ -782,15 +786,16 @@ fn read_bounded_output_until(
     }
 }
 
-pub fn run_trap_with_timeout(
+pub fn run_trap_with_timeout<'a>(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,
     command: &str,
-    input: &[u8],
+    input: impl Into<MessageBytes<'a>>,
     timeout: Duration,
     stdout: Stdio,
     stderr: Stdio,
 ) -> Result<ProgramRun, ExternalProcessError> {
+    let input = input.into();
     run_program_with_streams(
         policy,
         environment,
@@ -807,13 +812,14 @@ pub fn run_trap_with_timeout(
     )
 }
 
-fn run_program_with_streams(
+fn run_program_with_streams<'a>(
     policy: &ShellPolicy,
     environment: &ProcessEnvironment,
     command: &str,
-    input: &[u8],
+    input: impl Into<MessageBytes<'a>>,
     options: ProgramIoOptions,
 ) -> Result<ProgramRun, ExternalProcessError> {
+    let input = input.into();
     let ProgramIoOptions {
         output_ending,
         timeout,
@@ -904,14 +910,15 @@ fn terminate_process_group(
     Ok(status)
 }
 
-fn write_action_input(
+fn write_action_input<'a>(
     writer: &mut impl Write,
-    input: &[u8],
+    input: impl Into<MessageBytes<'a>>,
     output_ending: OutputEnding,
     append_lf: bool,
     body_input: bool,
 ) -> std::io::Result<()> {
-    writer.write_all(input)?;
+    let input = input.into();
+    input.write_to(writer)?;
     let needs_normalized_lf = if body_input {
         !input.ends_with(b"\n\n")
     } else {

@@ -3,6 +3,86 @@
 
 use super::*;
 
+fn edited_header<'a>(
+    header: impl Into<HeaderView<'a>>,
+    body_len: usize,
+    value: &str,
+) -> EditedHeader {
+    let action = crate::config::HeaderAction {
+        operations: vec![crate::config::HeaderOperation::Set {
+            line: 1,
+            name: "X-State".into(),
+            value: crate::config::HeaderValue {
+                source: value.into(),
+                expansion: None,
+            },
+        }],
+    };
+    crate::header_edit::apply_header_action(header, body_len, &action, MessageLimits::default())
+        .unwrap()
+        .into_parts()
+        .0
+}
+
+#[test]
+fn header_versions_share_body_without_retaining_preceding_versions() {
+    let original = Message::from_bytes(b"Subject: original\n\nbinary:\0\xff".to_vec());
+    let original_view = PreparedMatchingMessage::new(&original, false);
+
+    for filtered in [false, true] {
+        let mut current = CurrentMessage::default();
+
+        if filtered {
+            current.replace(Message::from_bytes(
+                b"Subject: filtered\n\nbinary:\0\xff".to_vec(),
+            ));
+        }
+
+        let view = current.view(original_view.complete(&original));
+        let body_address = view.body().unwrap().as_ptr();
+        let edit = edited_header(view.header_view(), view.body().unwrap().len(), "first");
+        current
+            .replace_header(edit, original.body(), MessageLimits::default())
+            .unwrap();
+        let branch = current.clone();
+        let old_version = Arc::downgrade(current.replacement.as_ref().unwrap());
+        let view = current.view(original_view.complete(&original));
+        let _ = view.full();
+        let edit = edited_header(view.header_view(), view.body().unwrap().len(), "second");
+        current
+            .replace_header(edit, original.body(), MessageLimits::default())
+            .unwrap();
+        let view = current.view(original_view.complete(&original));
+        assert_eq!(view.body().unwrap().as_ptr(), body_address);
+        assert!(view.raw_header().ends_with(b"X-State: second\n\n"));
+        assert!(
+            branch
+                .view(original_view.complete(&original))
+                .raw_header()
+                .ends_with(b"X-State: first\n\n")
+        );
+        let mut output = Vec::new();
+        FinalMessage::new(view)
+            .unwrap()
+            .write_to(&mut output)
+            .unwrap();
+        assert!(output.ends_with(b"\n\nbinary:\0\xff"));
+        assert!(
+            current
+                .replacement
+                .as_ref()
+                .unwrap()
+                .matching
+                .get()
+                .is_none()
+        );
+        drop(branch);
+        assert!(old_version.upgrade().is_none());
+    }
+
+    assert_eq!(original.as_bytes(), b"Subject: original\n\nbinary:\0\xff");
+}
+
 #[test]
 fn prepared_matching_message_normalizes_only_matching_views() {
     let message = Message::from_bytes(b"Subject: one\n two\n\nbody".to_vec());
@@ -35,8 +115,12 @@ fn current_message_clones_share_the_complete_replacement() {
 
     assert!(current.shares_replacement_with(&branch));
     assert_eq!(
-        branch.view(prepared.complete(&original)).raw(),
-        Some(replacement.as_slice())
+        FinalMessage::new(branch.view(prepared.complete(&original)))
+            .unwrap()
+            .bytes()
+            .parts()
+            .concat(),
+        replacement
     );
 }
 
