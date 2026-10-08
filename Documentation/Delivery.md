@@ -60,6 +60,15 @@ such; retrying can create a duplicate. The implementation makes no claim about
 filesystems whose link, rename, locking, or persistence behavior differs from
 the local filesystems covered by the platform tests.
 
+Delivery to several destinations is not a single filesystem transaction. If
+a later publication fails, earlier visible messages remain and pending sinks
+are aborted. A sync failure after publication also preserves that visible
+message. Retrying the complete input can therefore duplicate earlier deliveries.
+Handled signals interrupt input reading and release pending sinks; they do not
+undo a publication that has already completed. `SIGKILL` and process crashes
+cannot run cleanup, and the portable backend can then leave a named file in
+`tmp` for external maintenance.
+
 Mbox appends are serialized with `flock`, using `LOCKTIMEOUT` and `LOCKSLEEP`.
 The original
 length is recorded while locked. A failed append or sync attempts to truncate

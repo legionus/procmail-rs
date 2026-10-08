@@ -298,6 +298,35 @@ fn durability_failure_after_publication_is_not_reported_as_success() {
 }
 
 #[test]
+fn durability_failure_preserves_published_sinks_and_aborts_the_rest() {
+    let input = b"\nbody";
+    let states: Vec<_> = (0..3)
+        .map(|_| Rc::new(RefCell::new(SinkState::default())))
+        .collect();
+    let (head, mut reader) = read_head(input, MessageLimits::default());
+    let pending = PendingFanout::new(vec![
+        TestSink::boxed(states[0].clone()),
+        TestSink::failing_after_publish(states[1].clone()),
+        TestSink::boxed(states[2].clone()),
+    ])
+    .unwrap();
+    let (validated, _) = pending.stream(head, &mut reader).unwrap();
+
+    let error = validated.commit().unwrap_err();
+    assert_eq!(error.committed(), 2);
+    assert_eq!(error.abort_failures(), 0);
+    assert_eq!(error.class(), DeliveryFailureClass::Retryable);
+
+    for state in &states[..2] {
+        assert_eq!(state.borrow().visible.as_deref(), Some(input.as_slice()));
+        assert!(!state.borrow().aborted);
+    }
+
+    assert!(states[2].borrow().aborted);
+    assert!(states[2].borrow().visible.is_none());
+}
+
+#[test]
 fn delivery_errors_preserve_retry_categories_through_fanout() {
     for (kind, expected) in [
         (io::ErrorKind::StorageFull, DeliveryFailureClass::Retryable),

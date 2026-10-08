@@ -183,6 +183,12 @@ fn injected_file_sync_failure_happens_before_maildir_publication() {
 
 #[test]
 fn injected_directory_sync_failure_reports_visible_maildir_message() {
+    for failed_call in [2, 3] {
+        assert_directory_sync_failure_preserves_publication(failed_call);
+    }
+}
+
+fn assert_directory_sync_failure_preserves_publication(failed_call: usize) {
     let maildir = TestMaildir::create();
     let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::Full, 0).unwrap());
     sink.write_all(b"complete message").unwrap();
@@ -191,7 +197,7 @@ fn injected_directory_sync_failure_reports_visible_maildir_message() {
     let error = (*sink)
         .commit_with(|_| {
             sync_calls += 1;
-            if sync_calls == 2 {
+            if sync_calls == failed_call {
                 Err(io::Error::other("injected directory sync failure"))
             } else {
                 Ok(())
@@ -200,12 +206,67 @@ fn injected_directory_sync_failure_reports_visible_maildir_message() {
         .unwrap_err();
 
     let published = error.published().unwrap();
+    assert_eq!(sync_calls, failed_call);
     assert_eq!(
         fs::read(published.last_folder()).unwrap(),
         b"complete message"
     );
     assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
     assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 1);
+}
+
+#[test]
+fn partial_fanout_preserves_the_first_message_and_cleans_unpublished_sinks() {
+    use crate::delivery::PendingFanout;
+    use crate::limits::MessageLimits;
+    use crate::message::Message;
+    use std::io::Cursor;
+
+    let maildirs = [
+        TestMaildir::create(),
+        TestMaildir::create(),
+        TestMaildir::create(),
+    ];
+    let sinks: Vec<Box<dyn PendingSink>> = maildirs
+        .iter()
+        .map(|maildir| {
+            Box::new(MaildirSink::create(maildir.path(), Durability::Full, 0).unwrap())
+                as Box<dyn PendingSink>
+        })
+        .collect();
+    let input = b"Subject: fanout\n\ncomplete message\n";
+    let mut reader = Cursor::new(input);
+    let head = Message::read_headers(&mut reader, MessageLimits::default()).unwrap();
+    let (validated, _) = PendingFanout::new(sinks)
+        .unwrap()
+        .stream(head, &mut reader)
+        .unwrap();
+
+    // Removing the empty directory invalidates its already-open descriptor
+    // for publication without depending on uid-specific permission checks.
+    // The first sink must remain visible and the third must be aborted.
+    fs::remove_dir(maildirs[1].path().join("new")).unwrap();
+    let error = validated.commit().unwrap_err();
+    assert_eq!(error.committed(), 1);
+    assert_eq!(error.abort_failures(), 0);
+    assert_eq!(fs::read(error.last_folder().unwrap()).unwrap(), input);
+
+    for maildir in &maildirs {
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
+    }
+
+    assert_eq!(
+        fs::read_dir(maildirs[0].path().join("new"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(
+        fs::read_dir(maildirs[2].path().join("new"))
+            .unwrap()
+            .count(),
+        0
+    );
 }
 
 #[test]

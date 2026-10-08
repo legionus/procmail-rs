@@ -2019,6 +2019,48 @@ fn sigterm_interrupts_header_input_without_delivery_or_trap() {
 }
 
 #[test]
+fn sigterm_cleans_pending_streamed_maildir_copies() {
+    let path = config_file("");
+    let base = path.parent().unwrap();
+    let copy = base.join("copy");
+    let selected = base.join("selected");
+    create_maildir(&copy);
+    create_maildir(&selected);
+    fs::write(
+        &path,
+        format!("MAILDIR={}\n:0c\ncopy/\n:0\nselected/\n", base.display()),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Exceed pipe and reader buffering so the write cannot finish until
+    // streaming has opened the sinks and consumed body bytes. Keep stdin
+    // open: EOF would validate the message and allow publication to race
+    // with the signal being tested.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"Subject: pending\n\n").unwrap();
+    stdin.write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+    send_sigterm(&child);
+    let output = child.wait_with_output().unwrap();
+    drop(stdin);
+
+    assert_eq!(output.status.code(), Some(143), "{:?}", output.stderr);
+
+    for maildir in [&copy, &selected] {
+        assert!(delivered_messages(maildir).is_empty());
+        assert_eq!(fs::read_dir(maildir.join("tmp")).unwrap().count(), 0);
+    }
+
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn sigterm_cleans_partial_staging_without_delivery_or_trap() {
     let path = config_file("");
     let base = path.parent().unwrap();
