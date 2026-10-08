@@ -253,7 +253,7 @@ impl ExecutionPlan {
         let message = match input {
             #[cfg(test)]
             ResumeInput::Buffered(message) => {
-                matching = PreparedMatchingMessage::new(message, self.needs_message_contents());
+                matching = PreparedMatchingMessage::new(message, self.needs_full_matching());
                 matching.complete(message)
             }
             #[cfg(test)]
@@ -264,7 +264,7 @@ impl ExecutionPlan {
                 CompleteMessage::Streamed(message)
             }
             ResumeInput::Mapped(message) => message
-                .complete_message(self.needs_message_contents())
+                .complete_message(self.needs_full_matching())
                 .ok_or(EvalError::BodyWasNotBuffered)?,
         };
         if continuation.frames.is_empty() && !continuation.restart {

@@ -2,6 +2,30 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 #[test]
+fn full_matching_requirements_are_distinct_from_raw_message_requirements() {
+    for source in [
+        ":0 fw\n| filter\n:0\nmaildir:selected\n",
+        ":0 w\n| consume\n",
+        "VALUE=`capture`\n:0\nmaildir:selected\n",
+        ":0 B\n* needle\nmaildir:selected\n",
+        ":0\n* ? predicate\nmaildir:selected\n",
+    ] {
+        let plan = compile(source);
+        assert!(plan.requirements().needs_end_of_message, "{source}");
+        assert!(!plan.needs_full_matching(), "{source}");
+    }
+
+    for source in [
+        ":0 HB\n* needle\nmaildir:selected\n",
+        "INCLUDERC=child.rc\n:0\nmaildir:selected\n",
+        "SWITCHRC=child.rc\n",
+        ":0\n* $ B ?? needle\nmaildir:selected\n",
+    ] {
+        assert!(compile(source).needs_full_matching(), "{source}");
+    }
+}
+
+#[test]
 fn header_edit_updates_following_header_rules_without_buffering_body() {
     let config = config::parse(
         ":0\nheaders {\n set X-State new\n}\n:0\n* ^X-State: new$\nmaildir:selected\n",

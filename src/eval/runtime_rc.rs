@@ -22,7 +22,8 @@ pub(super) struct RuntimeRcState {
     loader: Mutex<Option<Box<dyn RuntimeRcLoader>>>,
     transitions: AtomicUsize,
     dynamic_ordered_delivery: AtomicBool,
-    dynamic_message_contents: AtomicBool,
+    dynamic_body_contents: AtomicBool,
+    dynamic_full_matching: AtomicBool,
     diagnostics: Mutex<Vec<String>>,
     warning_count: AtomicUsize,
     warnings_omitted: AtomicBool,
@@ -34,7 +35,8 @@ impl RuntimeRcState {
             loader: Mutex::new(loader),
             transitions: AtomicUsize::new(0),
             dynamic_ordered_delivery: AtomicBool::new(false),
-            dynamic_message_contents: AtomicBool::new(false),
+            dynamic_body_contents: AtomicBool::new(false),
+            dynamic_full_matching: AtomicBool::new(false),
             diagnostics: Mutex::new(Vec::new()),
             warning_count: AtomicUsize::new(0),
             warnings_omitted: AtomicBool::new(false),
@@ -66,8 +68,12 @@ impl RuntimeRcState {
         self.dynamic_ordered_delivery.load(Ordering::Relaxed)
     }
 
-    pub(super) fn needs_message_contents(&self) -> bool {
-        self.dynamic_message_contents.load(Ordering::Relaxed)
+    pub(super) fn needs_body_contents(&self) -> bool {
+        self.dynamic_body_contents.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn needs_full_matching(&self) -> bool {
+        self.dynamic_full_matching.load(Ordering::Relaxed)
     }
 
     pub(super) fn reset_transitions(&self) {
@@ -334,11 +340,17 @@ fn load_runtime_rc(
     let config = loaded.into_config();
     let sequence =
         CompiledSequence::compile(&config.statements, &mut preceding, &config.source_location);
+    if sequence.properties().needs_full_matching {
+        context
+            .state
+            .dynamic_full_matching
+            .store(true, Ordering::Relaxed);
+    }
     let requirements = sequence.requirements();
     if requirements.needs_body_contents {
         context
             .state
-            .dynamic_message_contents
+            .dynamic_body_contents
             .store(true, Ordering::Relaxed);
     }
     if sequence.requires_ordered_delivery() {

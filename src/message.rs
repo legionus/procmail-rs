@@ -66,10 +66,21 @@ impl Message {
     pub fn from_filter_output(
         header: &[u8],
         body: &[u8],
-        output: &Message,
+        output: Message,
         area: ActionInput,
         limits: MessageLimits,
     ) -> Result<Self, MessageReadError> {
+        // The child reader already owns the full output. Recheck the active
+        // limits through the same bounded streaming path, then retain that
+        // allocation. Partial filters still require a newly validated join
+        // because the preserved area was not part of the child output.
+        if area == ActionInput::Message {
+            let mut reader = std::io::Cursor::new(output.as_bytes());
+            Self::read_headers(&mut reader, limits)?
+                .stream_to(&mut reader, &mut std::io::sink())?;
+            return Ok(output);
+        }
+
         let output = if area == ActionInput::Body {
             output.as_bytes().get(1..).ok_or_else(|| {
                 MessageReadError::Io(std::io::Error::other(
@@ -83,16 +94,12 @@ impl Message {
         // A partial filter replaces only the bytes sent to the command. Feed
         // the joined slices back through bounded ingestion so retained input
         // plus child output cannot exceed any message or header limit.
-        match area {
-            ActionInput::Message => Self::read_from(&mut std::io::Cursor::new(output), limits),
-            ActionInput::Headers => {
-                let reader = std::io::Cursor::new(output).chain(std::io::Cursor::new(body));
-                Self::read_from(&mut std::io::BufReader::new(reader), limits)
-            }
-            ActionInput::Body => {
-                let reader = std::io::Cursor::new(header).chain(std::io::Cursor::new(output));
-                Self::read_from(&mut std::io::BufReader::new(reader), limits)
-            }
+        if area == ActionInput::Headers {
+            let reader = std::io::Cursor::new(output).chain(std::io::Cursor::new(body));
+            Self::read_from(&mut std::io::BufReader::new(reader), limits)
+        } else {
+            let reader = std::io::Cursor::new(header).chain(std::io::Cursor::new(output));
+            Self::read_from(&mut std::io::BufReader::new(reader), limits)
         }
     }
 

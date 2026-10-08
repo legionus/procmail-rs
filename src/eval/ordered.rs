@@ -1032,11 +1032,9 @@ impl ExecutionPlan {
         H: OrderedExecutionHost + Send,
         H::Error: Send,
     {
-        let message = message
-            .complete_message(self.needs_message_contents())
-            .ok_or(OrderedExecutionError::Evaluation(
-                EvalError::BodyWasNotBuffered,
-            ))?;
+        let message = message.complete_message(self.needs_full_matching()).ok_or(
+            OrderedExecutionError::Evaluation(EvalError::BodyWasNotBuffered),
+        )?;
         let mut context = OrderedTreeExecution {
             message,
             current_message: CurrentMessage::default(),

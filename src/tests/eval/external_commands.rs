@@ -2,6 +2,46 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 #[test]
+fn full_regex_cache_tracks_filter_and_header_replacements_after_reparsing() {
+    let source = r#"
+EXPECTED=two
+:0 fw
+| fold
+:0 HB
+* ^Subject: one  \/two
+headers {
+    set X-Captured $MATCH
+}
+:0 HB
+* $ ^X-Captured: ${EXPECTED}$
+maildir:selected
+"#;
+    let plan = compile(source);
+    let raw = b"Subject: original\n\nbody";
+    let mut runtime = RuntimeVariables::default();
+    let mut deliveries = Vec::new();
+
+    plan.execute_ordered(
+        MappedMessageInput::new(raw, b"Subject: original\n\n".len(), None),
+        &mut runtime,
+        ExecutionServices::new(
+            &mut |destination, bytes, _, _, _, _| {
+                deliveries.push((destination.path().to_owned(), bytes.to_vec()));
+                Ok::<_, DeliveryAttemptError<&str>>(())
+            },
+            &mut NoTrace,
+        ).with_external_action(&mut |_, _, _, _, _, _| {
+            Ok(Some(Message::from_bytes(b"Subject: one\n two\n\nbody".to_vec())))
+        }),
+    ).unwrap();
+
+    assert_eq!(runtime.get("MATCH"), Some("two"));
+    assert_eq!(deliveries, [(
+        "selected".to_owned(), b"Subject: one\n two\nX-Captured: two\n\nbody".to_vec(),
+    )]);
+}
+
+#[test]
 fn external_action_observes_edited_headers() {
     let config = config::parse(":0\nheaders {\n set X-State new\n}\n:0 w\n| consume\n")
         .unwrap()

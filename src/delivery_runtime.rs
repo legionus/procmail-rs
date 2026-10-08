@@ -398,7 +398,7 @@ impl DeliveryRuntime {
         let staged = staging.map(MAX_MESSAGE_SIZE, header_len).map_err(|error| {
             OperationalError::Internal(format!("cannot map staged message: {error}"))
         })?;
-        let matching_staged = if execution.needs_message_contents() {
+        let matching_staged = if execution.needs_full_matching() {
             matching_header
                 .as_deref()
                 .map(|header| stage_matching_message(staging_directory, header, &staged))

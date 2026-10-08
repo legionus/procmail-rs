@@ -39,3 +39,80 @@ fn current_message_clones_share_the_complete_replacement() {
         Some(replacement.as_slice())
     );
 }
+
+#[test]
+fn replacement_matching_is_lazy_reused_and_reset_by_replacement() {
+    let original = Message::from_bytes(b"Subject: original\n\nbody".to_vec());
+    let prepared = PreparedMatchingMessage::new(&original, true);
+    let mut current = CurrentMessage::default();
+    current.replace(Message::from_bytes(b"Subject: one\n two\n\nbody".to_vec()));
+    let branch = current.clone();
+
+    assert_eq!(
+        current.view(prepared.complete(&original)).header_bytes(),
+        b"Subject: one  two\n\n"
+    );
+    assert!(
+        current
+            .replacement
+            .as_ref()
+            .unwrap()
+            .matching
+            .get()
+            .is_none()
+    );
+
+    let first = current.view(prepared.complete(&original)).full().unwrap();
+    assert_eq!(first, b"Subject: one  two\n\nbody");
+    let shared = branch.view(prepared.complete(&original)).full().unwrap();
+    assert_eq!(first.as_ptr(), shared.as_ptr());
+
+    current.replace(Message::from_bytes(
+        b"Subject: changed\n again\n\nnew".to_vec(),
+    ));
+    assert!(
+        current
+            .replacement
+            .as_ref()
+            .unwrap()
+            .matching
+            .get()
+            .is_none()
+    );
+    assert_eq!(
+        current.view(prepared.complete(&original)).full().unwrap(),
+        b"Subject: changed  again\n\nnew"
+    );
+    assert_eq!(
+        branch.view(prepared.complete(&original)).full().unwrap(),
+        b"Subject: one  two\n\nbody"
+    );
+}
+
+#[test]
+fn concurrent_copy_branches_share_one_normalized_full_view() {
+    let original = Message::from_bytes(b"Subject: original\n\nbody".to_vec());
+    let prepared = PreparedMatchingMessage::new(&original, true);
+    let mut current = CurrentMessage::default();
+    current.replace(Message::from_bytes(b"Subject: one\n two\n\nbody".to_vec()));
+    let barrier = std::sync::Barrier::new(4);
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let branch = current.clone();
+                let original = prepared.complete(&original);
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    branch.view(original).full().unwrap().as_ptr() as usize
+                })
+            })
+            .collect();
+        let addresses: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(addresses.iter().all(|address| *address == addresses[0]));
+    });
+}

@@ -8,6 +8,89 @@ use crate::config::ActionInput;
 use crate::limits::MessageLimits;
 
 #[test]
+fn full_filter_output_retains_the_owned_allocation_and_validates_new_limits() {
+    let raw = b"Subject: one\n two\n\nbody";
+    let output = Message::read_from(&mut Cursor::new(raw), MessageLimits::default()).unwrap();
+    let address = output.as_bytes().as_ptr();
+    let replacement = Message::from_filter_output(
+        b"old\n\n",
+        b"old body",
+        output,
+        ActionInput::Message,
+        MessageLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(replacement.as_bytes().as_ptr(), address);
+    assert_eq!(replacement.as_bytes(), raw);
+    assert_eq!(replacement.matching_header(), b"Subject: one  two\n\n");
+
+    for limit in [raw.len() - 1, raw.len(), raw.len() + 1] {
+        let limits = MessageLimits {
+            message_size: limit,
+            ..MessageLimits::default()
+        };
+        let result = Message::from_filter_output(
+            b"old\n\n",
+            b"old body",
+            replacement.clone(),
+            ActionInput::Message,
+            limits,
+        );
+        assert_eq!(result.is_ok(), limit >= raw.len());
+    }
+}
+
+#[test]
+fn owned_full_filter_output_enforces_every_ingestion_limit() {
+    let raw = b"Subject: one\n two\nX: y\n\nbody";
+    let output = Message::read_from(&mut Cursor::new(raw), MessageLimits::default()).unwrap();
+
+    // The owned fast path must reject the same bytes as bounded ingestion,
+    // including physical lines and folded fields, even when a caller lowers
+    // its limits after the output was initially accepted.
+    for limit in 0..=raw.len() + 1 {
+        let defaults = MessageLimits::default();
+
+        for limits in [
+            MessageLimits {
+                message_size: limit,
+                ..defaults
+            },
+            MessageLimits {
+                headers_size: limit,
+                ..defaults
+            },
+            MessageLimits {
+                body_size: limit,
+                ..defaults
+            },
+            MessageLimits {
+                header_line_size: limit,
+                ..defaults
+            },
+            MessageLimits {
+                header_field_size: limit,
+                ..defaults
+            },
+        ] {
+            let expected = Message::read_from(&mut Cursor::new(raw), limits);
+            let actual = Message::from_filter_output(
+                b"old\n\n",
+                b"old",
+                output.clone(),
+                ActionInput::Message,
+                limits,
+            );
+            assert_eq!(actual.is_ok(), expected.is_ok(), "{limits:?}");
+
+            if let (Err(actual), Err(expected)) = (actual, expected) {
+                assert_eq!(actual.to_string(), expected.to_string());
+            }
+        }
+    }
+}
+
+#[test]
 fn partial_filter_output_preserves_the_unselected_area() {
     let header_output = Message::from_bytes(b"Subject: new\n\n".to_vec());
     let body_output = Message::from_bytes(b"\nnew body".to_vec());
@@ -15,7 +98,7 @@ fn partial_filter_output_preserves_the_unselected_area() {
     let replaced_header = Message::from_filter_output(
         b"Subject: old\n\n",
         b"old body",
-        &header_output,
+        header_output,
         ActionInput::Headers,
         MessageLimits::default(),
     )
@@ -23,7 +106,7 @@ fn partial_filter_output_preserves_the_unselected_area() {
     let replaced_body = Message::from_filter_output(
         b"Subject: old\n\n",
         b"old body",
-        &body_output,
+        body_output,
         ActionInput::Body,
         MessageLimits::default(),
     )
@@ -43,14 +126,15 @@ fn partial_filter_output_rechecks_the_combined_message_limit() {
     };
 
     assert!(
-        Message::from_filter_output(b"X:\n\n", b"old", &output, ActionInput::Body, limits).is_ok()
+        Message::from_filter_output(b"X:\n\n", b"old", output.clone(), ActionInput::Body, limits)
+            .is_ok()
     );
 
     let limits = MessageLimits {
         message_size: 7,
         ..limits
     };
-    let error = Message::from_filter_output(b"X:\n\n", b"old", &output, ActionInput::Body, limits)
+    let error = Message::from_filter_output(b"X:\n\n", b"old", output, ActionInput::Body, limits)
         .unwrap_err();
     assert!(matches!(
         error,

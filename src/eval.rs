@@ -139,7 +139,7 @@ struct PlanProperties {
     requirements: InputRequirements,
     requires_ordered_delivery: bool,
     requires_preemptive_ordered_delivery: bool,
-    needs_message_contents: bool,
+    needs_full_matching: bool,
     has_external_commands: bool,
 }
 
@@ -151,7 +151,7 @@ impl PlanProperties {
                 || other.requires_ordered_delivery,
             requires_preemptive_ordered_delivery: self.requires_preemptive_ordered_delivery
                 || other.requires_preemptive_ordered_delivery,
-            needs_message_contents: self.needs_message_contents || other.needs_message_contents,
+            needs_full_matching: self.needs_full_matching || other.needs_full_matching,
             has_external_commands: self.has_external_commands || other.has_external_commands,
         }
     }
@@ -475,7 +475,7 @@ impl ExecutionPlan {
 
     pub fn requirements(&self) -> InputRequirements {
         let mut requirements = self.root.requirements();
-        if self.runtime_rc.needs_message_contents() {
+        if self.runtime_rc.needs_body_contents() {
             requirements.needs_body_contents = true;
             requirements.needs_end_of_message = true;
         }
@@ -494,8 +494,8 @@ impl ExecutionPlan {
             || self.runtime_rc.requires_ordered_delivery()
     }
 
-    pub fn needs_message_contents(&self) -> bool {
-        self.root.properties().needs_message_contents || self.runtime_rc.needs_message_contents()
+    pub fn needs_full_matching(&self) -> bool {
+        self.root.properties().needs_full_matching || self.runtime_rc.needs_full_matching()
     }
 
     pub fn has_external_commands(&self) -> bool {

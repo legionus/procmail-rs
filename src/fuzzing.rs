@@ -200,7 +200,7 @@ pub fn rc_configuration(data: &[u8]) {
     let plan = crate::eval::ExecutionPlan::compile(&config, None);
     let _ = plan.requirements();
     let _ = plan.requires_ordered_delivery();
-    let _ = plan.needs_message_contents();
+    let _ = plan.needs_full_matching();
     let _ = plan.has_external_commands();
     let _ = plan.explain();
 }
@@ -267,7 +267,7 @@ pub fn ordered_evaluation(data: &[u8]) {
         .expand(&supplied)
         .expect("fixed mock include configuration must compile");
     let plan = ExecutionPlan::compile_for_fuzzing(&config, FuzzRcLoader { config: child });
-    let matching = PreparedMatchingMessage::new(&message, plan.needs_message_contents());
+    let matching = PreparedMatchingMessage::new(&message, plan.needs_full_matching());
     let mut runtime = RuntimeVariables::default();
     runtime.set_system_hostname("fuzz-host".to_owned());
     let host = FuzzExecutionHost::new(selector);

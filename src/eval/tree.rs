@@ -130,9 +130,13 @@ fn statement_properties(statement: &CompiledStatement) -> PlanProperties {
             properties.requires_ordered_delivery = unset.unset.target == AssignmentTarget::LockFile;
             properties.requires_preemptive_ordered_delivery = properties.requires_ordered_delivery;
         }
-        CompiledStatement::Host(_)
-        | CompiledStatement::Include(_)
-        | CompiledStatement::Switch(_) => {}
+        CompiledStatement::Include(_) | CompiledStatement::Switch(_) => {
+            // A file loaded during ordered evaluation may introduce HB regexes.
+            // Retain the original normalized mapped view before execution so
+            // those unknown conditions never fall back to folded raw headers.
+            properties.needs_full_matching = true;
+        }
+        CompiledStatement::Host(_) => {}
     }
     properties
 }
@@ -437,7 +441,7 @@ fn action_properties(action: &CompiledAction) -> PlanProperties {
             },
             requires_ordered_delivery: true,
             requires_preemptive_ordered_delivery: true,
-            needs_message_contents: true,
+            needs_full_matching: false,
             has_external_commands: !action.command.is_empty(),
         },
         // A capture action only observes the area selected by h/b. A
@@ -461,7 +465,7 @@ fn action_properties(action: &CompiledAction) -> PlanProperties {
                 },
                 requires_ordered_delivery: true,
                 requires_preemptive_ordered_delivery: true,
-                needs_message_contents: true,
+                needs_full_matching: false,
                 has_external_commands: true,
             },
         },
@@ -481,7 +485,7 @@ fn action_properties(action: &CompiledAction) -> PlanProperties {
                 },
                 requires_ordered_delivery: ordered,
                 requires_preemptive_ordered_delivery: ordered,
-                needs_message_contents: command,
+                needs_full_matching: false,
                 has_external_commands: command,
             }
         }

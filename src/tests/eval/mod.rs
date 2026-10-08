@@ -96,7 +96,7 @@ fn evaluate(
     delivery: &mut (impl Delivery + Send),
 ) -> Result<Outcome, EvalError> {
     let plan = ExecutionPlan::compile(config, None);
-    let prepared_matching = PreparedMatchingMessage::new(message, plan.needs_message_contents());
+    let prepared_matching = PreparedMatchingMessage::new(message, plan.needs_full_matching());
     let matching = Some(prepared_matching.views(message));
     let mut runtime = RuntimeVariables::default();
     let mut trace = NoTrace;

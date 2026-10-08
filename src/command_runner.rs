@@ -558,7 +558,7 @@ fn finish_filter(
     let replacement = Message::from_filter_output(
         input.header(),
         input.body(),
-        &output,
+        output,
         options.action_input,
         limits,
     )

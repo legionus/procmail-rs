@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::config::{ActionInput, ConditionInput};
 use crate::message::Message;
@@ -121,7 +121,7 @@ impl ExternalActionInput<'_> {
 #[derive(Debug)]
 pub(super) struct OwnedCompleteMessage {
     pub(super) message: Message,
-    pub(super) matching: PreparedMatchingMessage,
+    matching: OnceLock<PreparedMatchingMessage>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -131,16 +131,18 @@ pub(super) struct CurrentMessage {
 
 impl CurrentMessage {
     pub(super) fn replace(&mut self, message: Message) {
-        let matching = PreparedMatchingMessage::new(&message, true);
-        self.replacement = Some(Arc::new(OwnedCompleteMessage { message, matching }));
+        // A new version owns a fresh cache. Copy branches can share this
+        // immutable version and its eventual full regex view without copying
+        // the body; replacing one branch cannot invalidate another branch.
+        self.replacement = Some(Arc::new(OwnedCompleteMessage {
+            message,
+            matching: OnceLock::new(),
+        }));
     }
 
     pub(super) fn view<'a>(&'a self, original: CompleteMessage<'a>) -> CompleteMessage<'a> {
         match self.replacement.as_deref() {
-            Some(replacement) => CompleteMessage::Buffered {
-                message: &replacement.message,
-                matching_full: replacement.matching.full.as_deref(),
-            },
+            Some(replacement) => CompleteMessage::Owned(replacement),
             None => original,
         }
     }
@@ -172,6 +174,8 @@ impl<'a> FinalMessage<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum CompleteMessage<'a> {
+    Owned(&'a OwnedCompleteMessage),
+    #[cfg(test)]
     Buffered {
         message: &'a Message,
         matching_full: Option<&'a [u8]>,
@@ -211,6 +215,8 @@ fn matching_views_are_valid(
 impl<'a> CompleteMessage<'a> {
     pub(super) fn raw(self) -> Option<&'a [u8]> {
         match self {
+            Self::Owned(owned) => Some(owned.message.as_bytes()),
+            #[cfg(test)]
             Self::Buffered { message, .. } => Some(message.as_bytes()),
             #[cfg(test)]
             Self::Streamed(_) => None,
@@ -220,6 +226,8 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn raw_header(self) -> &'a [u8] {
         match self {
+            Self::Owned(owned) => owned.message.header(),
+            #[cfg(test)]
             Self::Buffered { message, .. } => message.header(),
             #[cfg(test)]
             Self::Streamed(message) => message.header(),
@@ -255,6 +263,8 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn header_bytes(self) -> &'a [u8] {
         match self {
+            Self::Owned(owned) => owned.message.matching_header(),
+            #[cfg(test)]
             Self::Buffered { message, .. } => message.matching_header(),
             #[cfg(test)]
             Self::Streamed(message) => message.matching_header(),
@@ -269,6 +279,8 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn body(self) -> Option<&'a [u8]> {
         match self {
+            Self::Owned(owned) => Some(owned.message.body()),
+            #[cfg(test)]
             Self::Buffered { message, .. } => Some(message.body()),
             #[cfg(test)]
             Self::Streamed(_) => None,
@@ -280,6 +292,22 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn full(self) -> Option<&'a [u8]> {
         match self {
+            Self::Owned(owned) => {
+                // Every consumer obtains full matching bytes through this
+                // view. Preparing lazily here keeps callers from accidentally
+                // using raw folded headers or allocating for header/body-only
+                // conditions. Shared branches initialize the cache once.
+                let matching = owned
+                    .matching
+                    .get_or_init(|| PreparedMatchingMessage::new(&owned.message, true));
+                Some(
+                    matching
+                        .full
+                        .as_deref()
+                        .unwrap_or_else(|| owned.message.as_bytes()),
+                )
+            }
+            #[cfg(test)]
             Self::Buffered {
                 message,
                 matching_full,
@@ -294,6 +322,8 @@ impl<'a> CompleteMessage<'a> {
 
     pub(super) fn len(self) -> usize {
         match self {
+            Self::Owned(owned) => owned.message.len(),
+            #[cfg(test)]
             Self::Buffered { message, .. } => message.len(),
             #[cfg(test)]
             Self::Streamed(message) => message.len(),

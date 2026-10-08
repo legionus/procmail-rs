@@ -261,7 +261,7 @@ impl CompiledCondition {
             requirements,
             requires_ordered_delivery: ordered,
             requires_preemptive_ordered_delivery: ordered,
-            needs_message_contents: message_contents,
+            needs_full_matching: message_contents,
             has_external_commands: external,
         }
     }
