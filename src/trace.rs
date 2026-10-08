@@ -684,6 +684,10 @@ fn render_json_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::R
             }
             output.write_char('}')
         }
+        TraceEvent::ExternalFilterReplaced { recipe_line, bytes } => write!(
+            output,
+            "{{\"event\":\"external-filter-replaced\",\"recipe_line\":{recipe_line},\"bytes\":{bytes}}}"
+        ),
         TraceEvent::HeaderOperation {
             line,
             kind,
@@ -899,6 +903,10 @@ fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::
             }
             Ok(())
         }
+        TraceEvent::ExternalFilterReplaced { recipe_line, bytes } => write!(
+            output,
+            "procmail-rs: Filter at line {recipe_line} replaced message: {bytes} bytes"
+        ),
         TraceEvent::HeaderOperation {
             line,
             kind,
@@ -1161,6 +1169,10 @@ pub enum TraceEvent {
     ExternalCommandExecuting {
         line: usize,
         command: Option<TraceValue>,
+    },
+    ExternalFilterReplaced {
+        recipe_line: usize,
+        bytes: usize,
     },
     HeaderOperation {
         line: usize,

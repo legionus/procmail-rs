@@ -577,6 +577,12 @@ impl CompiledNode {
                                     },
                                 )
                             })?;
+                            context.host.trace().record(
+                                crate::trace::TraceEvent::ExternalFilterReplaced {
+                                    recipe_line: self.line,
+                                    bytes: message.as_bytes().len(),
+                                },
+                            );
                             context.replace_message(message);
                             context.action_succeeded(SequenceControl::Continue)
                         } else if replacement.is_some() {

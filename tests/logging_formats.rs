@@ -74,6 +74,53 @@ fn maildir_type_error_reports_cause_and_respects_trace_detail() {
 }
 
 #[test]
+fn successful_filter_logs_the_accepted_replacement_size() {
+    let base = temporary_directory("filter-size");
+    for (format, expected) in [
+        (
+            "text",
+            "procmail-rs: Filter at line 6 replaced message: 0 bytes",
+        ),
+        (
+            "json",
+            "{\"event\":\"external-filter-replaced\",\"recipe_line\":6,\"bytes\":0}",
+        ),
+    ] {
+        let logfile = base.join("filter.log");
+        let config = base.join("rules.rc");
+        fs::write(&logfile, b"").unwrap();
+        fs::write(
+            &config,
+            format!(
+                "MAILDIR={}\nLOGFILE={}\nVERBOSE=yes\nLOGDETAIL=metadata\nSHELL=/bin/sh\n:0 fw\n| cat >/dev/null\n:0\n/dev/null\n",
+                base.display(), logfile.display()
+            ),
+        )
+        .unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--format", format, "--config"])
+            .arg(&config)
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"Subject: private-header-sentinel\n\nprivate-body-sentinel\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+        let trace = fs::read_to_string(&logfile).unwrap();
+        assert!(trace.contains(expected), "{trace}");
+        assert!(!trace.contains("private-header-sentinel"));
+        assert!(!trace.contains("private-body-sentinel"));
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn verbose_filter_writes_text_trace_to_logfile() {
     let base = temporary_directory("text");
     let selected = base.join("selected");
