@@ -43,9 +43,10 @@ one hard link is rejected.
 | `file` | `fsync` message before publication | `fsync` mailbox after append |
 | `full` | As `file`, then `fsync` both `tmp` and `new` after publication | As `file`, then `fsync` the parent directory |
 
-On Linux, Maildir data remains in an unnamed `O_TMPFILE` until it is linked
-into `tmp`, then a descriptor-relative no-replace rename publishes it in
-`new`. On other Unix systems, delivery creates a named file exclusively in
+On Linux, Maildir data remains in an unnamed `O_TMPFILE` created under `tmp`
+until a descriptor-relative no-replace link publishes it directly in `new`.
+A failed publication leaves no named temporary file requiring cleanup.
+On other Unix systems, delivery creates a named file exclusively in
 `tmp`, links it into `new` without replacement, verifies that both names
 identify the open file, and removes the `tmp` name. The Maildir and all three
 subdirectories must be owned by the current uid and not writable by group or

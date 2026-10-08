@@ -4,7 +4,7 @@
 use std::io;
 
 use rustix::fd::OwnedFd;
-use rustix::fs::{AtFlags, OFlags, RenameFlags, linkat, openat, renameat_with};
+use rustix::fs::{AtFlags, OFlags, linkat, openat};
 use rustix::rand::{GetRandomFlags, getrandom};
 
 use super::{MAILDIR_FILE_MODE, MAX_NAME_ATTEMPTS, PlatformPublishError, io_error};
@@ -38,24 +38,15 @@ impl PendingFile {
 
     pub(super) fn publish(
         self,
-        tmp_dir: &OwnedFd,
+        _tmp_dir: &OwnedFd,
         new_dir: &OwnedFd,
         mut next_name: impl FnMut() -> io::Result<String>,
     ) -> Result<String, PlatformPublishError> {
-        // Retry only collisions. Other failures cannot be repaired by another
-        // name, and the fixed attempt count prevents a broken random source or
-        // hostile directory from keeping delivery in this loop.
-        let name = link_unique(&self.file, tmp_dir, &mut next_name)?;
-        renameat_with(
-            tmp_dir,
-            name.as_str(),
-            new_dir,
-            name.as_str(),
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(io_error)
-        .map_err(PlatformPublishError::before)?;
-        Ok(name)
+        // Publish the completed unnamed inode directly. An intermediate named
+        // tmp entry would require pathname cleanup after a failed rename and
+        // could be substituted before cleanup. linkat atomically rejects name
+        // collisions; failure leaves only the descriptor-owned unnamed inode.
+        link_unique(&self.file, new_dir, &mut next_name)
     }
 
     pub(super) fn abort(self, _tmp_dir: &OwnedFd) -> io::Result<()> {

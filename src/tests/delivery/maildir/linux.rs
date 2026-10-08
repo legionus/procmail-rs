@@ -110,7 +110,7 @@ fn publication_never_replaces_an_existing_new_file() {
         fs::read(maildir.path().join("new").join(name)).unwrap(),
         b"existing"
     );
-    assert!(maildir.path().join("tmp").join(name).exists());
+    assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
 }
 
 #[test]
@@ -131,6 +131,28 @@ fn write_failure_never_creates_a_maildir_entry() {
         Some(rustix::io::Errno::NOSPC.raw_os_error())
     );
     PendingSink::abort(sink).unwrap();
+    assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+}
+
+#[test]
+fn publication_failure_leaves_no_named_temporary_file() {
+    let maildir = TestMaildir::create();
+    let tmp_dir = open_directory_path(&maildir.path().join("tmp")).unwrap();
+    let invalid_new = openat(
+        &tmp_dir,
+        "not-directory",
+        OFlags::CREATE | OFlags::WRONLY | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .unwrap();
+    fs::remove_file(maildir.path().join("tmp/not-directory")).unwrap();
+    let pending = PendingFile::create(&tmp_dir, 0, unique_name).unwrap();
+    rustix::io::write(pending.file(), b"complete message").unwrap();
+    let error = pending
+        .publish(&tmp_dir, &invalid_new, unique_name)
+        .unwrap_err();
+    assert_eq!(error.into_parts().0.kind(), io::ErrorKind::NotADirectory);
     assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
     assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
 }
