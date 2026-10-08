@@ -11,6 +11,9 @@ use std::process::Command;
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "cli/composed_runtime.rs"]
+mod composed_runtime;
+
 fn config_file(contents: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
