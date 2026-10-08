@@ -14,7 +14,7 @@ use procmail_rs::config::{
     self, MAX_COMMAND_LINE_VARIABLES, PositionalArguments, SuppliedVariable,
 };
 use procmail_rs::configuration;
-use procmail_rs::delivery::DeliveryFailureClass;
+use procmail_rs::delivery::{DeliveryFailure, DeliveryFailureClass};
 use procmail_rs::eval::{
     ActionKindExplanation, ConditionKindExplanation, ExecutionPlan, HeaderEvaluation,
     OrderedExecutionError, PlanExplanation,
@@ -131,6 +131,10 @@ impl FilterTrace {
 
 #[derive(Debug)]
 enum OperationalError {
+    Delivery {
+        failure: DeliveryFailure,
+        message: String,
+    },
     Configuration(String),
     Input(String),
     TemporaryDelivery(String),
@@ -158,6 +162,7 @@ enum ExitStatus {
 impl std::fmt::Display for OperationalError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
+            Self::Delivery { message, .. } => message,
             Self::Configuration(message)
             | Self::Input(message)
             | Self::TemporaryDelivery(message)
@@ -171,6 +176,10 @@ impl std::fmt::Display for OperationalError {
 }
 
 impl OperationalError {
+    fn delivery_failure(failure: DeliveryFailure, message: String) -> Self {
+        Self::Delivery { failure, message }
+    }
+
     fn delivery(class: DeliveryFailureClass, message: String) -> Self {
         match class {
             DeliveryFailureClass::Retryable => Self::TemporaryDelivery(message),
@@ -181,6 +190,11 @@ impl OperationalError {
 
     fn exit_code(&self) -> u8 {
         match self {
+            Self::Delivery { failure, .. } => match failure.class {
+                DeliveryFailureClass::Retryable => ExitStatus::TemporaryDelivery as u8,
+                DeliveryFailureClass::Permanent => ExitStatus::PermanentDestination as u8,
+                DeliveryFailureClass::Internal => ExitStatus::Internal as u8,
+            },
             Self::Configuration(_) => ExitStatus::Configuration as u8,
             Self::Input(_) => ExitStatus::Input as u8,
             Self::TemporaryDelivery(_) => ExitStatus::TemporaryDelivery as u8,

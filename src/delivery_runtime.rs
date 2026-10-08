@@ -11,7 +11,9 @@ use procmail_rs::delivery::local_lock::LocalLock;
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};
 use procmail_rs::delivery::mbox::MboxFile;
 use procmail_rs::delivery::staging::StagingFile;
-use procmail_rs::delivery::{DeliveryFailureClass, PendingFanout, PendingSink};
+use procmail_rs::delivery::{
+    DeliveryFailure, DeliveryFailureClass, DeliveryOperation, PendingFanout, PendingSink,
+};
 use procmail_rs::eval::{
     CapturedCommand, CompletionState, DeliveryAttemptError, DeliveryPlan, ExecutionPlan,
     ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage, OrderedExecutionError,
@@ -368,9 +370,9 @@ impl DeliveryRuntime {
         let sinks = open_sinks(plan.deliveries(), self.durability, runtime, trace)?;
         let pending = PendingFanout::new(sinks)
             .map_err(|error| OperationalError::Internal(error.to_string()))?;
-        let (validated, _) = pending.stream(head, reader).map_err(|error| {
-            OperationalError::Input(format!("cannot stream message from stdin: {error}"))
-        })?;
+        let (validated, _) = pending
+            .stream(head, reader)
+            .map_err(|error| report_stream_failure(error, plan.deliveries(), trace))?;
         check_signal()?;
         let published = commit_delivery(validated, plan.deliveries(), runtime, trace)?;
         self.publications
@@ -422,7 +424,7 @@ impl DeliveryRuntime {
         // Neither side is published yet, so any failure drops both private outputs
         // before the caller can observe a partial message.
         let (validated, _) = pending.stage(head, reader, &mut staging).map_err(|error| {
-            OperationalError::Input(format!("cannot stage message from stdin: {error}"))
+            report_stream_failure(error, continuation.pending_deliveries(), trace)
         })?;
         check_signal()?;
         let staged = staging.map(MAX_MESSAGE_SIZE, header_len).map_err(|error| {
@@ -494,9 +496,19 @@ impl DeliveryRuntime {
         let late_sinks = open_sinks(late_deliveries, self.durability, runtime, trace)?;
         let late = PendingFanout::new(late_sinks)
             .map_err(|error| OperationalError::Internal(error.to_string()))?;
-        let validated = validated
-            .append_bytes(late, staged.as_bytes())
-            .map_err(|error| OperationalError::delivery(error.class(), error.to_string()))?;
+        let validated =
+            validated
+                .append_bytes(late, staged.as_bytes())
+                .map_err(|error| match error.delivery_failure() {
+                    Some((index, failure)) => report_indexed_failure(
+                        index,
+                        failure,
+                        late_deliveries,
+                        error.to_string(),
+                        trace,
+                    ),
+                    None => OperationalError::delivery(error.class(), error.to_string()),
+                })?;
         check_signal()?;
         let published = commit_delivery(validated, plan.deliveries(), runtime, trace)?;
         self.publications
@@ -713,7 +725,8 @@ impl PublicationDestinations<'_> {
 }
 
 struct PublicationFailure {
-    class: DeliveryFailureClass,
+    failure: DeliveryFailure,
+    failed_index: usize,
     error: OperationalError,
 }
 
@@ -732,12 +745,17 @@ impl<'a> PublicationAttempt<'a> {
 
     fn failed(
         published: Option<PublicationResult<'a>>,
-        class: DeliveryFailureClass,
-        error: OperationalError,
+        failure: DeliveryFailure,
+        failed_index: usize,
+        message: String,
     ) -> Self {
         Self {
             published,
-            failure: Some(PublicationFailure { class, error }),
+            failure: Some(PublicationFailure {
+                failure,
+                failed_index,
+                error: OperationalError::delivery_failure(failure, message),
+            }),
         }
     }
 }
@@ -749,6 +767,20 @@ fn apply_publication(
     trace: &mut impl TraceSink,
 ) -> Result<usize, OrderedStepError> {
     let published = attempt.published.map_or(0, PublicationResult::len);
+    // Bind the failed path before LASTFOLDER changes to a newly published name.
+    // A sync failure belongs to the sink just made visible, not the next sink.
+    let failed_destination = attempt.failure.as_ref().map(|failure| {
+        destinations
+            .get(failure.failed_index)
+            .ok_or_else(|| {
+                OperationalError::Internal("failed sink has no delivery plan entry".to_owned())
+            })
+            .and_then(|destination| {
+                destination
+                    .resolve_with(|name| runtime.get(name).map(str::to_owned))
+                    .map_err(|error| OperationalError::Internal(error.to_string()))
+            })
+    });
 
     // Only the backend can tell whether a destination became visible. Apply
     // every externally observable consequence from that report so trace,
@@ -773,13 +805,14 @@ fn apply_publication(
     }
 
     if let Some(failure) = attempt.failure {
-        if let Some(destination) = destinations.get(published) {
-            record_delivery(
-                destination,
-                DeliveryStage::Failed(trace_failure_class(failure.class)),
-                trace,
-            );
-        }
+        let destination = failed_destination
+            .ok_or_else(|| {
+                OrderedStepError::after_publication(OperationalError::Internal(
+                    "failed sink has no bound destination".to_owned(),
+                ))
+            })?
+            .map_err(OrderedStepError::after_publication)?;
+        record_delivery(&destination, DeliveryStage::Failure(failure.failure), trace);
         return Err(if published == 0 {
             OrderedStepError::before_publication(failure.error)
         } else {
@@ -816,36 +849,28 @@ fn deliver_one_sink(
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
         .map_err(OrderedStepError::before_publication)?;
-    let mut sinks = vec![
-        open_sink(destination, durability, mask, runtime, trace)
-            .map_err(OrderedStepError::before_publication)?,
-    ];
-    let mut sink = sinks
-        .pop()
-        .ok_or_else(|| {
-            OperationalError::Internal("internal error: destination produced no sink".to_owned())
-        })
+    let mut sink = open_sink(destination, durability, mask, runtime, trace)
         .map_err(OrderedStepError::before_publication)?;
     sink.write_all(message)
         .map_err(|error| {
-            OperationalError::delivery(
-                DeliveryFailureClass::from_io_error(&error),
+            report_delivery_failure(
+                destination,
+                DeliveryFailure::from_io(DeliveryOperation::Write, &error, false),
                 format!("cannot write staged delivery: {error}"),
+                trace,
             )
         })
         .map_err(OrderedStepError::before_publication)?;
     let published = match sink.commit() {
         Ok(published) => published,
         Err(error) => {
-            let failure = OperationalError::delivery(
-                error.class(),
-                format!("cannot publish Maildir delivery: {error}"),
-            );
+            let message = format!("cannot publish Maildir delivery: {error}");
             return apply_publication(
                 PublicationAttempt::failed(
                     error.published().map(PublicationResult::Delivery),
-                    error.class(),
-                    failure,
+                    error.failure(),
+                    0,
+                    message,
                 ),
                 PublicationDestinations::One(destination),
                 runtime,
@@ -920,18 +945,24 @@ fn deliver_file_destination(
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
         .map_err(OrderedStepError::before_publication)?;
-    let locked = MboxFile::open(path, mask)
-        .and_then(|mbox| mbox.lock(lock_timeout, lock_sleep))
+    let mbox = MboxFile::open(path, mask)
         .map_err(|error| {
-            let class = DeliveryFailureClass::from_io_error(&error);
-            record_delivery(
+            report_delivery_failure(
                 &destination,
-                DeliveryStage::FailedIo(trace_failure_class(class), error.kind()),
+                DeliveryFailure::from_io(DeliveryOperation::Open, &error, false),
+                format!("cannot open mbox {}: {error}", path.display()),
                 trace,
-            );
-            OperationalError::delivery(
-                class,
-                format!("cannot open or lock mbox {}: {error}", path.display()),
+            )
+        })
+        .map_err(OrderedStepError::before_publication)?;
+    let locked = mbox
+        .lock(lock_timeout, lock_sleep)
+        .map_err(|error| {
+            report_delivery_failure(
+                &destination,
+                DeliveryFailure::from_io(DeliveryOperation::Lock, &error, false),
+                format!("cannot lock mbox {}: {error}", path.display()),
+                trace,
             )
         })
         .map_err(OrderedStepError::before_publication)?;
@@ -944,19 +975,16 @@ fn deliver_file_destination(
         )
         .map(|_| ()),
         Err(error) => {
-            let class = error.class();
-            let failure = OperationalError::delivery(
-                class,
-                format!("cannot deliver to mbox {}: {error}", path.display()),
-            );
+            let message = format!("cannot deliver to mbox {}: {error}", path.display());
             let published = error
                 .published()
                 .then(|| procmail_rs::delivery::PublishedDelivery::new(path.to_owned()));
             apply_publication(
                 PublicationAttempt::failed(
                     published.as_ref().map(PublicationResult::Delivery),
-                    class,
-                    failure,
+                    error.failure(),
+                    0,
+                    message,
                 ),
                 PublicationDestinations::One(&destination),
                 runtime,
@@ -967,11 +995,42 @@ fn deliver_file_destination(
     }
 }
 
-fn trace_failure_class(class: DeliveryFailureClass) -> FailureClass {
-    match class {
-        DeliveryFailureClass::Retryable => FailureClass::Transient,
-        DeliveryFailureClass::Permanent => FailureClass::Permanent,
-        DeliveryFailureClass::Internal => FailureClass::Internal,
+fn report_delivery_failure(
+    destination: &Destination,
+    failure: DeliveryFailure,
+    message: String,
+    trace: &mut impl TraceSink,
+) -> OperationalError {
+    record_delivery(destination, DeliveryStage::Failure(failure), trace);
+    OperationalError::delivery_failure(failure, message)
+}
+
+fn report_indexed_failure(
+    index: usize,
+    failure: DeliveryFailure,
+    deliveries: &[PlannedDelivery],
+    message: String,
+    trace: &mut impl TraceSink,
+) -> OperationalError {
+    match deliveries.get(index) {
+        Some(delivery) => report_delivery_failure(delivery.destination(), failure, message, trace),
+        None => OperationalError::Internal("failed sink has no delivery plan entry".to_owned()),
+    }
+}
+
+fn report_stream_failure(
+    error: procmail_rs::delivery::StreamDeliveryError,
+    deliveries: &[PlannedDelivery],
+    trace: &mut impl TraceSink,
+) -> OperationalError {
+    match error.delivery_failure() {
+        Some((index, failure)) => {
+            report_indexed_failure(index, failure, deliveries, error.to_string(), trace)
+        }
+        None => match error.staging_failure() {
+            Some(failure) => OperationalError::delivery_failure(failure, error.to_string()),
+            None => OperationalError::Input(format!("cannot validate message from stdin: {error}")),
+        },
     }
 }
 
@@ -990,16 +1049,14 @@ fn commit_delivery(
             trace,
         ),
         Err(error) => {
-            let failure = OperationalError::delivery(
-                error.class(),
-                format!("cannot publish Maildir delivery: {error}"),
-            );
+            let message = format!("cannot publish Maildir delivery: {error}");
             apply_publication(
                 PublicationAttempt::failed(
                     (!error.published().is_empty())
                         .then_some(PublicationResult::PartialFanout(&error)),
-                    error.class(),
-                    failure,
+                    error.failure(),
+                    error.failed_index(),
+                    message,
                 ),
                 PublicationDestinations::Plan(deliveries),
                 runtime,
@@ -1051,15 +1108,11 @@ fn open_sink(
         DestinationKind::Maildir => {
             let path = Path::new(destination.path());
             let sink = MaildirSink::create(path, durability, mask).map_err(|error| {
-                let class = DeliveryFailureClass::from_io_error(&error);
-                record_delivery(
+                report_delivery_failure(
                     &destination,
-                    DeliveryStage::FailedIo(trace_failure_class(class), error.kind()),
-                    trace,
-                );
-                OperationalError::delivery(
-                    class,
+                    DeliveryFailure::from_io(DeliveryOperation::Open, &error, false),
                     format!("cannot open Maildir {}: {error}", path.display()),
+                    trace,
                 )
             })?;
             Ok(Box::new(sink))

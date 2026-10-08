@@ -177,6 +177,8 @@ fn injected_file_sync_failure_happens_before_maildir_publication() {
         .unwrap_err();
 
     assert!(error.published().is_none());
+    assert_eq!(error.failure().operation, DeliveryOperation::SyncFile);
+    assert!(!error.failure().published);
     assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
     assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
 }
@@ -206,6 +208,8 @@ fn assert_directory_sync_failure_preserves_publication(failed_call: usize) {
         .unwrap_err();
 
     let published = error.published().unwrap();
+    assert_eq!(error.failure().operation, DeliveryOperation::SyncDirectory);
+    assert!(error.failure().published);
     assert_eq!(sync_calls, failed_call);
     assert_eq!(
         fs::read(published.last_folder()).unwrap(),

@@ -656,13 +656,25 @@ fn render_json_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::R
                 "{{\"event\":\"delivery\",\"recipe_line\":{recipe_line},\"destination\":\"{}\",\"stage\":\"",
                 destination_kind_name(*destination)
             )?;
-            render_delivery_stage(output, *stage)?;
+            if let DeliveryStage::Failure(failure) = stage {
+                write!(
+                    output,
+                    "failed\",\"failure_class\":\"{}\",\"reason\":\"{}\",\"operation\":\"{}\",\"published\":{}",
+                    delivery_failure_class_name(failure.class),
+                    failure.kind,
+                    failure.operation.name(),
+                    failure.published
+                )?;
+            } else {
+                render_delivery_stage(output, *stage)?;
+                output.write_char('"')?;
+            }
             if let Some(path) = path {
-                output.write_str("\",\"path\":")?;
+                output.write_str(",\"path\":")?;
                 render_json_string(output, path.as_bytes())?;
                 write!(output, ",\"path_truncated\":{}}}", path.was_truncated())
             } else {
-                output.write_str("\"}")
+                output.write_char('}')
             }
         }
         TraceEvent::ExternalCommand { recipe_line, stage } => {
@@ -867,16 +879,26 @@ fn render_human_event(output: &mut impl fmt::Write, event: &TraceEvent) -> fmt::
                 }
                 write!(output, " (recipe at line {recipe_line})")
             }
-            DeliveryStage::FailedIo(class, kind) => {
+            DeliveryStage::Failure(failure) => {
                 write!(
                     output,
-                    "procmail-rs: Recipe at line {recipe_line}: {} delivery failed",
-                    human_destination_kind(*destination)
+                    "procmail-rs: Recipe at line {recipe_line}: {} delivery failed while {}",
+                    human_destination_kind(*destination),
+                    failure.operation.description()
                 )?;
                 if let Some(path) = path {
                     write!(output, " for \"{}\"", EscapedBytes::new(path.as_bytes()))?;
                 }
-                write!(output, ": {kind} ({})", failure_class_name(*class))
+                write!(
+                    output,
+                    ": {} ({}",
+                    failure.kind,
+                    delivery_failure_class_name(failure.class)
+                )?;
+                if failure.published {
+                    output.write_str("; message already published")?;
+                }
+                output.write_char(')')
             }
             DeliveryStage::Failed(class) => write!(
                 output,
@@ -1069,10 +1091,13 @@ fn render_delivery_stage(output: &mut impl fmt::Write, stage: DeliveryStage) -> 
         DeliveryStage::Preparing => output.write_str("preparing"),
         DeliveryStage::DryRun => output.write_str("dry-run"),
         DeliveryStage::Published => output.write_str("published"),
-        DeliveryStage::FailedIo(class, kind) => write!(
+        DeliveryStage::Failure(failure) => write!(
             output,
-            "failed failure_class={} reason={kind}",
-            failure_class_name(class)
+            "failed failure_class={} reason={} operation={} published={}",
+            delivery_failure_class_name(failure.class),
+            failure.kind,
+            failure.operation.name(),
+            failure.published
         ),
         DeliveryStage::Failed(class) => {
             write!(output, "failed failure_class={}", failure_class_name(class))
@@ -1349,7 +1374,15 @@ pub enum DeliveryStage {
     Failed(FailureClass),
     // Retain only the typed cause: an arbitrary I/O error string may contain
     // private paths or input bytes even when metadata-only tracing is active.
-    FailedIo(FailureClass, io::ErrorKind),
+    Failure(crate::delivery::DeliveryFailure),
+}
+
+fn delivery_failure_class_name(class: crate::delivery::DeliveryFailureClass) -> &'static str {
+    match class {
+        crate::delivery::DeliveryFailureClass::Retryable => "transient",
+        crate::delivery::DeliveryFailureClass::Permanent => "permanent",
+        crate::delivery::DeliveryFailureClass::Internal => "internal",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

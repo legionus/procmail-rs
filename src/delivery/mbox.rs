@@ -19,7 +19,7 @@ use crate::config::OutputEnding;
 use super::local_lock::acquire_flock_fd;
 use super::maildir::Durability;
 use super::maildir::open_directory_path;
-use super::{DeliveryFailureClass, PublishedDelivery};
+use super::{DeliveryFailure, DeliveryFailureClass, DeliveryOperation, PublishedDelivery};
 
 pub const MAX_POSTMARK_LEN: usize = 512;
 const MBOX_FILE_MODE: u32 = 0o600;
@@ -55,6 +55,7 @@ pub struct MboxAppendError {
     source: io::Error,
     rollback: Option<io::Error>,
     published: bool,
+    operation: DeliveryOperation,
 }
 
 impl Postmark {
@@ -220,17 +221,22 @@ impl LockedMbox {
         // injected failures. This lets tests prove that a failed recovery is
         // reported separately without maintaining a test-only copy of the
         // mailbox state transitions.
-        let original_len = seek(&self.file, SeekFrom::End(0))
-            .map_err(|error| MboxAppendError::before_publication(io_error(error), None))?;
+        let original_len = seek(&self.file, SeekFrom::End(0)).map_err(|error| {
+            MboxAppendError::before_publication(io_error(error), None, DeliveryOperation::Write)
+        })?;
 
         // Every failure before unlock attempts to restore the exact original
         // length while this writer still owns the lock. Preserve both errors
         // when recovery fails so callers can escalate possible corruption.
-        let operation = write(&self.file).and_then(|()| match durability {
-            Durability::None => Ok(()),
-            Durability::File | Durability::Full => sync(&self.file),
-        });
-        if let Err(source) = operation {
+        let operation = write(&self.file)
+            .map_err(|error| (error, DeliveryOperation::Write))
+            .and_then(|()| match durability {
+                Durability::None => Ok(()),
+                Durability::File | Durability::Full => {
+                    sync(&self.file).map_err(|error| (error, DeliveryOperation::SyncFile))
+                }
+            });
+        if let Err((source, operation)) = operation {
             let rollback = rollback_with(
                 &self.file,
                 original_len,
@@ -240,7 +246,9 @@ impl LockedMbox {
             )
             .err();
             let _unlock = flock(&self.file, FlockOperation::Unlock);
-            return Err(MboxAppendError::before_publication(source, rollback));
+            return Err(MboxAppendError::before_publication(
+                source, rollback, operation,
+            ));
         }
 
         if durability == Durability::Full {
@@ -254,7 +262,11 @@ impl LockedMbox {
                 )
                 .err();
                 let _unlock = flock(&self.file, FlockOperation::Unlock);
-                return Err(MboxAppendError::before_publication(source, rollback));
+                return Err(MboxAppendError::before_publication(
+                    source,
+                    rollback,
+                    DeliveryOperation::SyncDirectory,
+                ));
             }
         }
 
@@ -267,11 +279,16 @@ impl LockedMbox {
 }
 
 impl MboxAppendError {
-    fn before_publication(source: io::Error, rollback: Option<io::Error>) -> Self {
+    fn before_publication(
+        source: io::Error,
+        rollback: Option<io::Error>,
+        operation: DeliveryOperation,
+    ) -> Self {
         Self {
             source,
             rollback,
             published: false,
+            operation,
         }
     }
 
@@ -280,6 +297,7 @@ impl MboxAppendError {
             source,
             rollback: None,
             published: true,
+            operation: DeliveryOperation::Unlock,
         }
     }
 
@@ -293,6 +311,12 @@ impl MboxAppendError {
 
     pub fn published(&self) -> bool {
         self.published
+    }
+
+    pub fn failure(&self) -> DeliveryFailure {
+        let mut failure = DeliveryFailure::from_io(self.operation, &self.source, self.published);
+        failure.class = self.class();
+        failure
     }
 
     pub fn rollback_failed(&self) -> bool {

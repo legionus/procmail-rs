@@ -59,6 +59,16 @@ fn maildir_type_error_reports_cause_and_respects_trace_detail() {
             let trace = fs::read_to_string(&logfile).unwrap();
             assert!(trace.contains("not a directory"), "{trace}");
             assert!(trace.contains("permanent"), "{trace}");
+            if format == "json" {
+                assert!(trace.contains("\"operation\":\"open\""), "{trace}");
+                assert!(trace.contains("\"published\":false"), "{trace}");
+            } else {
+                assert!(
+                    trace.contains("failed while opening destination"),
+                    "{trace}"
+                );
+                assert!(!trace.contains("message already published"), "{trace}");
+            }
             assert!(!trace.contains("transient"), "{trace}");
             assert_eq!(
                 trace.contains("private-destination-sentinel"),

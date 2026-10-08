@@ -55,6 +55,65 @@ pub enum DeliveryFailureClass {
     Internal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryOperation {
+    Open,
+    Lock,
+    Write,
+    Publish,
+    SyncFile,
+    SyncDirectory,
+    Unlock,
+}
+
+impl DeliveryOperation {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Open => "opening destination",
+            Self::Lock => "acquiring lock",
+            Self::Write => "writing message",
+            Self::Publish => "publishing message",
+            Self::SyncFile => "syncing file",
+            Self::SyncDirectory => "syncing directory",
+            Self::Unlock => "releasing lock",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Lock => "lock",
+            Self::Write => "write",
+            Self::Publish => "publish",
+            Self::SyncFile => "sync-file",
+            Self::SyncDirectory => "sync-directory",
+            Self::Unlock => "unlock",
+        }
+    }
+}
+
+// Keep arbitrary OS error text outside traces. This bounded summary is shared
+// by backends, exit-status selection, and both renderers, and records visibility
+// independently of success because durability can fail after publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryFailure {
+    pub class: DeliveryFailureClass,
+    pub operation: DeliveryOperation,
+    pub kind: io::ErrorKind,
+    pub published: bool,
+}
+
+impl DeliveryFailure {
+    pub fn from_io(operation: DeliveryOperation, error: &io::Error, published: bool) -> Self {
+        Self {
+            class: DeliveryFailureClass::from_io_error(error),
+            operation,
+            kind: error.kind(),
+            published,
+        }
+    }
+}
+
 impl DeliveryFailureClass {
     pub fn from_io_error(error: &io::Error) -> Self {
         // Rust 1.93 does not expose descriptor exhaustion as a distinct
@@ -94,6 +153,7 @@ impl DeliveryFailureClass {
 pub struct SinkCommitError {
     source: io::Error,
     published: Option<PublishedDelivery>,
+    operation: DeliveryOperation,
 }
 
 impl SinkCommitError {
@@ -101,6 +161,7 @@ impl SinkCommitError {
         Self {
             source,
             published: None,
+            operation: DeliveryOperation::Publish,
         }
     }
 
@@ -108,6 +169,7 @@ impl SinkCommitError {
         Self {
             source,
             published: Some(published),
+            operation: DeliveryOperation::Publish,
         }
     }
 
@@ -115,12 +177,17 @@ impl SinkCommitError {
         self.published.as_ref()
     }
 
-    pub fn kind(&self) -> io::ErrorKind {
-        self.source.kind()
+    pub fn class(&self) -> DeliveryFailureClass {
+        self.failure().class
     }
 
-    pub fn class(&self) -> DeliveryFailureClass {
-        DeliveryFailureClass::from_io_error(&self.source)
+    pub fn with_operation(mut self, operation: DeliveryOperation) -> Self {
+        self.operation = operation;
+        self
+    }
+
+    pub fn failure(&self) -> DeliveryFailure {
+        DeliveryFailure::from_io(self.operation, &self.source, self.published.is_some())
     }
 }
 
@@ -148,6 +215,7 @@ pub struct CommitReport {
 
 pub struct PendingFanout {
     sinks: Vec<Box<dyn PendingSink>>,
+    write_failure: Option<(usize, DeliveryFailure)>,
 }
 
 pub struct ValidatedFanout {
@@ -163,6 +231,8 @@ pub enum FanoutLimitError {
 pub struct StreamDeliveryError {
     source: MessageReadError,
     abort_failures: usize,
+    delivery_failure: Option<(usize, DeliveryFailure)>,
+    staging_failure: Option<DeliveryFailure>,
 }
 
 #[derive(Debug)]
@@ -170,6 +240,7 @@ pub struct CommitError {
     source: SinkCommitError,
     published: Vec<PublishedDelivery>,
     abort_failures: usize,
+    failed_index: usize,
 }
 
 impl PublishedDelivery {
@@ -196,6 +267,7 @@ impl CommitReport {
 pub struct AppendError {
     source: io::Error,
     abort_failures: usize,
+    delivery_failure: Option<(usize, DeliveryFailure)>,
 }
 
 impl PendingFanout {
@@ -206,7 +278,10 @@ impl PendingFanout {
                 limit: MAX_PENDING_SINKS,
             });
         }
-        Ok(Self { sinks })
+        Ok(Self {
+            sinks,
+            write_failure: None,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -234,6 +309,8 @@ impl PendingFanout {
                 Err(StreamDeliveryError {
                     source,
                     abort_failures,
+                    delivery_failure: self.write_failure,
+                    staging_failure: None,
                 })
             }
         }
@@ -256,6 +333,8 @@ impl PendingFanout {
                 Err(StreamDeliveryError {
                     source,
                     abort_failures,
+                    delivery_failure: self.write_failure,
+                    staging_failure: None,
                 })
             }
         }
@@ -265,11 +344,12 @@ impl PendingFanout {
         mut self,
         head: MessageHead,
         reader: &mut impl BufRead,
-        staging: &mut staging::StagingFile,
+        staging: &mut impl Write,
     ) -> Result<(ValidatedFanout, StreamedMessage), StreamDeliveryError> {
         let mut writer = TeeWriter {
             fanout: &mut self,
             staging,
+            failure: None,
         };
         match head.stream_to(reader, &mut writer) {
             Ok(message) => Ok((
@@ -279,10 +359,13 @@ impl PendingFanout {
                 message,
             )),
             Err(source) => {
+                let staging_failure = writer.failure;
                 let abort_failures = self.abort_all();
                 Err(StreamDeliveryError {
                     source,
                     abort_failures,
+                    delivery_failure: self.write_failure,
+                    staging_failure,
                 })
             }
         }
@@ -299,35 +382,60 @@ impl PendingFanout {
     }
 }
 
-struct TeeWriter<'a> {
+struct TeeWriter<'a, W: Write> {
     fanout: &'a mut PendingFanout,
-    staging: &'a mut staging::StagingFile,
+    staging: &'a mut W,
+    failure: Option<DeliveryFailure>,
 }
 
-impl Write for TeeWriter<'_> {
+impl<W: Write> Write for TeeWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.fanout.write_all(bytes)?;
-        self.staging.write_all(bytes)?;
+        self.staging.write_all(bytes).inspect_err(|error| {
+            self.failure = Some(DeliveryFailure::from_io(
+                DeliveryOperation::Write,
+                error,
+                false,
+            ));
+        })?;
         Ok(bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.fanout.flush()?;
-        self.staging.flush()
+        self.staging.flush().inspect_err(|error| {
+            self.failure = Some(DeliveryFailure::from_io(
+                DeliveryOperation::Write,
+                error,
+                false,
+            ));
+        })
     }
 }
 
 impl Write for PendingFanout {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        for sink in &mut self.sinks {
-            sink.write_all(bytes)?;
+        for (index, sink) in self.sinks.iter_mut().enumerate() {
+            if let Err(error) = sink.write_all(bytes) {
+                self.write_failure = Some((
+                    index,
+                    DeliveryFailure::from_io(DeliveryOperation::Write, &error, false),
+                ));
+                return Err(error);
+            }
         }
         Ok(bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        for sink in &mut self.sinks {
-            sink.flush()?;
+        for (index, sink) in self.sinks.iter_mut().enumerate() {
+            if let Err(error) = sink.flush() {
+                self.write_failure = Some((
+                    index,
+                    DeliveryFailure::from_io(DeliveryOperation::Write, &error, false),
+                ));
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -366,6 +474,7 @@ impl ValidatedFanout {
             return Err(AppendError {
                 source,
                 abort_failures,
+                delivery_failure: None,
             });
         }
 
@@ -374,6 +483,7 @@ impl ValidatedFanout {
             return Err(AppendError {
                 source,
                 abort_failures,
+                delivery_failure: pending.write_failure,
             });
         }
         self.sinks.append(&mut pending.sinks);
@@ -388,6 +498,7 @@ impl ValidatedFanout {
             match sink.commit() {
                 Ok(delivery) => published.push(delivery),
                 Err(source) => {
+                    let failed_index = published.len();
                     if let Some(delivery) = source.published().cloned() {
                         published.push(delivery);
                     }
@@ -401,6 +512,7 @@ impl ValidatedFanout {
                         source,
                         published,
                         abort_failures,
+                        failed_index,
                     });
                 }
             }
@@ -455,6 +567,14 @@ impl fmt::Display for FanoutLimitError {
 impl std::error::Error for FanoutLimitError {}
 
 impl StreamDeliveryError {
+    pub fn staging_failure(&self) -> Option<DeliveryFailure> {
+        self.staging_failure
+    }
+
+    pub fn delivery_failure(&self) -> Option<(usize, DeliveryFailure)> {
+        self.delivery_failure
+    }
+
     pub fn abort_failures(&self) -> usize {
         self.abort_failures
     }
@@ -481,6 +601,14 @@ impl std::error::Error for StreamDeliveryError {
 }
 
 impl CommitError {
+    pub fn failed_index(&self) -> usize {
+        self.failed_index
+    }
+
+    pub fn failure(&self) -> DeliveryFailure {
+        self.source.failure()
+    }
+
     pub fn committed(&self) -> usize {
         self.published.len()
     }
@@ -528,6 +656,10 @@ impl std::error::Error for CommitError {
 }
 
 impl AppendError {
+    pub fn delivery_failure(&self) -> Option<(usize, DeliveryFailure)> {
+        self.delivery_failure
+    }
+
     pub fn abort_failures(&self) -> usize {
         self.abort_failures
     }

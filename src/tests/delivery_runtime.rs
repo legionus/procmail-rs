@@ -5,14 +5,147 @@ use std::path::PathBuf;
 
 use super::{
     OperationalError, PublicationAttempt, PublicationDestinations, PublicationTracker,
-    apply_publication, derive_implicit_lockfile_path,
+    apply_publication, derive_implicit_lockfile_path, report_stream_failure,
 };
 use procmail_rs::config::{self, Destination};
-use procmail_rs::delivery::{DeliveryFailureClass, PublishedDelivery};
+use procmail_rs::delivery::{DeliveryFailure, DeliveryOperation, PublishedDelivery};
 use procmail_rs::runtime::{PublicationResult, RuntimeVariables};
 use procmail_rs::trace::{
-    DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, MemoryTrace, TraceEvent,
+    DeliveryStage, DestinationKind as TraceDestinationKind, MemoryTrace, TraceEvent,
 };
+
+fn two_destination_plan() -> procmail_rs::eval::DeliveryPlan {
+    use procmail_rs::eval::{
+        CapturedCommand, DeliveryAttemptError, ExecutionPlan, HeaderEvaluation,
+    };
+    use procmail_rs::limits::MessageLimits;
+    use procmail_rs::message::Message;
+
+    let config = config::parse(":0c\nmaildir:/first\n:0\nmaildir:/second\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    let execution = ExecutionPlan::compile(&config, None);
+    let mut head =
+        Message::read_headers(&mut std::io::Cursor::new(b"\n"), MessageLimits::default()).unwrap();
+    match execution
+        .evaluate_headers_editing_with_capture_trace(
+            &mut head,
+            &mut RuntimeVariables::default(),
+            &mut MemoryTrace::default(),
+            &mut |_, _, _, _, _, _, _| -> Result<CapturedCommand, DeliveryAttemptError<()>> {
+                panic!("plain destinations must not execute commands")
+            },
+        )
+        .unwrap()
+    {
+        HeaderEvaluation::Decided(plan) => plan,
+        _ => panic!("plain destinations must not defer evaluation"),
+    }
+}
+
+#[test]
+fn sync_failure_is_traced_on_the_published_sink_not_the_next_sink() {
+    let plan = two_destination_plan();
+    let published = PublishedDelivery::new(PathBuf::from("/first/new/message"));
+    let failure = DeliveryFailure::from_io(
+        DeliveryOperation::SyncDirectory,
+        &std::io::Error::from(std::io::ErrorKind::StorageFull),
+        true,
+    );
+    let mut trace = MemoryTrace::default();
+    let mut runtime = RuntimeVariables::default();
+    let error = apply_publication(
+        PublicationAttempt::failed(
+            Some(PublicationResult::Delivery(&published)),
+            failure,
+            0,
+            "sync error".to_owned(),
+        ),
+        PublicationDestinations::Plan(plan.deliveries()),
+        &mut runtime,
+        &mut trace,
+    )
+    .unwrap_err();
+    assert!(!error.can_handle);
+    assert_eq!(error.error.exit_code(), 75);
+    assert_eq!(runtime.last_folder(), Some("/first/new/message"));
+    assert!(matches!(trace.events().last(), Some(TraceEvent::Delivery {
+        recipe_line: 2, stage: DeliveryStage::Failure(actual), ..
+    }) if *actual == failure));
+    assert!(
+        !trace
+            .events()
+            .iter()
+            .any(|event| matches!(event, TraceEvent::Delivery { recipe_line: 4, .. }))
+    );
+}
+
+struct WriteFailureSink;
+
+impl std::io::Write for WriteFailureSink {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "private-error-sentinel",
+        ))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl procmail_rs::delivery::PendingSink for WriteFailureSink {
+    fn commit(
+        self: Box<Self>,
+    ) -> Result<PublishedDelivery, procmail_rs::delivery::SinkCommitError> {
+        panic!("failed streaming must not commit")
+    }
+
+    fn abort(self: Box<Self>) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn streaming_write_failure_keeps_delivery_status_and_sink_location() {
+    use procmail_rs::delivery::PendingFanout;
+    use procmail_rs::limits::MessageLimits;
+    use procmail_rs::message::Message;
+
+    let plan = two_destination_plan();
+    let mut reader =
+        std::io::Cursor::new(b"Subject: private-header-sentinel\n\nprivate-body-sentinel");
+    let head = Message::read_headers(&mut reader, MessageLimits::default()).unwrap();
+    let pending = PendingFanout::new(vec![Box::new(WriteFailureSink)]).unwrap();
+    let error = match pending.stream(head, &mut reader) {
+        Err(error) => error,
+        Ok(_) => panic!("failed streaming was accepted"),
+    };
+    let mut trace = MemoryTrace::default();
+    let error = report_stream_failure(error, plan.deliveries(), &mut trace);
+    assert_eq!(error.exit_code(), 75);
+    assert!(matches!(error, OperationalError::Delivery { failure, .. }
+        if failure.operation == DeliveryOperation::Write && !failure.published));
+    assert!(matches!(
+        trace.events(),
+        [TraceEvent::Delivery {
+            recipe_line: 2,
+            stage: DeliveryStage::Failure(_),
+            path: None,
+            ..
+        }]
+    ));
+    let rendered = format!("{:?}", trace.events());
+    for secret in [
+        "private-error-sentinel",
+        "private-header-sentinel",
+        "private-body-sentinel",
+    ] {
+        assert!(!rendered.contains(secret));
+    }
+}
 
 #[test]
 fn implicit_lockfile_path_enforces_the_complete_path_limit() {
@@ -95,15 +228,16 @@ fn publication_effects_use_the_visible_backend_result() {
 
 #[test]
 fn publication_effects_distinguish_failures_before_and_after_visibility() {
+    let failure = DeliveryFailure::from_io(
+        DeliveryOperation::Publish,
+        &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        false,
+    );
     let destination = Destination::Maildir("requested".into());
     let mut runtime = RuntimeVariables::default();
     let mut trace = MemoryTrace::default();
     let before = apply_publication(
-        PublicationAttempt::failed(
-            None,
-            DeliveryFailureClass::Permanent,
-            OperationalError::PermanentDestination("before".to_owned()),
-        ),
+        PublicationAttempt::failed(None, failure, 0, "before".to_owned()),
         PublicationDestinations::One(&destination),
         &mut runtime,
         &mut trace,
@@ -116,23 +250,35 @@ fn publication_effects_distinguish_failures_before_and_after_visibility() {
         [TraceEvent::Delivery {
             recipe_line: 0,
             destination: TraceDestinationKind::Maildir,
-            stage: DeliveryStage::Failed(FailureClass::Permanent),
+            stage: DeliveryStage::Failure(failure),
             path: None,
         }]
     );
 
     let published = PublishedDelivery::new(PathBuf::from("visible/new/message"));
+    let failure = DeliveryFailure::from_io(
+        DeliveryOperation::SyncDirectory,
+        &std::io::Error::from(std::io::ErrorKind::StorageFull),
+        true,
+    );
+    let mut after_trace = MemoryTrace::default();
     let after = apply_publication(
         PublicationAttempt::failed(
             Some(PublicationResult::Delivery(&published)),
-            DeliveryFailureClass::Retryable,
-            OperationalError::TemporaryDelivery("after".to_owned()),
+            failure,
+            0,
+            "after".to_owned(),
         ),
         PublicationDestinations::One(&destination),
         &mut runtime,
-        &mut MemoryTrace::default(),
+        &mut after_trace,
     )
     .unwrap_err();
     assert!(!after.can_handle);
     assert_eq!(runtime.last_folder(), Some("visible/new/message"));
+    assert!(
+        matches!(after_trace.events().last(), Some(TraceEvent::Delivery {
+        stage: DeliveryStage::Failure(actual), ..
+    }) if *actual == failure)
+    );
 }

@@ -207,6 +207,10 @@ fn append_failure_restores_original_length() {
 
     assert!(!error.published());
     assert!(!error.rollback_failed());
+    assert_eq!(
+        error.failure().operation,
+        crate::delivery::DeliveryOperation::Write
+    );
     let mut bytes = Vec::new();
     fs::File::open(&mailbox)
         .unwrap()
@@ -248,6 +252,11 @@ fn durability_failure_is_rolled_back_and_not_published() {
 
     assert!(!error.published());
     assert!(!error.rollback_failed());
+    assert_eq!(
+        error.failure().operation,
+        crate::delivery::DeliveryOperation::SyncFile
+    );
+    assert!(!error.failure().published);
     assert_eq!(fs::read(&mailbox).unwrap(), b"existing");
     fs::remove_dir_all(directory).unwrap();
 }

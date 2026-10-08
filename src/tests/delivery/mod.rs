@@ -196,6 +196,7 @@ fn limit_failure_aborts_every_sink_without_publishing() {
             limit: 3
         }
     ));
+    assert!(error.delivery_failure().is_none());
     assert!(state.borrow().visible.is_none());
     assert!(state.borrow().aborted);
 }
@@ -212,13 +213,51 @@ fn sink_write_failure_aborts_all_sinks() {
     ])
     .unwrap();
 
-    if pending.stream(head, &mut reader).is_ok() {
-        panic!("injected sink write failure was ignored");
-    }
+    let error = match pending.stream(head, &mut reader) {
+        Ok(_) => panic!("injected sink write failure was ignored"),
+        Err(error) => error,
+    };
+    let (index, failure) = error.delivery_failure().unwrap();
+    assert_eq!(index, 1);
+    assert_eq!(failure.operation, DeliveryOperation::Write);
+    assert_eq!(failure.kind, io::ErrorKind::Other);
+    assert!(!failure.published);
     assert!(first.borrow().aborted);
     assert!(second.borrow().aborted);
     assert!(first.borrow().visible.is_none());
     assert!(second.borrow().visible.is_none());
+}
+
+#[test]
+fn staging_write_failure_is_distinct_from_input_and_sink_errors() {
+    struct FailedStaging;
+
+    impl Write for FailedStaging {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::StorageFull))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let input = b"Subject: test\n\nbody";
+    let state = Rc::new(RefCell::new(SinkState::default()));
+    let (head, mut reader) = read_head(input, MessageLimits::default());
+    let pending = PendingFanout::new(vec![TestSink::boxed(state.clone())]).unwrap();
+    let error = match pending.stage(head, &mut reader, &mut FailedStaging) {
+        Ok(_) => panic!("failed staging was accepted"),
+        Err(error) => error,
+    };
+    assert!(error.delivery_failure().is_none());
+    let failure = error.staging_failure().unwrap();
+    assert_eq!(failure.class, DeliveryFailureClass::Retryable);
+    assert_eq!(failure.kind, io::ErrorKind::StorageFull);
+    assert_eq!(failure.operation, DeliveryOperation::Write);
+    assert!(!failure.published);
+    assert!(state.borrow().aborted);
+    assert!(state.borrow().visible.is_none());
 }
 
 #[test]
@@ -314,6 +353,8 @@ fn durability_failure_preserves_published_sinks_and_aborts_the_rest() {
 
     let error = validated.commit().unwrap_err();
     assert_eq!(error.committed(), 2);
+    assert_eq!(error.failed_index(), 1);
+    assert!(error.failure().published);
     assert_eq!(error.abort_failures(), 0);
     assert_eq!(error.class(), DeliveryFailureClass::Retryable);
 

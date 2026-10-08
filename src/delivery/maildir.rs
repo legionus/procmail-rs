@@ -15,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use rustix::fd::OwnedFd;
 use rustix::fs::{CWD, Mode, OFlags, fsync, openat};
 
-use super::{PendingSink, PublishedDelivery, SinkCommitError};
+use super::{DeliveryOperation, PendingSink, PublishedDelivery, SinkCommitError};
 
 #[cfg(all(unix, not(target_os = "linux")))]
 #[path = "maildir/portable.rs"]
@@ -139,7 +139,10 @@ impl MaildirSink {
         mut sync: impl FnMut(&OwnedFd) -> io::Result<()>,
     ) -> Result<PublishedDelivery, SinkCommitError> {
         if self.durability != Durability::None {
-            sync(self.pending.file()).map_err(SinkCommitError::before_publication)?;
+            sync(self.pending.file()).map_err(|error| {
+                SinkCommitError::before_publication(error)
+                    .with_operation(DeliveryOperation::SyncFile)
+            })?;
         }
 
         let name = self
@@ -157,7 +160,8 @@ impl MaildirSink {
         if self.durability == Durability::Full {
             for directory in [&self.tmp_dir, &self.new_dir] {
                 if let Err(error) = sync(directory) {
-                    return Err(SinkCommitError::after_publication(error, published));
+                    return Err(SinkCommitError::after_publication(error, published)
+                        .with_operation(DeliveryOperation::SyncDirectory));
                 }
             }
         }

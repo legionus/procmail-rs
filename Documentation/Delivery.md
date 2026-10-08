@@ -69,6 +69,17 @@ undo a publication that has already completed. `SIGKILL` and process crashes
 cannot run cleanup, and the portable backend can then leave a named file in
 `tmp` for external maintenance.
 
+Delivery failures retain a shared typed summary: the failure category, I/O
+reason, operation (`open`, `lock`, `write`, `publish`, `sync-file`,
+`sync-directory`, or `unlock`), and whether the failing destination already
+contains a published message. JSON delivery failures use separate
+`failure_class`, `reason`, `operation`, and `published` fields with
+`stage="failed"`. Text logs describe the operation and explicitly indicate
+an already published message. These metadata fields never contain arbitrary
+OS error text, message contents, or destination paths; paths require
+`LOGDETAIL=values`. A destination write failure while streaming stdin remains
+a delivery failure rather than being classified as invalid input.
+
 Mbox appends are serialized with `flock`, using `LOCKTIMEOUT` and `LOCKSLEEP`.
 The original
 length is recorded while locked. A failed append or sync attempts to truncate

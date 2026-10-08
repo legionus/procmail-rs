@@ -3,6 +3,36 @@
 
 use super::*;
 
+#[test]
+fn delivery_failure_renderers_preserve_typed_details_without_error_text() {
+    use crate::delivery::{DeliveryFailure, DeliveryOperation};
+
+    let error = io::Error::new(io::ErrorKind::StorageFull, "private-error-sentinel");
+    let failure = DeliveryFailure::from_io(DeliveryOperation::SyncDirectory, &error, true);
+
+    for (format, expected) in [
+        (
+            TraceFormat::Text,
+            "procmail-rs: Recipe at line 7: Maildir delivery failed while syncing directory: no storage space (transient; message already published)\n",
+        ),
+        (
+            TraceFormat::Json,
+            "{\"event\":\"delivery\",\"recipe_line\":7,\"destination\":\"maildir\",\"stage\":\"failed\",\"failure_class\":\"transient\",\"reason\":\"no storage space\",\"operation\":\"sync-directory\",\"published\":true}\n",
+        ),
+    ] {
+        let mut writer = BoundedTraceWriter::formatted(Vec::new(), TraceDetail::Metadata, format);
+        writer.record(TraceEvent::Delivery {
+            recipe_line: 7,
+            destination: DestinationKind::Maildir,
+            stage: DeliveryStage::Failure(failure),
+            path: None,
+        });
+        let rendered = String::from_utf8(writer.into_inner()).unwrap();
+        assert_eq!(rendered, expected);
+        assert!(!rendered.contains("private-error-sentinel"));
+    }
+}
+
 fn variable_event(name: &str) -> TraceEvent {
     TraceEvent::VariableAssigned {
         line: Some(7),
