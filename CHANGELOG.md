@@ -9,6 +9,39 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-09
+
+- Preserve the rc filename as well as the line number through runtime
+  includes, switches, copied branches, deferred deliveries, commands,
+  conditions, and native header actions. Detailed text and JSON traces expose
+  bounded, escaped source paths while metadata-only logging continues to hide
+  them.
+- Report the failed delivery operation, typed I/O cause, failure category,
+  publication state, and affected destination consistently through streaming,
+  fan-out, and ordered delivery. This distinguishes permanent errors such as a
+  Maildir path naming a non-directory from transient failures.
+- Report the validated byte size returned by every successful external filter,
+  making an empty replacement message visible without logging message data.
+- Publish Linux Maildir messages by linking the completed unnamed file directly
+  into `new`, avoiding an orphaned intermediate `tmp` entry when publication
+  fails.
+- Preserve cleanup and failure details when a fan-out delivery is interrupted,
+  fails after another destination was published, or reaches a durability error
+  after publication.
+- Retain validated full-filter output without copying it again and construct
+  the normalized HB matching view only if a reached condition needs it. On the
+  measured 1 MiB full-filter workload, acceptance time fell from 0.866 ms to
+  0.0246 ms.
+- Share mapped or filter-owned message bodies across native header edits and
+  copied branches. Edited headers now use shared indexed storage with lazy
+  serialized and normalized views, while delivery, commands, TRAP, and mbox
+  quoting consume borrowed message parts.
+- Reduce median peak RSS for eight native header actions on the measured 32 MiB
+  workload from about 100 MiB to 36 MiB. Add repeatable memory benchmarks and
+  document their process-tree and reference-version limitations.
+- Expand composed-operation, failure-injection, concurrent delivery, source
+  location, message-sharing, and header-edit fuzz regression coverage.
+
 ## [0.1.0] - 2026-09-13
 
 - Compile on 32-bit and 64-bit Unix targets by sharing the named-file Maildir
@@ -46,5 +79,6 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
   process directory.
 - Support 32-bit and 64-bit Linux targets and 64-bit FreeBSD.
 
-[Unreleased]: https://github.com/legionus/procmail-rs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/legionus/procmail-rs/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/legionus/procmail-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/legionus/procmail-rs/releases/tag/v0.1.0
