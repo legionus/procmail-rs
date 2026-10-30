@@ -90,6 +90,7 @@ pub enum ConditionKindExplanation {
     VariableRegex,
     Address,
     Identifier,
+    Keyword,
     Program,
     SmallerThan,
     LargerThan,

@@ -104,6 +104,14 @@ pub(crate) fn any_identifier<'a, E>(
     })
 }
 
+pub(crate) fn any_keyword<'a, E>(
+    header: impl Into<HeaderView<'a>>,
+    wanted: &[KeywordField],
+    mut matches: impl FnMut(&[u8]) -> Result<bool, E>,
+) -> Result<bool, StructuredVisitError<E>> {
+    visit_keywords(header.into(), wanted, |keyword| matches(keyword.as_bytes()))
+}
+
 pub(crate) fn collect_keywords<'a>(
     header: impl Into<HeaderView<'a>>,
     wanted: &[KeywordField],

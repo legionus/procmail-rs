@@ -656,6 +656,7 @@ fn explanation_condition_name(condition: ConditionKindExplanation) -> &'static s
         ConditionKindExplanation::VariableRegex => "variable-regex",
         ConditionKindExplanation::Address => "address",
         ConditionKindExplanation::Identifier => "identifier",
+        ConditionKindExplanation::Keyword => "keyword",
         ConditionKindExplanation::Program => "program",
         ConditionKindExplanation::SmallerThan => "smaller-than",
         ConditionKindExplanation::LargerThan => "larger-than",

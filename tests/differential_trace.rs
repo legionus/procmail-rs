@@ -88,6 +88,7 @@ fn condition_kind(kind: ConditionKind) -> &'static str {
         ConditionKind::VariableRegex => "variable-regex",
         ConditionKind::Address => "address",
         ConditionKind::Identifier => "identifier",
+        ConditionKind::Keyword => "keyword",
         ConditionKind::Program => "program",
         ConditionKind::SmallerThan => "smaller-than",
         ConditionKind::LargerThan => "larger-than",

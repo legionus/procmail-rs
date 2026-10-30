@@ -8,8 +8,8 @@ use super::{
     ConditionExplanation, ConditionKindExplanation, EvalError, InputRequirements, PlanProperties,
 };
 use crate::config::{
-    AddressField, CaseMode, Condition, ConditionInput, ConditionKind, IdentifierField, Recipe,
-    ShellExpandedCondition,
+    AddressField, CaseMode, Condition, ConditionInput, ConditionKind, IdentifierField,
+    KeywordField, Recipe, ShellExpandedCondition,
 };
 use crate::message::MessageHead;
 use crate::runtime::RuntimeVariables;
@@ -46,6 +46,10 @@ enum CompiledConditionKind {
     },
     IdentifierRegex {
         field: IdentifierField,
+        regex: Regex,
+    },
+    KeywordRegex {
+        fields: Vec<KeywordField>,
         regex: Regex,
     },
     Program {
@@ -105,6 +109,15 @@ fn compile_condition(
         ConditionKind::IdentifierRegex { field, regex } => {
             format!("identifier {} ?? {}", field.name(), regex.pattern())
         }
+        ConditionKind::KeywordRegex { fields, regex } => format!(
+            "keyword {} ?? {}",
+            fields
+                .iter()
+                .map(|field| field.name())
+                .collect::<Vec<_>>()
+                .join(","),
+            regex.pattern()
+        ),
         ConditionKind::Program(command) => command.clone(),
         ConditionKind::SmallerThan(size) => format!("< {size}"),
         ConditionKind::LargerThan(size) => format!("> {size}"),
@@ -114,7 +127,8 @@ fn compile_condition(
         | ConditionKind::AreaRegex { regex, .. }
         | ConditionKind::VariableRegex { regex, .. }
         | ConditionKind::AddressRegex { regex, .. }
-        | ConditionKind::IdentifierRegex { regex, .. } => Some(regex),
+        | ConditionKind::IdentifierRegex { regex, .. }
+        | ConditionKind::KeywordRegex { regex, .. } => Some(regex),
         ConditionKind::ShellExpanded(_)
         | ConditionKind::Program(_)
         | ConditionKind::SmallerThan(_)
@@ -160,6 +174,10 @@ fn compile_condition(
             field: *field,
             regex: regex.compiled().clone(),
         },
+        ConditionKind::KeywordRegex { fields, regex } => CompiledConditionKind::KeywordRegex {
+            fields: fields.clone(),
+            regex: regex.compiled().clone(),
+        },
         ConditionKind::Program(command) => CompiledConditionKind::Program {
             command: command.clone(),
             input: match area {
@@ -198,7 +216,8 @@ impl CompiledCondition {
             ),
             CompiledConditionKind::HeaderRegex(_)
             | CompiledConditionKind::AddressRegex { .. }
-            | CompiledConditionKind::IdentifierRegex { .. } => (
+            | CompiledConditionKind::IdentifierRegex { .. }
+            | CompiledConditionKind::KeywordRegex { .. } => (
                 InputRequirements {
                     needs_headers: true,
                     ..InputRequirements::default()
@@ -358,6 +377,7 @@ impl CompiledCondition {
             CompiledConditionKind::HeaderRegex(_) => TraceConditionKind::HeaderRegex,
             CompiledConditionKind::AddressRegex { .. } => TraceConditionKind::Address,
             CompiledConditionKind::IdentifierRegex { .. } => TraceConditionKind::Identifier,
+            CompiledConditionKind::KeywordRegex { .. } => TraceConditionKind::Keyword,
             CompiledConditionKind::BodyRegex(_) => TraceConditionKind::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => TraceConditionKind::MessageRegex,
             CompiledConditionKind::VariableRegex { .. } => TraceConditionKind::VariableRegex,
@@ -389,6 +409,7 @@ impl CompiledCondition {
             CompiledConditionKind::HeaderRegex(_) => ConditionKindExplanation::HeaderRegex,
             CompiledConditionKind::AddressRegex { .. } => ConditionKindExplanation::Address,
             CompiledConditionKind::IdentifierRegex { .. } => ConditionKindExplanation::Identifier,
+            CompiledConditionKind::KeywordRegex { .. } => ConditionKindExplanation::Keyword,
             CompiledConditionKind::BodyRegex(_) => ConditionKindExplanation::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => ConditionKindExplanation::MessageRegex,
             CompiledConditionKind::VariableRegex { .. } => ConditionKindExplanation::VariableRegex,
@@ -417,6 +438,9 @@ impl CompiledCondition {
             }
             CompiledConditionKind::IdentifierRegex { field, regex } => {
                 self.matches_identifier(head.header_view(), *field, regex, runtime)?
+            }
+            CompiledConditionKind::KeywordRegex { fields, regex } => {
+                self.matches_keywords(head.header_view(), fields, regex, runtime)?
             }
             CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
                 return Ok(PartialMatch::Deferred);
@@ -477,6 +501,9 @@ impl CompiledCondition {
             }
             CompiledConditionKind::IdentifierRegex { field, regex } => {
                 self.matches_identifier(message.header_view(), *field, regex, runtime)?
+            }
+            CompiledConditionKind::KeywordRegex { fields, regex } => {
+                self.matches_keywords(message.header_view(), fields, regex, runtime)?
             }
             CompiledConditionKind::BodyRegex(regex) => self.regex_matches(
                 regex,
@@ -539,6 +566,23 @@ impl CompiledCondition {
     ) -> Result<bool, EvalError> {
         let matched = structured_header::any_identifier(header, field, |identifier| {
             self.regex_matches(regex, identifier, runtime)
+        })
+        .map_err(|error| self.structured_header_error(error))?;
+        if !matched && (!self.match_captures.is_empty() || !self.capture_indexes.is_empty()) {
+            runtime.clear_match_values();
+        }
+        Ok(matched)
+    }
+
+    fn matches_keywords(
+        &self,
+        header: crate::header_edit::HeaderView<'_>,
+        fields: &[KeywordField],
+        regex: &Regex,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<bool, EvalError> {
+        let matched = structured_header::any_keyword(header, fields, |keyword| {
+            self.regex_matches(regex, keyword, runtime)
         })
         .map_err(|error| self.structured_header_error(error))?;
         if !matched && (!self.match_captures.is_empty() || !self.capture_indexes.is_empty()) {

@@ -289,6 +289,7 @@ pub enum ConditionKind {
     VariableRegex,
     Address,
     Identifier,
+    Keyword,
     Program,
     SmallerThan,
     LargerThan,

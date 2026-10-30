@@ -1456,6 +1456,9 @@ fn parse_condition(
             Some(ConditionRegexTarget::Identifier(field)) => {
                 (ConditionKind::IdentifierRegex { field, regex }, true)
             }
+            Some(ConditionRegexTarget::Keyword(fields)) => {
+                (ConditionKind::KeywordRegex { fields, regex }, true)
+            }
             None => (ConditionKind::Regex(regex), true),
         }
     };
@@ -1880,6 +1883,7 @@ enum ConditionRegexTarget {
     Area(ConditionInput),
     Address(Vec<super::AddressField>),
     Identifier(super::IdentifierField),
+    Keyword(Vec<super::KeywordField>),
 }
 
 fn structured_condition_target(
@@ -1949,6 +1953,52 @@ fn structured_condition_target(
         }
         return Ok(Some((
             ConditionRegexTarget::Identifier(super::IdentifierField::ListId),
+            pattern.trim_start(),
+        )));
+    }
+    if let Some(rest) = input.strip_prefix("keyword").and_then(|rest| {
+        rest.as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_whitespace)
+            .then_some(rest.trim_start())
+    }) {
+        let (field_text, pattern) = rest.split_once("??").ok_or_else(|| {
+            ParseError::new(line, "keyword condition requires all|FIELD-LIST ?? REGEX")
+        })?;
+        let field_text = field_text.trim();
+        if field_text.is_empty() {
+            return Ok(None);
+        }
+        if field_text.eq_ignore_ascii_case("all") {
+            return Ok(Some((
+                ConditionRegexTarget::Keyword(super::KeywordField::ALL.to_vec()),
+                pattern.trim_start(),
+            )));
+        }
+        let mut fields = Vec::new();
+        for name in field_text.split(',') {
+            let name = name.trim();
+            let field = match name.to_ascii_lowercase().as_str() {
+                "keywords" => super::KeywordField::Keywords,
+                "x-label" => super::KeywordField::XLabel,
+                "x-keywords" => super::KeywordField::XKeywords,
+                _ => {
+                    return Err(ParseError::new(
+                        line,
+                        format!("keyword condition does not support field '{name}'"),
+                    ));
+                }
+            };
+            if fields.contains(&field) {
+                return Err(ParseError::new(
+                    line,
+                    format!("keyword condition repeats field '{name}'"),
+                ));
+            }
+            fields.push(field);
+        }
+        return Ok(Some((
+            ConditionRegexTarget::Keyword(fields),
             pattern.trim_start(),
         )));
     }

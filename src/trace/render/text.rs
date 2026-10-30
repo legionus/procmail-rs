@@ -267,6 +267,7 @@ fn human_condition_kind(kind: ConditionKind) -> &'static str {
         ConditionKind::VariableRegex => "variable regular expression",
         ConditionKind::Address => "address regular expression",
         ConditionKind::Identifier => "identifier regular expression",
+        ConditionKind::Keyword => "keyword regular expression",
         ConditionKind::Program => "external program",
         ConditionKind::SmallerThan => "message size is smaller than",
         ConditionKind::LargerThan => "message size is larger than",

@@ -64,6 +64,47 @@ List-Id: Discussion <Project.Example>\r\n\r\nbody",
 }
 
 #[test]
+fn keyword_conditions_observe_header_edits_captures_and_case_flags() {
+    let source = "\
+:0\n\
+headers {\n\
+    keywords add Work, Project:Alpha\n\
+}\n\
+:0 D\n\
+* ! keyword Keywords ?? ^work$\n\
+* keyword all ?? ^Project:\\/([A-Za-z]+)$\n\
+maildir:selected\n";
+    let config = config::parse(source).unwrap().expand(&[]).unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    assert!(plan.requirements().needs_headers);
+    assert!(!plan.requirements().needs_body_contents);
+    let mut message = head(b"X-Label: Initial\r\n\r\nbody");
+    let mut runtime = RuntimeVariables::default();
+    let mut trace = BoundedTraceWriter::new(Vec::new());
+    let result = plan.evaluate_headers_editing_with_trace(&mut message, &mut runtime, &mut trace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected headers-only decision");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+    assert_eq!(runtime.get("MATCH"), Some("Alpha"));
+    assert_eq!(runtime.get("MATCH1"), Some("Alpha"));
+    assert_eq!(
+        message.as_bytes(),
+        b"X-Label: Initial, Work, Project:Alpha\r\n\
+Keywords: Initial, Work, Project:Alpha\r\n\
+X-Keywords: Initial, Work, Project:Alpha\r\n\r\n"
+    );
+    let rendered = String::from_utf8(trace.into_inner()).unwrap();
+    assert!(rendered.contains("\"kind\":\"keyword\""), "{rendered}");
+    for private in ["Initial", "Work", "Project:Alpha", "Alpha"] {
+        assert!(!rendered.contains(private), "leaked {private:?}");
+    }
+}
+
+#[test]
 fn runtime_shell_condition_reparses_match_as_a_size_test() {
     let config =
         config::parse(":0 c\n* ^X-Condition: \\/(.*)$\nmbox:first\n:0\n* $$MATCH\nmbox:second\n")

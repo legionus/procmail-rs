@@ -532,6 +532,10 @@ pub enum ConditionKind {
         field: IdentifierField,
         regex: RegexCondition,
     },
+    KeywordRegex {
+        fields: Vec<KeywordField>,
+        regex: RegexCondition,
+    },
     Program(String),
     SmallerThan(usize),
     LargerThan(usize),

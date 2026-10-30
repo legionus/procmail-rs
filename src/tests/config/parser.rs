@@ -2,7 +2,7 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use super::*;
-use crate::config::{AddressField, IdentifierField, ParameterOperation};
+use crate::config::{AddressField, IdentifierField, KeywordField, ParameterOperation};
 
 fn parse_wide(input: &str) -> Result<Config, ParseError> {
     let mut state = ParseBudget::default();
@@ -1108,7 +1108,7 @@ fn parses_variable_regex_condition() {
 #[test]
 fn parses_structured_header_conditions_without_confusing_variables() {
     let config = parse(
-        ":0\n* address From, To, Cc ?? ^user@example\\.org$\n* identifier List-Id ?? ^project\\.example$\nmaildir:matched\n",
+        ":0\n* address From, To, Cc ?? ^user@example\\.org$\n* identifier List-Id ?? ^project\\.example$\n* keyword all ?? ^Urgent$\n* keyword X-Label, X-Keywords ?? ^Work$\nmaildir:matched\n",
     )
     .unwrap();
     let [Statement::Recipe(recipe)] = config.statements.as_slice() else {
@@ -1129,15 +1129,30 @@ fn parses_structured_header_conditions_without_confusing_variables() {
             ..
         }
     ));
-
-    let config = parse(":0\n* identifier ?? ^ordinary-variable$\nmaildir:matched\n").unwrap();
-    let Statement::Recipe(recipe) = &config.statements[0] else {
-        panic!("expected recipe");
+    let ConditionKind::KeywordRegex { fields, regex } = &recipe.conditions[2].kind else {
+        panic!("expected a keyword condition");
     };
-    assert!(matches!(
-        recipe.conditions[0].kind,
-        ConditionKind::VariableRegex { .. }
-    ));
+    assert_eq!(fields, &KeywordField::ALL);
+    assert_eq!(regex.pattern(), "^Urgent$");
+    let ConditionKind::KeywordRegex { fields, regex } = &recipe.conditions[3].kind else {
+        panic!("expected a keyword condition");
+    };
+    assert_eq!(fields, &[KeywordField::XLabel, KeywordField::XKeywords]);
+    assert_eq!(regex.pattern(), "^Work$");
+
+    for variable in ["address", "identifier", "keyword"] {
+        let config = parse(&format!(
+            ":0\n* {variable} ?? ^ordinary-variable$\nmaildir:matched\n"
+        ))
+        .unwrap();
+        let Statement::Recipe(recipe) = &config.statements[0] else {
+            panic!("expected recipe");
+        };
+        assert!(matches!(
+            &recipe.conditions[0].kind,
+            ConditionKind::VariableRegex { name, .. } if name == variable
+        ));
+    }
 }
 
 #[test]
@@ -1146,6 +1161,10 @@ fn rejects_unknown_or_repeated_structured_header_fields() {
         "address Bcc ?? value",
         "address From,from ?? value",
         "identifier Message-Id ?? value",
+        "keyword Subject ?? value",
+        "keyword X-Label,x-label ?? value",
+        "keyword all,Keywords ?? value",
+        "keyword all",
     ] {
         let error = parse(&format!(":0\n* {condition}\nmaildir:matched\n")).unwrap_err();
         assert_eq!(error.line, 2, "{condition}");
