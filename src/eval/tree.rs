@@ -346,6 +346,9 @@ impl CompiledSequence {
                             crate::config::HeaderOperation::Extract { .. } => {
                                 operations.extract += 1;
                             }
+                            crate::config::HeaderOperation::Keywords { .. } => {
+                                operations.keywords += 1;
+                            }
                         }
                     }
                     explanations.push(RecipeExplanation {

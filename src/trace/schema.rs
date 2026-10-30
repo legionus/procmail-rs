@@ -208,6 +208,7 @@ pub enum HeaderOperationKind {
     Prepend,
     Rename,
     Extract,
+    Keywords,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

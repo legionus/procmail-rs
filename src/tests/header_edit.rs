@@ -536,3 +536,116 @@ fn assert_limit_result(
         );
     }
 }
+
+#[test]
+fn keywords_operations_synchronize_all_three_headers_in_place() {
+    let source = b"From: sender@example.org\r\n\
+x-label: Existing, \xffinvalid\r\n\
+Subject: test\r\n\
+X-Label: Existing, $Forwarded\r\n\r\n";
+    let added = apply(
+        source,
+        0,
+        &action(vec![HeaderOperation::Keywords {
+            line: 1,
+            mode: HeaderKeywordsMode::Add(value("Work, Existing, Urgent")),
+        }]),
+    );
+    assert_eq!(
+        added.as_bytes(),
+        b"From: sender@example.org\r\n\
+X-Label: Existing, $Forwarded, Work, Urgent\r\n\
+Subject: test\r\n\
+Keywords: Existing, $Forwarded, Work, Urgent\r\n\
+X-Keywords: Existing, $Forwarded, Work, Urgent\r\n\r\n"
+    );
+
+    let removed = apply(
+        added.as_bytes(),
+        0,
+        &action(vec![HeaderOperation::Keywords {
+            line: 2,
+            mode: HeaderKeywordsMode::Remove(value("Existing, Missing")),
+        }]),
+    );
+    assert_eq!(
+        removed.as_bytes(),
+        b"From: sender@example.org\r\n\
+X-Label: $Forwarded, Work, Urgent\r\n\
+Subject: test\r\n\
+Keywords: $Forwarded, Work, Urgent\r\n\
+X-Keywords: $Forwarded, Work, Urgent\r\n\r\n"
+    );
+
+    let replaced = apply(
+        removed.as_bytes(),
+        0,
+        &action(vec![HeaderOperation::Keywords {
+            line: 3,
+            mode: HeaderKeywordsMode::Set(value("OnlyOne, work, OnlyOne")),
+        }]),
+    );
+    assert_eq!(
+        replaced.as_bytes(),
+        b"From: sender@example.org\r\n\
+X-Label: OnlyOne, work\r\n\
+Subject: test\r\n\
+Keywords: OnlyOne, work\r\n\
+X-Keywords: OnlyOne, work\r\n\r\n"
+    );
+
+    let emptied_by_remove = apply(
+        replaced.as_bytes(),
+        0,
+        &action(vec![HeaderOperation::Keywords {
+            line: 4,
+            mode: HeaderKeywordsMode::Remove(value("OnlyOne work")),
+        }]),
+    );
+    assert_eq!(
+        emptied_by_remove.as_bytes(),
+        b"From: sender@example.org\r\nSubject: test\r\n\r\n"
+    );
+
+    let cleared = apply(
+        replaced.as_bytes(),
+        0,
+        &action(vec![HeaderOperation::Keywords {
+            line: 5,
+            mode: HeaderKeywordsMode::Clear,
+        }]),
+    );
+    assert_eq!(
+        cleared.as_bytes(),
+        b"From: sender@example.org\r\nSubject: test\r\n\r\n"
+    );
+}
+
+#[test]
+fn keywords_add_enforces_rfc5322_line_limit_and_value_ceiling() {
+    let existing_len = RFC5322_HEADER_LINE_LIMIT - "X-Keywords: ".len() - ", Urgent".len();
+    for size in [existing_len - 1, existing_len, existing_len + 1] {
+        let mut header = b"Keywords: ".to_vec();
+        header.extend(std::iter::repeat_n(b'k', size));
+        header.extend_from_slice(b"\n\n");
+        let result = apply_header_action(
+            &header,
+            0,
+            &action(vec![HeaderOperation::Keywords {
+                line: 1,
+                mode: HeaderKeywordsMode::Add(value("Urgent")),
+            }]),
+            MessageLimits::default(),
+        );
+        if size <= existing_len {
+            assert!(result.is_ok(), "size: {size}");
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                HeaderEditError::GeneratedLineTooLong {
+                    limit: RFC5322_HEADER_LINE_LIMIT
+                }
+            );
+        }
+    }
+}

@@ -3,10 +3,29 @@
 
 use std::fmt;
 
-use crate::config::{AddressField, IdentifierField};
+use crate::config::{AddressField, IdentifierField, KeywordField};
 use crate::header_edit::HeaderView;
 
 pub(crate) const MAX_STRUCTURED_HEADER_VALUES: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfiguredKeywordError {
+    Empty,
+    InvalidToken,
+    TooMany { limit: usize },
+}
+
+impl ConfiguredKeywordError {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Empty => "must contain at least one keyword",
+            Self::InvalidToken => {
+                "must contain only printable ASCII keywords separated by spaces or commas"
+            }
+            Self::TooMany { .. } => "exceeds the hard limit of 4096 keywords",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StructuredHeaderError {
@@ -83,6 +102,111 @@ pub(crate) fn any_identifier<'a, E>(
         }
         matches(&identifier).map_err(StructuredVisitError::Visitor)
     })
+}
+
+pub(crate) fn collect_keywords<'a>(
+    header: impl Into<HeaderView<'a>>,
+    wanted: &[KeywordField],
+) -> Result<Vec<String>, StructuredHeaderError> {
+    let mut keywords = Vec::new();
+    match visit_keywords(header.into(), wanted, |keyword| {
+        keywords.push(keyword.to_owned());
+        Ok::<bool, std::convert::Infallible>(false)
+    }) {
+        Ok(_) => Ok(keywords),
+        Err(StructuredVisitError::Header(error)) => Err(error),
+        Err(StructuredVisitError::Visitor(never)) => match never {},
+    }
+}
+
+pub(crate) fn parse_configured_keywords(
+    value: &str,
+) -> Result<Vec<String>, ConfiguredKeywordError> {
+    let mut count = 0usize;
+    let mut keywords = Vec::new();
+    for token in value
+        .as_bytes()
+        .split(|byte| matches!(*byte, b' ' | b'\t' | b','))
+        .filter(|token| !token.is_empty())
+    {
+        let Some(keyword) = valid_keyword_str(token) else {
+            return Err(ConfiguredKeywordError::InvalidToken);
+        };
+        count = count
+            .checked_add(1)
+            .ok_or(ConfiguredKeywordError::TooMany {
+                limit: MAX_STRUCTURED_HEADER_VALUES,
+            })?;
+        if count > MAX_STRUCTURED_HEADER_VALUES {
+            return Err(ConfiguredKeywordError::TooMany {
+                limit: MAX_STRUCTURED_HEADER_VALUES,
+            });
+        }
+        if !keywords.iter().any(|existing| existing == keyword) {
+            keywords.push(keyword.to_owned());
+        }
+    }
+    if keywords.is_empty() {
+        return Err(ConfiguredKeywordError::Empty);
+    }
+    Ok(keywords)
+}
+
+pub(crate) fn visit_keywords<E>(
+    header: HeaderView<'_>,
+    wanted: &[KeywordField],
+    mut visit: impl FnMut(&str) -> Result<bool, E>,
+) -> Result<bool, StructuredVisitError<E>> {
+    let mut count = 0usize;
+    let mut seen: Vec<String> = Vec::new();
+    // Incoming keyword headers may mix comma-separated RFC 5322 phrases,
+    // space-separated IMAP atoms, or malformed external bytes. Ignore non-ASCII
+    // or control tokens so hostile input cannot abort delivery, while counting
+    // every valid token before deduplication to bound total scanning work.
+    visit_fields(header, |name, value| {
+        if !wanted
+            .iter()
+            .any(|field| name.eq_ignore_ascii_case(field.name().as_bytes()))
+        {
+            return Ok(false);
+        }
+        for token in keyword_tokens(value) {
+            let Some(keyword) = valid_keyword_str(token) else {
+                continue;
+            };
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| StructuredVisitError::Header(work_limit_error()))?;
+            if count > MAX_STRUCTURED_HEADER_VALUES {
+                return Err(StructuredVisitError::Header(work_limit_error()));
+            }
+            if seen.iter().any(|existing| existing == keyword) {
+                continue;
+            }
+            seen.push(keyword.to_owned());
+            if visit(keyword).map_err(StructuredVisitError::Visitor)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
+fn keyword_tokens(input: &[u8]) -> impl Iterator<Item = &[u8]> {
+    input
+        .split(|byte| byte.is_ascii_whitespace() || *byte == b',')
+        .filter(|token| !token.is_empty())
+}
+
+fn valid_keyword_str(token: &[u8]) -> Option<&str> {
+    if token.is_empty()
+        || !token
+            .iter()
+            .all(|byte| byte.is_ascii_graphic() && *byte != b',')
+    {
+        return None;
+    }
+    std::str::from_utf8(token).ok()
 }
 
 fn visit_fields<E>(

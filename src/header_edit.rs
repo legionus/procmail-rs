@@ -6,7 +6,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use crate::config::{
-    HeaderAction, HeaderExtractionMode, HeaderOperation, MAX_ASSIGNMENT_VALUE_LEN,
+    HeaderAction, HeaderExtractionMode, HeaderKeywordsMode, HeaderOperation, KeywordField,
+    MAX_ASSIGNMENT_VALUE_LEN,
 };
 use crate::header_value::{
     DecodedHeaderError, GeneratedHeaderError, RFC5322_HEADER_LINE_LIMIT,
@@ -14,6 +15,10 @@ use crate::header_value::{
 };
 use crate::limits::MessageLimits;
 use crate::message::MessageLimit;
+use crate::structured_header::{
+    ConfiguredKeywordError, MAX_STRUCTURED_HEADER_VALUES, collect_keywords,
+    parse_configured_keywords,
+};
 
 mod storage;
 pub(crate) use storage::{EditedHeader, HeaderView};
@@ -57,6 +62,8 @@ pub(crate) enum HeaderEditError {
     SizeOverflow,
     LimitExceeded { kind: MessageLimit, limit: usize },
     InvalidGeneratedValue,
+    InvalidKeywordValue(&'static str),
+    KeywordLimitExceeded { limit: usize },
     GeneratedLineTooLong { limit: usize },
     Decode(DecodedHeaderError),
     ExtractedValueTooLong { limit: usize },
@@ -72,6 +79,15 @@ impl fmt::Display for HeaderEditError {
             Self::InvalidGeneratedValue => formatter.write_str(
                 "generated header value contains a control character that cannot be represented",
             ),
+            Self::InvalidKeywordValue(reason) => {
+                write!(formatter, "keywords header value {reason}")
+            }
+            Self::KeywordLimitExceeded { limit } => {
+                write!(
+                    formatter,
+                    "structured header value count exceeds the hard limit of {limit}"
+                )
+            }
             Self::GeneratedLineTooLong { limit } => {
                 write!(
                     formatter,
@@ -132,27 +148,10 @@ pub(crate) fn apply_header_action<'a>(
     for operation in &action.operations {
         match operation {
             HeaderOperation::Remove { name, .. } => {
-                if (0..header.storage.store.fields.len())
-                    .any(|index| header.storage.store.matches(index, name.as_bytes()))
-                {
-                    header.store_mut().remove_matching(name.as_bytes());
-                }
+                remove_field(&mut header, name);
             }
             HeaderOperation::Set { name, value, .. } => {
-                let replacement = make_field(name, &value.source, line_ending)?;
-                let store = &header.storage.store;
-                let mut matching =
-                    (0..store.fields.len()).filter(|index| store.matches(*index, name.as_bytes()));
-                let first = matching.next();
-                let unchanged = first.is_some_and(|index| store.field(index).bytes == replacement)
-                    && matching.next().is_none();
-
-                if !unchanged {
-                    let store = header.store_mut();
-                    let position = first.unwrap_or(store.fields.len());
-                    store.remove_matching(name.as_bytes());
-                    store.insert(position, &replacement)?;
-                }
+                set_field(&mut header, name, &value.source, line_ending)?;
             }
             HeaderOperation::Add { name, value, .. } => {
                 let field = make_field(name, &value.source, line_ending)?;
@@ -196,6 +195,9 @@ pub(crate) fn apply_header_action<'a>(
                     target: target.clone(),
                     value,
                 });
+            }
+            HeaderOperation::Keywords { mode, .. } => {
+                apply_keywords(&mut header, mode, line_ending)?;
             }
         }
 
@@ -256,6 +258,99 @@ pub(crate) fn apply_header_action<'a>(
     Ok(AppliedHeaderAction {
         header,
         extractions,
+    })
+}
+
+fn remove_field(header: &mut EditedHeader, name: &str) {
+    if (0..header.storage.store.fields.len())
+        .any(|index| header.storage.store.matches(index, name.as_bytes()))
+    {
+        header.store_mut().remove_matching(name.as_bytes());
+    }
+}
+
+fn set_field(
+    header: &mut EditedHeader,
+    name: &str,
+    value: &str,
+    line_ending: &[u8],
+) -> Result<(), HeaderEditError> {
+    let replacement = make_field(name, value, line_ending)?;
+    let store = &header.storage.store;
+    let mut matching =
+        (0..store.fields.len()).filter(|index| store.matches(*index, name.as_bytes()));
+    let first = matching.next();
+    let unchanged = first.is_some_and(|index| store.field(index).bytes == replacement)
+        && matching.next().is_none();
+
+    if !unchanged {
+        let store = header.store_mut();
+        let position = first.unwrap_or(store.fields.len());
+        store.remove_matching(name.as_bytes());
+        store.insert(position, &replacement)?;
+    }
+    Ok(())
+}
+
+fn apply_keywords(
+    header: &mut EditedHeader,
+    mode: &HeaderKeywordsMode,
+    line_ending: &[u8],
+) -> Result<(), HeaderEditError> {
+    let keywords = match mode {
+        HeaderKeywordsMode::Add(value) => {
+            let configured = parse_keywords(&value.source)?;
+            let mut keywords = collect_keywords(HeaderView::Indexed(header), &KeywordField::ALL)
+                .map_err(|_| HeaderEditError::KeywordLimitExceeded {
+                    limit: MAX_STRUCTURED_HEADER_VALUES,
+                })?;
+            for item in configured {
+                if !keywords.iter().any(|existing| existing == &item) {
+                    keywords.push(item);
+                }
+            }
+            if keywords.len() > MAX_STRUCTURED_HEADER_VALUES {
+                return Err(HeaderEditError::KeywordLimitExceeded {
+                    limit: MAX_STRUCTURED_HEADER_VALUES,
+                });
+            }
+            keywords
+        }
+        HeaderKeywordsMode::Remove(value) => {
+            let configured = parse_keywords(&value.source)?;
+            let mut keywords = collect_keywords(HeaderView::Indexed(header), &KeywordField::ALL)
+                .map_err(|_| HeaderEditError::KeywordLimitExceeded {
+                    limit: MAX_STRUCTURED_HEADER_VALUES,
+                })?;
+            keywords.retain(|existing| !configured.iter().any(|removed| removed == existing));
+            keywords
+        }
+        HeaderKeywordsMode::Set(value) => parse_keywords(&value.source)?,
+        HeaderKeywordsMode::Clear => Vec::new(),
+    };
+
+    if keywords.is_empty() {
+        for field in KeywordField::ALL {
+            remove_field(header, field.name());
+        }
+        return Ok(());
+    }
+
+    let joined = keywords.join(", ");
+    for field in KeywordField::ALL {
+        set_field(header, field.name(), &joined, line_ending)?;
+    }
+    Ok(())
+}
+
+fn parse_keywords(value: &str) -> Result<Vec<String>, HeaderEditError> {
+    parse_configured_keywords(value).map_err(|error| match error {
+        ConfiguredKeywordError::Empty | ConfiguredKeywordError::InvalidToken => {
+            HeaderEditError::InvalidKeywordValue(error.reason())
+        }
+        ConfiguredKeywordError::TooMany { limit } => {
+            HeaderEditError::KeywordLimitExceeded { limit }
+        }
     })
 }
 

@@ -165,7 +165,7 @@ fn rendered_default_trace_excludes_message_and_configuration_values() {
 #[test]
 fn rendered_trace_identifies_header_operations_without_values() {
     let config = config::parse(
-        ":0\nheaders {\n add X-Private-Edited-Name private-edited-value\n}\n:0\nmaildir:selected\n",
+        ":0\nheaders {\n add X-Private-Edited-Name private-edited-value\n keywords add SecretKeywordTag\n}\n:0\nmaildir:selected\n",
     )
     .unwrap()
     .expand(&[])
@@ -181,7 +181,9 @@ fn rendered_trace_identifies_header_operations_without_values() {
     let rendered = String::from_utf8(trace.into_inner()).unwrap();
     assert!(rendered.contains("\"event\":\"header-operation\""));
     assert!(rendered.contains("X-Private-Edited-Name"));
+    assert!(rendered.contains("Keywords,X-Label,X-Keywords"));
     assert!(!rendered.contains("private-edited-value"));
+    assert!(!rendered.contains("SecretKeywordTag"));
     assert!(rendered.contains("\"event\":\"recipe\""));
 }
 
@@ -247,7 +249,7 @@ fn explains_plan_shape_without_private_configuration_values() {
 #[test]
 fn explains_header_operation_kinds_without_private_fields() {
     let config = config::parse(
-        ":0\nheaders {\n remove X-Secret-Remove\n set X-Secret-Set secret-set-value\n add X-Secret-Add secret-add-value\n add X-Other-Add other-add-value\n prepend X-Secret-Prepend secret-prepend-value\n rename X-Secret-Old to X-Secret-New\n extract raw X-Secret-Value into PRIVATE_VALUE\n}\n",
+        ":0\nheaders {\n remove X-Secret-Remove\n set X-Secret-Set secret-set-value\n add X-Secret-Add secret-add-value\n add X-Other-Add other-add-value\n prepend X-Secret-Prepend secret-prepend-value\n rename X-Secret-Old to X-Secret-New\n extract raw X-Secret-Value into PRIVATE_VALUE\n keywords add SecretKeywordValue\n}\n",
     )
     .unwrap()
     .expand(&[])
@@ -265,6 +267,7 @@ fn explains_header_operation_kinds_without_private_fields() {
     assert_eq!(operations.prepend_count(), 1);
     assert_eq!(operations.rename_count(), 1);
     assert_eq!(operations.extract_count(), 1);
+    assert_eq!(operations.keywords_count(), 1);
     let rendered = format!("{explanation:?}");
     for private in [
         "X-Secret-Remove",
@@ -280,6 +283,7 @@ fn explains_header_operation_kinds_without_private_fields() {
         "secret-add-value",
         "other-add-value",
         "secret-prepend-value",
+        "SecretKeywordValue",
     ] {
         assert!(!rendered.contains(private), "leaked {private:?}");
     }

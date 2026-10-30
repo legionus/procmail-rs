@@ -113,6 +113,7 @@ pub struct HeaderOperationExplanation {
     pub(super) prepend: usize,
     pub(super) rename: usize,
     pub(super) extract: usize,
+    pub(super) keywords: usize,
 }
 
 impl HeaderOperationExplanation {
@@ -138,5 +139,9 @@ impl HeaderOperationExplanation {
 
     pub fn extract_count(self) -> usize {
         self.extract
+    }
+
+    pub fn keywords_count(self) -> usize {
+        self.keywords
     }
 }

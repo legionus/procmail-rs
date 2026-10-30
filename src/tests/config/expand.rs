@@ -447,7 +447,7 @@ fn prepared_header_value(source: &str, known_value: &str) -> Result<String, Expa
     let HeaderOperation::Set { value, .. } = &action.operations[0] else {
         panic!("expected set operation");
     };
-    value.resolve_with(9, "X-Test", |name| {
+    value.resolve_with(9, HeaderValueCheck::Field("X-Test"), |name| {
         known.get(name).map(|item| item.text.clone())
     })
 }
@@ -518,11 +518,67 @@ fn keeps_runtime_header_references_structured() {
         panic!("expected add operation");
     };
     assert_eq!(
-        value.resolve_with(7, "X-Match", |name| {
+        value.resolve_with(7, HeaderValueCheck::Field("X-Match"), |name| {
             (name == "MATCH").then(|| "selected".into())
         }),
         Ok("selected".into())
     );
+}
+
+#[test]
+fn prepares_and_validates_expanded_keywords_operations() {
+    let config = parse("TAG=Urgent\n:0\nheaders {\n keywords add Work, $TAG\n keywords clear\n}\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    let Statement::Recipe(recipe) = &config.statements[1] else {
+        panic!("expected recipe");
+    };
+    let RecipeAction::Headers(action) = &recipe.action else {
+        panic!("expected headers action");
+    };
+    let resolved = action
+        .resolve_with(|name| (name == "TAG").then(|| "Urgent".into()))
+        .unwrap();
+    assert!(matches!(
+        &resolved.operations[0],
+        HeaderOperation::Keywords {
+            mode: crate::config::HeaderKeywordsMode::Add(value),
+            ..
+        } if value.source == "Work, Urgent"
+    ));
+
+    for (source, expected) in [
+        (
+            "EMPTY=\n:0\nheaders {\n keywords set $EMPTY\n}\n",
+            "expanded keywords value must contain at least one keyword",
+        ),
+        (
+            "BAD=\"\u{e9}\"\n:0\nheaders {\n keywords add $BAD\n}\n",
+            "expanded keywords value must contain only printable ASCII keywords separated by spaces or commas",
+        ),
+    ] {
+        let error = parse(source).unwrap().expand(&[]).unwrap_err();
+        assert_eq!(error.line, 4);
+        assert_eq!(error.message, expected);
+    }
+
+    let maximum_value = RFC5322_HEADER_LINE_LIMIT - "X-Keywords: ".len();
+    for size in [maximum_value - 1, maximum_value, maximum_value + 1] {
+        let tag = "k".repeat(size);
+        let source = format!("TAG={tag}\n:0\nheaders {{\n keywords set $TAG\n}}\n");
+        let result = parse(&source).unwrap().expand(&[]);
+        if size <= maximum_value {
+            assert!(result.is_ok(), "size: {size}");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.line, 4);
+            assert_eq!(
+                error.message,
+                "expanded keywords value would exceed the RFC 5322 limit of 998 bytes per line"
+            );
+        }
+    }
 }
 
 fn resolved_destination(config: &Config, statement_index: usize) -> Destination {

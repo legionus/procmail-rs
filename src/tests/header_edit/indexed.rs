@@ -322,3 +322,43 @@ fn raw_and_indexed_field_iteration_agree_on_binary_and_folded_input() {
         assert!(indexed.storage.raw.get().is_none());
     }
 }
+
+#[test]
+fn noop_keywords_operations_preserve_shared_indexed_storage() {
+    let synchronized = apply(
+        b"Keywords: Work, Urgent\nX-Label: Work, Urgent\nX-Keywords: Work, Urgent\n\n",
+        0,
+        &action(Vec::new()),
+    );
+    for mode in [
+        HeaderKeywordsMode::Add(value("Work, Urgent")),
+        HeaderKeywordsMode::Set(value("Work, Urgent")),
+        HeaderKeywordsMode::Remove(value("Absent")),
+    ] {
+        let applied = apply_header_action(
+            HeaderView::Indexed(&synchronized),
+            0,
+            &action(vec![HeaderOperation::Keywords { line: 1, mode }]),
+            MessageLimits::default(),
+        )
+        .unwrap();
+        assert!(!applied.changed_from(HeaderView::Indexed(&synchronized)));
+        let (next, _) = applied.into_parts();
+        assert!(Arc::ptr_eq(&synchronized.storage, &next.storage));
+    }
+
+    let without_keywords = apply(b"Subject: plain\n\n", 0, &action(Vec::new()));
+    let cleared = apply_header_action(
+        HeaderView::Indexed(&without_keywords),
+        0,
+        &action(vec![HeaderOperation::Keywords {
+            line: 1,
+            mode: HeaderKeywordsMode::Clear,
+        }]),
+        MessageLimits::default(),
+    )
+    .unwrap();
+    assert!(!cleared.changed_from(HeaderView::Indexed(&without_keywords)));
+    let (next, _) = cleared.into_parts();
+    assert!(Arc::ptr_eq(&without_keywords.storage, &next.storage));
+}

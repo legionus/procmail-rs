@@ -12,13 +12,13 @@ use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaptureAction, CaseMode,
     ChildStatusMode, CommandAssignment, Condition, ConditionInput, ConditionKind, Config,
     ContinuationMode, ControlFlow, Destination, HeaderAction, HeaderExtractionMode,
-    HeaderOperation, HeaderValue, MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN,
-    MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE,
-    MAX_REGEX_AST_NESTING, MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS,
-    MAX_REGEX_PATTERN_LEN, OutputEnding, ParseBudget, ParseError, PathExpression, PipeAction,
-    RcFileExpression, RcLimits, RcParseCounts, Recipe, RecipeAction, RecipeOptions, RegexCondition,
-    ShellExpression, Statement, Unset, VariablePolicy, VariableSource, WriteErrorMode,
-    variable_policy,
+    HeaderKeywordsMode, HeaderOperation, HeaderValue, MAX_ASSIGNMENT_NAME_LEN,
+    MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN,
+    MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_AST_NESTING, MAX_REGEX_CAPTURES,
+    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS, MAX_REGEX_PATTERN_LEN, OutputEnding,
+    ParseBudget, ParseError, PathExpression, PipeAction, RcFileExpression, RcLimits, RcParseCounts,
+    Recipe, RecipeAction, RecipeOptions, RegexCondition, ShellExpression, Statement, Unset,
+    VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
 };
 
 #[cfg(test)]
@@ -997,6 +997,52 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
         });
     }
 
+    if operation == "keywords" {
+        let mode = syntax.word().ok_or_else(|| {
+            ParseError::new(
+                line,
+                "header operation 'keywords' requires add|remove|set|clear",
+            )
+        })?;
+        if mode == "clear" {
+            if !syntax.is_end() {
+                return Err(ParseError::new(
+                    line,
+                    "header operation 'keywords clear' takes no arguments",
+                ));
+            }
+            return Ok(HeaderOperation::Keywords {
+                line,
+                mode: HeaderKeywordsMode::Clear,
+            });
+        }
+        if !matches!(mode, "add" | "remove" | "set") {
+            return Err(ParseError::new(
+                line,
+                "header keywords mode must be 'add', 'remove', 'set', or 'clear'",
+            ));
+        }
+        if syntax.is_end() {
+            return Err(ParseError::new(
+                line,
+                format!("header operation 'keywords {mode}' requires KEYWORDS"),
+            ));
+        }
+        let value = parse_header_value_source(syntax.remainder(), line)?;
+        let mode = match mode {
+            "add" => HeaderKeywordsMode::Add(value),
+            "remove" => HeaderKeywordsMode::Remove(value),
+            "set" => HeaderKeywordsMode::Set(value),
+            _ => {
+                return Err(ParseError::new(
+                    line,
+                    "header keywords mode must be 'add', 'remove', 'set', or 'clear'",
+                ));
+            }
+        };
+        return Ok(HeaderOperation::Keywords { line, mode });
+    }
+
     if !matches!(operation, "set" | "add" | "prepend") {
         return Err(ParseError::new(
             line,
@@ -1013,28 +1059,9 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
             format!("header operation '{operation}' requires NAME [VALUE]"),
         )
     })?;
-    let value = syntax.remainder();
+    let value = parse_header_value_source(syntax.remainder(), line)?;
     validate_header_name(name, line)?;
-    if value.ends_with('\\') {
-        return Err(ParseError::new(
-            line,
-            "folded header values are not supported",
-        ));
-    }
-    if value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
-        return Err(ParseError::new(
-            line,
-            "header value contains a forbidden byte",
-        ));
-    }
-    let fields = (
-        line,
-        name.to_owned(),
-        HeaderValue {
-            source: value.to_owned(),
-            expansion: None,
-        },
-    );
+    let fields = (line, name.to_owned(), value);
     match operation {
         "set" => Ok(HeaderOperation::Set {
             line: fields.0,
@@ -1056,6 +1083,25 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
             format!("unknown headers operation '{operation}'"),
         )),
     }
+}
+
+fn parse_header_value_source(value: &str, line: usize) -> Result<HeaderValue, ParseError> {
+    if value.ends_with('\\') {
+        return Err(ParseError::new(
+            line,
+            "folded header values are not supported",
+        ));
+    }
+    if value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
+        return Err(ParseError::new(
+            line,
+            "header value contains a forbidden byte",
+        ));
+    }
+    Ok(HeaderValue {
+        source: value.to_owned(),
+        expansion: None,
+    })
 }
 
 fn validate_header_extraction_target(name: &str, line: usize) -> Result<(), ParseError> {

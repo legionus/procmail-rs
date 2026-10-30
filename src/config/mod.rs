@@ -451,6 +451,40 @@ pub enum HeaderOperation {
         target: String,
         mode: HeaderExtractionMode,
     },
+    Keywords {
+        line: usize,
+        mode: HeaderKeywordsMode,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderKeywordsMode {
+    Add(HeaderValue),
+    Remove(HeaderValue),
+    Set(HeaderValue),
+    Clear,
+}
+
+impl HeaderKeywordsMode {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Add(_) => "add",
+            Self::Remove(_) => "remove",
+            Self::Set(_) => "set",
+            Self::Clear => "clear",
+        }
+    }
+
+    pub(crate) fn checks_line_limit(&self) -> bool {
+        matches!(self, Self::Add(_) | Self::Set(_))
+    }
+
+    pub(crate) fn value_mut(&mut self) -> Option<&mut HeaderValue> {
+        match self {
+            Self::Add(value) | Self::Remove(value) | Self::Set(value) => Some(value),
+            Self::Clear => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,6 +567,25 @@ impl IdentifierField {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::ListId => "List-Id",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordField {
+    Keywords,
+    XLabel,
+    XKeywords,
+}
+
+impl KeywordField {
+    pub(crate) const ALL: [Self; 3] = [Self::Keywords, Self::XLabel, Self::XKeywords];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Keywords => "Keywords",
+            Self::XLabel => "X-Label",
+            Self::XKeywords => "X-Keywords",
         }
     }
 }

@@ -10,12 +10,13 @@ use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use super::shell_eval::{self, EvaluationContext, EvaluationDepth, UnsupportedPart, VariableValue};
 use super::{
     Assignment, AssignmentPath, AssignmentTarget, CaseDirection, Config, Destination, HeaderAction,
-    HeaderOperation, HeaderValue, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
+    HeaderOperation, HeaderValue, KeywordField, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
     MAX_PATH_EXPRESSION_LEN, ParameterOperation, PathExpression, PositionalArguments,
     RcFileExpression, Recipe, RecipeAction, ShellExpandedCondition, ShellExpression, ShellPart,
     Statement, SuppliedVariable, VariablePolicy, VariableSource, variable_policy,
 };
 use crate::header_value::validate_generated_header_value;
+use crate::structured_header::parse_configured_keywords;
 
 #[derive(Debug, Clone)]
 struct ExpandedValue {
@@ -252,10 +253,10 @@ impl RcFileExpression {
 }
 
 impl HeaderValue {
-    pub(crate) fn resolve_with(
+    fn resolve_with(
         &self,
         line: usize,
-        name: &str,
+        check: HeaderValueCheck<'_>,
         mut lookup: impl FnMut(&str) -> Option<String>,
     ) -> Result<String, ExpansionError> {
         let parsed;
@@ -267,7 +268,7 @@ impl HeaderValue {
         };
         let value =
             evaluate_with_linebuf(expression, line, MAX_ASSIGNMENT_VALUE_LEN, &mut lookup)?.text;
-        validate_header_value(name, &value, line)?;
+        validate_header_value(check, &value, line)?;
         Ok(value)
     }
 }
@@ -279,15 +280,10 @@ impl HeaderAction {
     ) -> Result<Self, ExpansionError> {
         let mut resolved = self.clone();
         for operation in &mut resolved.operations {
-            let (line, name, value) = match operation {
-                HeaderOperation::Remove { .. }
-                | HeaderOperation::Rename { .. }
-                | HeaderOperation::Extract { .. } => continue,
-                HeaderOperation::Set { line, name, value }
-                | HeaderOperation::Add { line, name, value }
-                | HeaderOperation::Prepend { line, name, value } => (*line, name.as_str(), value),
+            let Some((line, check, value)) = header_operation_value(operation) else {
+                continue;
             };
-            value.source = value.resolve_with(line, name, &mut lookup)?;
+            value.source = value.resolve_with(line, check, &mut lookup)?;
             value.expansion = None;
         }
         Ok(resolved)
@@ -1287,19 +1283,45 @@ fn shift_known_positionals(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum HeaderValueCheck<'a> {
+    Field(&'a str),
+    Keywords { checks_line_limit: bool },
+}
+
+fn header_operation_value(
+    operation: &mut HeaderOperation,
+) -> Option<(usize, HeaderValueCheck<'_>, &mut HeaderValue)> {
+    match operation {
+        HeaderOperation::Remove { .. }
+        | HeaderOperation::Rename { .. }
+        | HeaderOperation::Extract { .. } => None,
+        HeaderOperation::Set { line, name, value }
+        | HeaderOperation::Add { line, name, value }
+        | HeaderOperation::Prepend { line, name, value } => {
+            Some((*line, HeaderValueCheck::Field(name.as_str()), value))
+        }
+        HeaderOperation::Keywords { line, mode } => {
+            let checks_line_limit = mode.checks_line_limit();
+            mode.value_mut().map(|value| {
+                (
+                    *line,
+                    HeaderValueCheck::Keywords { checks_line_limit },
+                    value,
+                )
+            })
+        }
+    }
+}
+
 fn prepare_header_action(
     action: &mut HeaderAction,
     known: &BTreeMap<String, ExpandedValue>,
     dynamic: &BTreeSet<String>,
 ) -> Result<(), ExpansionError> {
     for operation in &mut action.operations {
-        let (line, name, value) = match operation {
-            HeaderOperation::Remove { .. }
-            | HeaderOperation::Rename { .. }
-            | HeaderOperation::Extract { .. } => continue,
-            HeaderOperation::Set { line, name, value }
-            | HeaderOperation::Add { line, name, value }
-            | HeaderOperation::Prepend { line, name, value } => (*line, name.as_str(), value),
+        let Some((line, check, value)) = header_operation_value(operation) else {
+            continue;
         };
         let expression = parse_expression(&value.source, line)?;
         reject_parameter_assignments(&expression, line, "native header value")?;
@@ -1316,19 +1338,43 @@ fn prepare_header_action(
                     known.get(name).map(|item| item.text.clone())
                 })?
                 .text;
-            validate_header_value(name, &expanded, line)?;
+            validate_header_value(check, &expanded, line)?;
         }
         value.expansion = Some(expression);
     }
     Ok(())
 }
 
-fn validate_header_value(name: &str, value: &str, line: usize) -> Result<(), ExpansionError> {
-    if let Err(reason) = validate_generated_header_value(name, value) {
-        return Err(ExpansionError::new(
-            line,
-            format!("expanded header value {}", reason.reason()),
-        ));
+fn validate_header_value(
+    check: HeaderValueCheck<'_>,
+    value: &str,
+    line: usize,
+) -> Result<(), ExpansionError> {
+    match check {
+        HeaderValueCheck::Field(name) => {
+            if let Err(reason) = validate_generated_header_value(name, value) {
+                return Err(ExpansionError::new(
+                    line,
+                    format!("expanded header value {}", reason.reason()),
+                ));
+            }
+        }
+        HeaderValueCheck::Keywords { checks_line_limit } => {
+            let keywords = parse_configured_keywords(value).map_err(|reason| {
+                ExpansionError::new(line, format!("expanded keywords value {}", reason.reason()))
+            })?;
+            if checks_line_limit {
+                let joined = keywords.join(", ");
+                if let Err(reason) =
+                    validate_generated_header_value(KeywordField::XKeywords.name(), &joined)
+                {
+                    return Err(ExpansionError::new(
+                        line,
+                        format!("expanded keywords value {}", reason.reason()),
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }

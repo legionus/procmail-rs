@@ -230,6 +230,7 @@ fn header_operation_kind_name(kind: HeaderOperationKind) -> &'static str {
         HeaderOperationKind::Prepend => "prepend",
         HeaderOperationKind::Rename => "rename",
         HeaderOperationKind::Extract => "extract",
+        HeaderOperationKind::Keywords => "keywords",
     }
 }
 

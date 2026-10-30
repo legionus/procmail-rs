@@ -83,3 +83,70 @@ To: control\0@example.org\n\n";
         [b"valid@example.org".to_vec()]
     );
 }
+
+#[test]
+fn collects_keywords_preserving_case_order_and_imap_atoms() {
+    let header = b"Keywords: Work, work,\r\n\t$Forwarded, \xffinvalid\r\n\
+x-label: Work, Urgent, bad\0tag\r\n\
+X-Keywords: $Junk $NotJunk Urgent\r\n\r\n";
+    assert_eq!(
+        collect_keywords(header, &KeywordField::ALL).unwrap(),
+        ["Work", "work", "$Forwarded", "Urgent", "$Junk", "$NotJunk"]
+    );
+    assert_eq!(
+        collect_keywords(header, &[KeywordField::XLabel]).unwrap(),
+        ["Work", "Urgent"]
+    );
+}
+
+#[test]
+fn bounds_collected_and_configured_keywords_at_the_ceiling() {
+    for (count, accepted) in [
+        (MAX_STRUCTURED_HEADER_VALUES - 1, true),
+        (MAX_STRUCTURED_HEADER_VALUES, true),
+        (MAX_STRUCTURED_HEADER_VALUES + 1, false),
+    ] {
+        let mut header = b"Keywords: ".to_vec();
+        for index in 0..count {
+            if index != 0 {
+                header.extend_from_slice(b", ");
+            }
+            header.extend_from_slice(b"Work");
+        }
+        header.extend_from_slice(b"\n\n");
+        assert_eq!(
+            collect_keywords(&header, &KeywordField::ALL).is_ok(),
+            accepted,
+            "collected count: {count}"
+        );
+
+        let configured = std::iter::repeat_n("Work", count)
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(
+            parse_configured_keywords(&configured).is_ok(),
+            accepted,
+            "configured count: {count}"
+        );
+    }
+}
+
+#[test]
+fn validates_configured_keyword_lists() {
+    assert_eq!(
+        parse_configured_keywords("Work, Urgent\t$Forwarded  work, Work").unwrap(),
+        ["Work", "Urgent", "$Forwarded", "work"]
+    );
+    for empty in ["", "   ", " , \t , "] {
+        assert_eq!(
+            parse_configured_keywords(empty),
+            Err(ConfiguredKeywordError::Empty)
+        );
+    }
+    for invalid in ["Work, \u{e9}", "bad\x07tag", "line\nbreak"] {
+        assert_eq!(
+            parse_configured_keywords(invalid),
+            Err(ConfiguredKeywordError::InvalidToken)
+        );
+    }
+}

@@ -68,22 +68,30 @@ pub fn record_header_action(
 ) {
     for operation in &action.operations {
         let (line, kind, name, argument, extraction_mode) = match operation {
-            HeaderOperation::Remove { line, name } => {
-                (*line, HeaderOperationKind::Remove, name, None, None)
-            }
+            HeaderOperation::Remove { line, name } => (
+                *line,
+                HeaderOperationKind::Remove,
+                name.as_str(),
+                None,
+                None,
+            ),
             HeaderOperation::Set { line, name, .. } => {
-                (*line, HeaderOperationKind::Set, name, None, None)
+                (*line, HeaderOperationKind::Set, name.as_str(), None, None)
             }
             HeaderOperation::Add { line, name, .. } => {
-                (*line, HeaderOperationKind::Add, name, None, None)
+                (*line, HeaderOperationKind::Add, name.as_str(), None, None)
             }
-            HeaderOperation::Prepend { line, name, .. } => {
-                (*line, HeaderOperationKind::Prepend, name, None, None)
-            }
+            HeaderOperation::Prepend { line, name, .. } => (
+                *line,
+                HeaderOperationKind::Prepend,
+                name.as_str(),
+                None,
+                None,
+            ),
             HeaderOperation::Rename { line, from, to } => (
                 *line,
                 HeaderOperationKind::Rename,
-                from,
+                from.as_str(),
                 Some(to.as_str()),
                 None,
             ),
@@ -95,9 +103,16 @@ pub fn record_header_action(
             } => (
                 *line,
                 HeaderOperationKind::Extract,
-                name,
+                name.as_str(),
                 Some(target.as_str()),
                 Some(*mode),
+            ),
+            HeaderOperation::Keywords { line, mode } => (
+                *line,
+                HeaderOperationKind::Keywords,
+                "Keywords,X-Label,X-Keywords",
+                Some(mode.name()),
+                None,
             ),
         };
 
@@ -109,7 +124,7 @@ pub fn record_header_action(
             TraceEvent::HeaderOperation {
                 line,
                 kind,
-                name: TraceName(name.clone()),
+                name: TraceName(name.to_owned()),
                 argument: argument.map(|name| TraceName(name.to_owned())),
                 extraction_mode,
             },

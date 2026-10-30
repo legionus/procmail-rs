@@ -1873,7 +1873,7 @@ fn config_with_conditions(mut count: usize) -> String {
 #[test]
 fn parses_typed_header_action_operations() {
     let config = parse(
-        ":0\nheaders {\n remove X-Old\n set X-State ready\n add X-State later\n prepend X-First yes\n rename X-Legacy to X-Current\n extract unfolded Subject into SUBJECT\n}\n",
+        ":0\nheaders {\n remove X-Old\n set X-State ready\n add X-State later\n prepend X-First yes\n rename X-Legacy to X-Current\n extract unfolded Subject into SUBJECT\n keywords add Work, Urgent\n keywords remove Urgent\n keywords set Work\n keywords clear\n}\n",
     )
     .unwrap();
     let Statement::Recipe(recipe) = &config.statements[0] else {
@@ -1923,9 +1923,73 @@ fn parses_typed_header_action_operations() {
                     target: "SUBJECT".into(),
                     mode: HeaderExtractionMode::Unfolded,
                 },
+                HeaderOperation::Keywords {
+                    line: 9,
+                    mode: HeaderKeywordsMode::Add(HeaderValue {
+                        source: "Work, Urgent".into(),
+                        expansion: None,
+                    }),
+                },
+                HeaderOperation::Keywords {
+                    line: 10,
+                    mode: HeaderKeywordsMode::Remove(HeaderValue {
+                        source: "Urgent".into(),
+                        expansion: None,
+                    }),
+                },
+                HeaderOperation::Keywords {
+                    line: 11,
+                    mode: HeaderKeywordsMode::Set(HeaderValue {
+                        source: "Work".into(),
+                        expansion: None,
+                    }),
+                },
+                HeaderOperation::Keywords {
+                    line: 12,
+                    mode: HeaderKeywordsMode::Clear,
+                },
             ],
         })
     );
+}
+
+#[test]
+fn rejects_malformed_header_keywords_operations() {
+    for (operation, message) in [
+        ("keywords", "header operation 'keywords' has no arguments"),
+        (
+            "keywords replace Work",
+            "header keywords mode must be 'add', 'remove', 'set', or 'clear'",
+        ),
+        (
+            "keywords add",
+            "header operation 'keywords add' requires KEYWORDS",
+        ),
+        (
+            "keywords remove",
+            "header operation 'keywords remove' requires KEYWORDS",
+        ),
+        (
+            "keywords set",
+            "header operation 'keywords set' requires KEYWORDS",
+        ),
+        (
+            "keywords clear Work",
+            "header operation 'keywords clear' takes no arguments",
+        ),
+        (
+            "keywords add Work\\",
+            "folded header values are not supported",
+        ),
+        (
+            "keywords add Work\0Urgent",
+            "header value contains a forbidden byte",
+        ),
+    ] {
+        let error = parse(&format!(":0\nheaders {{\n {operation}\n}}\n")).unwrap_err();
+        assert_eq!(error.line, 3, "{operation}");
+        assert_eq!(error.message, message, "{operation}");
+    }
 }
 
 #[test]

@@ -212,6 +212,7 @@ pub(super) fn render_human_event(output: &mut impl fmt::Write, event: &TraceEven
                     HeaderOperationKind::Extract => {
                         write!(output, " into \"{}\"", argument.as_str())?
                     }
+                    HeaderOperationKind::Keywords => write!(output, " ({})", argument.as_str())?,
                     _ => {}
                 }
             }
@@ -253,6 +254,7 @@ fn human_header_operation(kind: HeaderOperationKind) -> &'static str {
         HeaderOperationKind::Prepend => "Prepending",
         HeaderOperationKind::Rename => "Renaming",
         HeaderOperationKind::Extract => "Extracting",
+        HeaderOperationKind::Keywords => "Updating keywords",
     }
 }
 
