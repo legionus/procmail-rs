@@ -55,7 +55,7 @@ The documentation is organized by task:
 - [HeaderEditing.md](Documentation/HeaderEditing.md) documents the native
   `headers { ... }` action;
 - [StructuredConditions.md](Documentation/StructuredConditions.md) documents
-  parsed mailbox-address and List-Id matching;
+  parsed mailbox-address, `List-Id`, and keyword matching;
 - [Compatibility.md](Documentation/Compatibility.md) compares procmail-rs with
   original procmail without duplicating those guides.
 
@@ -96,8 +96,10 @@ validated message without opening the device.
 
 The rc language also provides bounded structured conditions for common mail
 fields. `address From,To,Cc ?? REGEX` tests normalized mailbox addresses
-without display names or comments, and `identifier List-Id ?? REGEX` tests the
-normalized list identifier. See the rc manual for their exact syntax.
+without display names or comments, `identifier List-Id ?? REGEX` tests the
+normalized list identifier, and `keyword all ?? REGEX` tests tags across
+`Keywords`, `X-Label`, and `X-Keywords`. See the rc manual for their exact
+syntax.
 
 ## Commands
 

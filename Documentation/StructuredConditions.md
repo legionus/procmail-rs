@@ -5,9 +5,9 @@
 
 Raw header regexes operate on transport syntax. A display name, comment,
 folding sequence, encoded text, or angle bracket can therefore obscure the
-value a recipe intends to test. procmail-rs provides bounded `address` and
-`identifier` conditions which parse selected field values before applying a
-byte regex.
+value a recipe intends to test. procmail-rs provides bounded `address`,
+`identifier`, and `keyword` conditions which parse selected field values before
+applying a byte regex.
 
 ## Address matching
 
@@ -88,6 +88,35 @@ A missing or malformed identifier does not match. `List-Id` is intentionally
 separate from `address`; treating it as a mailbox would invent an at-sign and
 make its list hierarchy ambiguous.
 
+## Keyword matching
+
+The syntax is:
+
+```text
+keyword all ?? REGEX
+keyword FIELD[,FIELD...] ?? REGEX
+```
+
+Supported fields are `Keywords`, `X-Label`, and `X-Keywords`; `all` selects all
+three fields. Field names are ASCII case-insensitive, and repeated, unknown, or
+mixed `all` field lists are rejected.
+
+```text
+:0
+* keyword all ?? ^Urgent$
+urgent/
+
+:0 D
+* keyword X-Label,X-Keywords ?? ^Project:([A-Za-z0-9_-]+)$
+maildir:projects/${MATCH1}/
+```
+
+Each unique valid keyword token (printable US-ASCII without spaces or commas)
+is tested separately in first-seen order. Commas, whitespace, and folding are
+discarded, and malformed tokens in incoming headers are ignored. At most 4096
+valid keyword tokens are scanned for one condition; exceeding that ceiling
+fails message evaluation explicitly.
+
 ## Captures and negation
 
 Capturing groups populate `MATCH1`, `MATCH2`, and later numbered variables.
@@ -148,4 +177,5 @@ conditions:
 ```text
 * address ?? ^manual-value$
 * identifier ?? ^another-value$
+* keyword ?? ^third-value$
 ```

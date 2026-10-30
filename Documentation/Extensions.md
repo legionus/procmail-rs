@@ -10,10 +10,10 @@ procmail.
 
 ## Native header editing
 
-The `headers { ... }` action removes, replaces, adds, renames, or extracts
-fields without passing the complete message through `formail`. Changes are
-visible to every following recipe, including structured conditions and
-external filters.
+The `headers { ... }` action removes, replaces, adds, renames, extracts, or
+synchronizes keyword fields without passing the complete message through
+`formail`. Changes are visible to every following recipe, including structured
+conditions and external filters.
 
 ```text
 :0
@@ -21,6 +21,7 @@ headers {
     remove X-Old-Spam-Status
     set X-Spam-Status clean
     add X-Processed-By procmail-rs
+    keywords add Work, Urgent
 }
 ```
 
@@ -29,9 +30,11 @@ failure behavior, and examples.
 
 ## Structured header conditions
 
-`address` extracts mailbox addresses before matching, while `identifier`
-extracts the identifier carried by `List-Id`. This avoids regular expressions
-which accidentally consume display names, comments, brackets, or folding.
+`address` extracts mailbox addresses before matching, `identifier` extracts the
+identifier carried by `List-Id`, and `keyword` extracts individual tags from
+`Keywords`, `X-Label`, and `X-Keywords`. This avoids regular expressions which
+accidentally consume display names, comments, brackets, comma separators, or
+folding.
 
 ```text
 :0
@@ -41,6 +44,10 @@ from-example/
 :0
 * identifier List-Id ?? ^users\.lists\.example\.org$
 lists/example-users/
+
+:0
+* keyword all ?? ^Urgent$
+urgent/
 ```
 
 See [StructuredConditions.md](StructuredConditions.md) for normalization,

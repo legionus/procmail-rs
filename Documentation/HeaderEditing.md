@@ -92,6 +92,37 @@ headers {
 An absent field assigns an empty value. Repeated extraction into the same
 variable leaves the result of the last operation.
 
+`keywords add|remove|set KEYWORDS` and `keywords clear` synchronize `Keywords`,
+`X-Label`, and `X-Keywords` so RFC 5322 indexers (such as Notmuch), Mutt/NeoMutt,
+and Thunderbird/Claws Mail observe the same tag set:
+
+```text
+headers {
+    keywords clear
+    keywords add Work, Urgent
+    keywords remove Urgent
+    keywords set Work, Personal
+}
+```
+
+- `keywords add KEYWORDS` collects valid ASCII keyword tokens from all existing
+  `Keywords`, `X-Label`, and `X-Keywords` fields, appends new tokens in
+  first-seen order using exact byte matching (`Work` is distinct from `work`),
+  and writes all three fields as single lines separated by `, `.
+- `keywords remove KEYWORDS` removes the listed tokens from the collected set;
+  when no keywords remain, all three fields are removed.
+- `keywords set KEYWORDS` replaces all three fields with the listed tokens,
+  discarding any preexisting keywords.
+- `keywords clear` removes all `Keywords`, `X-Label`, and `X-Keywords` fields.
+
+Each configured keyword must be a non-empty printable US-ASCII token without
+spaces or commas (`0x21..=0x7e` except `,`), which preserves IMAP keyword atoms
+such as `$Forwarded` and `$Junk`. Incoming message headers ignore malformed
+non-ASCII or control tokens while counting valid tokens toward the 4096-value
+structured-header ceiling. When filtering untrusted external mail, use
+`keywords clear` or `keywords set` before `keywords add` so sender-supplied
+`Keywords`, `X-Label`, or `X-Keywords` fields are not retained.
+
 ## Values and field names
 
 Field names follow RFC 5322 `1*ftext`: printable ASCII bytes from 33 through

@@ -365,7 +365,7 @@ byte value of a variable.
 urgent-body/
 ```
 
-## Structured address and identifier conditions
+## Structured address, identifier, and keyword conditions
 
 The **procmail-rs** `address` condition extracts mailbox addresses from one or
 more address-bearing fields and applies `REGEX` separately to every resulting
@@ -397,11 +397,27 @@ angle brackets, with ASCII letters converted to lowercase:
 lists/linux-kernel/
 ```
 
-Both forms require only the header section and stop at the first matching
+Keyword fields carry message tags across indexers and mail clients. Use
+`keyword all ?? REGEX` to test tags from `Keywords`, `X-Label`, and
+`X-Keywords`, or `keyword FIELD[,FIELD...] ?? REGEX` to select specific keyword
+fields:
+
+```
+:0
+* keyword all ?? ^Urgent$
+urgent/
+```
+
+Each unique valid keyword token (printable US-ASCII without spaces or commas)
+is tested in first-seen order; malformed tokens are ignored and at most 4096
+valid tokens are scanned per condition.
+
+All three forms require only the header section and stop at the first matching
 value. Their regex groups and `\/` marker update `MATCH`, `MATCH1`, and later
 numbered values in the same way as other regex conditions. The leading
-keywords do not reserve variable names: `address ?? REGEX` and
-`identifier ?? REGEX` remain ordinary variable conditions.
+keywords do not reserve variable names: `address ?? REGEX`,
+`identifier ?? REGEX`, and `keyword ?? REGEX` remain ordinary variable
+conditions.
 
 The ordinary operators are:
 
@@ -767,6 +783,25 @@ headers {
     extract unfolded To into MSG_TO
     extract decoded Subject into MSG_SUBJECT
     extract raw X-Original into ORIGINAL_RAW
+}
+```
+
+`keywords add KEYWORDS`, `keywords remove KEYWORDS`, `keywords set KEYWORDS`, `keywords clear`
+
+: Synchronize message tags across `Keywords`, `X-Label`, and `X-Keywords`.
+  `keywords add` collects valid printable US-ASCII tokens (without spaces or
+  commas) from all three fields, appends the new tokens in first-seen order
+  using exact byte matching, and writes one comma-separated line per field.
+  `keywords remove` removes matching tokens and deletes all three fields when
+  none remain. `keywords set` replaces all three fields with the given tokens,
+  and `keywords clear` deletes all three fields. Malformed external tokens are
+  ignored while total scanned tokens are bounded to 4096.
+
+```
+headers {
+    keywords clear
+    keywords add Work, Urgent
+    keywords remove Urgent
 }
 ```
 

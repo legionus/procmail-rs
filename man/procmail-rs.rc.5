@@ -464,7 +464,7 @@ condition.
 * urgent
 urgent\-body/
 .EE
-.SS Structured address and identifier conditions
+.SS Structured address, identifier, and keyword conditions
 The \f[B]procmail\-rs\f[R] \f[CR]address\f[R] condition extracts mailbox
 addresses from one or more address\-bearing fields and applies
 \f[CR]REGEX\f[R] separately to every resulting address:
@@ -500,14 +500,30 @@ letters converted to lowercase:
 lists/linux\-kernel/
 .EE
 .PP
-Both forms require only the header section and stop at the first
+Keyword fields carry message tags across indexers and mail clients.
+Use \f[CR]keyword all ?? REGEX\f[R] to test tags from
+\f[CR]Keywords\f[R], \f[CR]X\-Label\f[R], and \f[CR]X\-Keywords\f[R], or
+\f[CR]keyword FIELD[,FIELD...] ?? REGEX\f[R] to select specific keyword
+fields:
+.IP
+.EX
+:0
+* keyword all ?? \(haUrgent$
+urgent/
+.EE
+.PP
+Each unique valid keyword token (printable US\-ASCII without spaces or
+commas) is tested in first\-seen order; malformed tokens are ignored and
+at most 4096 valid tokens are scanned per condition.
+.PP
+All three forms require only the header section and stop at the first
 matching value.
 Their regex groups and \f[CR]\(rs/\f[R] marker update \f[CR]MATCH\f[R],
 \f[CR]MATCH1\f[R], and later numbered values in the same way as other
 regex conditions.
 The leading keywords do not reserve variable names:
-\f[CR]address ?? REGEX\f[R] and \f[CR]identifier ?? REGEX\f[R] remain
-ordinary variable conditions.
+\f[CR]address ?? REGEX\f[R], \f[CR]identifier ?? REGEX\f[R], and
+\f[CR]keyword ?? REGEX\f[R] remain ordinary variable conditions.
 .PP
 The ordinary operators are:
 .TP
@@ -889,6 +905,28 @@ headers {
     extract unfolded To into MSG_TO
     extract decoded Subject into MSG_SUBJECT
     extract raw X\-Original into ORIGINAL_RAW
+}
+.EE
+.TP
+\f[CR]keywords add KEYWORDS\f[R], \f[CR]keywords remove KEYWORDS\f[R], \f[CR]keywords set KEYWORDS\f[R], \f[CR]keywords clear\f[R]
+Synchronize message tags across \f[CR]Keywords\f[R],
+\f[CR]X\-Label\f[R], and \f[CR]X\-Keywords\f[R].
+\f[CR]keywords add\f[R] collects valid printable US\-ASCII tokens
+(without spaces or commas) from all three fields, appends the new tokens
+in first\-seen order using exact byte matching, and writes one
+comma\-separated line per field.
+\f[CR]keywords remove\f[R] removes matching tokens and deletes all three
+fields when none remain.
+\f[CR]keywords set\f[R] replaces all three fields with the given tokens,
+and \f[CR]keywords clear\f[R] deletes all three fields.
+Malformed external tokens are ignored while total scanned tokens are
+bounded to 4096.
+.IP
+.EX
+headers {
+    keywords clear
+    keywords add Work, Urgent
+    keywords remove Urgent
 }
 .EE
 .PP
