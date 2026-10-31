@@ -929,6 +929,24 @@ headers {
     keywords remove Urgent
 }
 .EE
+.TP
+\f[CR]priority high\f[R], \f[CR]priority normal\f[R], \f[CR]priority low\f[R], \f[CR]priority clear\f[R]
+Synchronize message priority across \f[CR]Importance\f[R],
+\f[CR]Priority\f[R], and \f[CR]X\-Priority\f[R].
+\f[CR]high\f[R] sets \f[CR]Importance: high\f[R],
+\f[CR]Priority: urgent\f[R], and \f[CR]X\-Priority: 1\f[R];
+\f[CR]normal\f[R] sets \f[CR]Importance: normal\f[R],
+\f[CR]Priority: normal\f[R], and \f[CR]X\-Priority: 3\f[R];
+\f[CR]low\f[R] sets \f[CR]Importance: low\f[R],
+\f[CR]Priority: non\-urgent\f[R], and \f[CR]X\-Priority: 5\f[R].
+\f[CR]clear\f[R] deletes all three fields.
+.IP
+.EX
+headers {
+    priority high
+    priority clear
+}
+.EE
 .PP
 The decoded value can be matched explicitly without changing the raw
 header matching behavior:

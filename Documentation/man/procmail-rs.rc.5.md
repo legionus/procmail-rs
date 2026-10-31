@@ -805,6 +805,21 @@ headers {
 }
 ```
 
+`priority high`, `priority normal`, `priority low`, `priority clear`
+
+: Synchronize message priority across `Importance`, `Priority`, and
+  `X-Priority`. `high` sets `Importance: high`, `Priority: urgent`, and
+  `X-Priority: 1`; `normal` sets `Importance: normal`, `Priority: normal`, and
+  `X-Priority: 3`; `low` sets `Importance: low`, `Priority: non-urgent`, and
+  `X-Priority: 5`. `clear` deletes all three fields.
+
+```
+headers {
+    priority high
+    priority clear
+}
+```
+
 The decoded value can be matched explicitly without changing the raw header
 matching behavior:
 

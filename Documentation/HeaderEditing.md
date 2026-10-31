@@ -123,6 +123,28 @@ structured-header ceiling. When filtering untrusted external mail, use
 `keywords clear` or `keywords set` before `keywords add` so sender-supplied
 `Keywords`, `X-Label`, or `X-Keywords` fields are not retained.
 
+`priority high|normal|low|clear` synchronizes `Importance`, `Priority`, and
+`X-Priority` so RFC 2156 indexers and mail clients such as Mutt, Thunderbird,
+and Claws Mail observe the same priority level:
+
+```text
+headers {
+    priority high
+    priority normal
+    priority low
+    priority clear
+}
+```
+
+- `priority high` sets `Importance: high`, `Priority: urgent`, and
+  `X-Priority: 1`.
+- `priority normal` sets `Importance: normal`, `Priority: normal`, and
+  `X-Priority: 3`.
+- `priority low` sets `Importance: low`, `Priority: non-urgent`, and
+  `X-Priority: 5`.
+- `priority clear` removes all `Importance`, `Priority`, and `X-Priority`
+  fields.
+
 ## Values and field names
 
 Field names follow RFC 5322 `1*ftext`: printable ASCII bytes from 33 through
