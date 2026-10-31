@@ -459,6 +459,135 @@ pub enum HeaderOperation {
         line: usize,
         mode: HeaderPriorityMode,
     },
+    Status {
+        line: usize,
+        mode: HeaderStatusMode,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderStatusMode {
+    Add(HeaderValue),
+    Remove(HeaderValue),
+    Set(HeaderValue),
+    Clear,
+}
+
+impl HeaderStatusMode {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Add(_) => "add",
+            Self::Remove(_) => "remove",
+            Self::Set(_) => "set",
+            Self::Clear => "clear",
+        }
+    }
+
+    pub(crate) fn value_mut(&mut self) -> Option<&mut HeaderValue> {
+        match self {
+            Self::Add(value) | Self::Remove(value) | Self::Set(value) => Some(value),
+            Self::Clear => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageStatus {
+    pub read: bool,
+    pub flagged: bool,
+    pub replied: bool,
+}
+
+impl MessageStatus {
+    pub const NONE: Self = Self {
+        read: false,
+        flagged: false,
+        replied: false,
+    };
+
+    pub const fn is_empty(self) -> bool {
+        !self.read && !self.flagged && !self.replied
+    }
+
+    pub fn add(&mut self, other: Self) {
+        self.read |= other.read;
+        self.flagged |= other.flagged;
+        self.replied |= other.replied;
+    }
+
+    pub fn remove(&mut self, other: Self) {
+        if other.read {
+            self.read = false;
+        }
+        if other.flagged {
+            self.flagged = false;
+        }
+        if other.replied {
+            self.replied = false;
+        }
+    }
+
+    pub const fn status_header_value(self) -> Option<&'static str> {
+        if self.read { Some("RO") } else { None }
+    }
+
+    pub const fn x_status_header_value(self) -> Option<&'static str> {
+        match (self.replied, self.flagged) {
+            (true, true) => Some("AF"),
+            (true, false) => Some("A"),
+            (false, true) => Some("F"),
+            (false, false) => None,
+        }
+    }
+
+    pub const fn maildir_suffix(self) -> &'static str {
+        match (self.flagged, self.replied, self.read) {
+            (false, false, false) => "",
+            (true, false, false) => ":2,F",
+            (false, true, false) => ":2,R",
+            (false, false, true) => ":2,S",
+            (true, true, false) => ":2,FR",
+            (true, false, true) => ":2,FS",
+            (false, true, true) => ":2,RS",
+            (true, true, true) => ":2,FRS",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfiguredStatusError {
+    Empty,
+    InvalidFlag,
+}
+
+impl ConfiguredStatusError {
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::Empty => "must contain at least one status flag",
+            Self::InvalidFlag => "must contain only 'read', 'flagged', or 'replied'",
+        }
+    }
+}
+
+pub(crate) fn parse_configured_status(value: &str) -> Result<MessageStatus, ConfiguredStatusError> {
+    let mut status = MessageStatus::NONE;
+    let mut found = false;
+    for token in value
+        .split([' ', '\t', ','])
+        .filter(|token| !token.is_empty())
+    {
+        found = true;
+        match token {
+            "read" => status.read = true,
+            "flagged" => status.flagged = true,
+            "replied" => status.replied = true,
+            _ => return Err(ConfiguredStatusError::InvalidFlag),
+        }
+    }
+    if !found {
+        return Err(ConfiguredStatusError::Empty);
+    }
+    Ok(status)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

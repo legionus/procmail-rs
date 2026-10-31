@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::config::{ActionInput, ConditionInput};
+use crate::config::{ActionInput, ConditionInput, MessageStatus};
 use crate::header_edit::{EditedHeader, HeaderEditError, HeaderView};
 use crate::limits::MessageLimits;
 #[cfg(test)]
@@ -186,6 +186,13 @@ impl OwnedCompleteMessage<'_> {
         }
     }
 
+    fn status(&self) -> MessageStatus {
+        match &self.version {
+            MessageVersion::Whole(_) => MessageStatus::NONE,
+            MessageVersion::Headers { head, .. } => head.status(),
+        }
+    }
+
     fn full(&self) -> &[u8] {
         // A regex may cross the header/body boundary, so it needs one range.
         // Delivery and ordinary header edits borrow the pieces instead. This
@@ -211,12 +218,27 @@ pub(super) struct CurrentMessage<'input> {
 }
 
 impl<'input> CurrentMessage<'input> {
-    pub(super) fn replace(&mut self, message: Message) {
+    pub(super) fn replace(&mut self, message: Message, area: ActionInput) {
+        let len = message.len();
+        let message = Arc::new(message);
+        let version = match (
+            area,
+            self.replacement.as_deref().map(|owned| &owned.version),
+        ) {
+            (ActionInput::Body, Some(MessageVersion::Headers { head, .. })) => {
+                MessageVersion::Headers {
+                    head: head.clone(),
+                    body: BodyBacking::Filter(message),
+                    len,
+                }
+            }
+            _ => MessageVersion::Whole(message),
+        };
         // A new version owns a fresh cache. Copy branches can share this
         // immutable version and its eventual full regex view without copying
         // the body; replacing one branch cannot invalidate another branch.
         self.replacement = Some(Arc::new(OwnedCompleteMessage {
-            version: MessageVersion::Whole(Arc::new(message)),
+            version,
             matching: OnceLock::new(),
         }));
     }
@@ -308,6 +330,13 @@ impl<'a> FinalMessage<'a> {
         match self.storage {
             FinalStorage::Bytes(bytes) => bytes.into(),
             FinalStorage::Version(owned) => MessageBytes::new(owned.header(), owned.body()),
+        }
+    }
+
+    pub fn status(self) -> MessageStatus {
+        match self.storage {
+            FinalStorage::Bytes(_) => MessageStatus::NONE,
+            FinalStorage::Version(owned) => owned.status(),
         }
     }
 }
@@ -449,6 +478,13 @@ impl<'a> CompleteMessage<'a> {
             #[cfg(test)]
             Self::Streamed(message) => message.len(),
             Self::Mapped { raw, .. } => raw.len(),
+        }
+    }
+
+    pub(super) fn status(self) -> MessageStatus {
+        match self {
+            Self::Owned(owned) => owned.status(),
+            _ => MessageStatus::NONE,
         }
     }
 }

@@ -39,14 +39,18 @@ impl PendingFile {
     pub(super) fn publish(
         self,
         _tmp_dir: &OwnedFd,
-        new_dir: &OwnedFd,
+        target_dir: &OwnedFd,
+        info_suffix: &str,
         mut next_name: impl FnMut() -> io::Result<String>,
     ) -> Result<String, PlatformPublishError> {
         // Publish the completed unnamed inode directly. An intermediate named
         // tmp entry would require pathname cleanup after a failed rename and
         // could be substituted before cleanup. linkat atomically rejects name
         // collisions; failure leaves only the descriptor-owned unnamed inode.
-        link_unique(&self.file, new_dir, &mut next_name)
+        link_unique(&self.file, target_dir, &mut || {
+            let base = next_name()?;
+            Ok(format!("{base}{info_suffix}"))
+        })
     }
 
     pub(super) fn abort(self, _tmp_dir: &OwnedFd) -> io::Result<()> {

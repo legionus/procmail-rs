@@ -352,6 +352,9 @@ impl CompiledSequence {
                             crate::config::HeaderOperation::Priority { .. } => {
                                 operations.priority += 1;
                             }
+                            crate::config::HeaderOperation::Status { .. } => {
+                                operations.status += 1;
+                            }
                         }
                     }
                     explanations.push(RecipeExplanation {

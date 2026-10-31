@@ -107,7 +107,9 @@ fn rejects_unknown_durability_before_delivery() {
 fn every_durability_mode_can_publish_a_complete_message() {
     for durability in [Durability::None, Durability::File, Durability::Full] {
         let maildir = TestMaildir::create();
-        let mut sink = Box::new(MaildirSink::create(maildir.path(), durability, 0).unwrap());
+        let mut sink = Box::new(
+            MaildirSink::create(maildir.path(), durability, 0, MessageStatus::default()).unwrap(),
+        );
         sink.write_all(b"Subject: sync\n\nbody").unwrap();
 
         let published = PendingSink::commit(sink).unwrap();
@@ -121,7 +123,15 @@ fn every_durability_mode_can_publish_a_complete_message() {
 #[test]
 fn commit_atomically_publishes_the_complete_file_in_new() {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
+    let mut sink = Box::new(
+        MaildirSink::create(
+            maildir.path(),
+            Durability::None,
+            0,
+            MessageStatus::default(),
+        )
+        .unwrap(),
+    );
     sink.write_all(b"Subject: test\n\nbody").unwrap();
 
     assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
@@ -139,6 +149,80 @@ fn commit_atomically_publishes_the_complete_file_in_new() {
     );
 }
 
+#[test]
+fn commit_with_status_publishes_to_cur_with_canonical_flags() {
+    for (status, expected_suffix) in [
+        (
+            MessageStatus {
+                read: true,
+                flagged: false,
+                replied: false,
+            },
+            ":2,S",
+        ),
+        (
+            MessageStatus {
+                read: false,
+                flagged: true,
+                replied: false,
+            },
+            ":2,F",
+        ),
+        (
+            MessageStatus {
+                read: false,
+                flagged: false,
+                replied: true,
+            },
+            ":2,R",
+        ),
+        (
+            MessageStatus {
+                read: true,
+                flagged: true,
+                replied: false,
+            },
+            ":2,FS",
+        ),
+        (
+            MessageStatus {
+                read: true,
+                flagged: true,
+                replied: true,
+            },
+            ":2,FRS",
+        ),
+    ] {
+        let maildir = TestMaildir::create();
+        let mut sink =
+            Box::new(MaildirSink::create(maildir.path(), Durability::None, 0, status).unwrap());
+        sink.write_all(b"Subject: status test\n\nbody").unwrap();
+
+        assert_eq!(fs::read_dir(maildir.path().join("cur")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+
+        let published = PendingSink::commit(sink).unwrap();
+        let published_path = published.last_folder();
+        assert!(
+            published_path.starts_with(maildir.path().join("cur")),
+            "expected path in cur/, got: {}",
+            published_path.display()
+        );
+        let file_name = published_path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            file_name.ends_with(expected_suffix),
+            "expected filename to end with {expected_suffix}, got: {file_name}"
+        );
+        assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(maildir.path().join("cur")).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(published_path).unwrap(),
+            b"Subject: status test\n\nbody"
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn opens_maildir_through_a_search_only_directory() {
@@ -146,7 +230,12 @@ fn opens_maildir_through_a_search_only_directory() {
     let original = fs::metadata(maildir.path()).unwrap().permissions();
     fs::set_permissions(maildir.path(), fs::Permissions::from_mode(0o300)).unwrap();
 
-    let result = MaildirSink::create(maildir.path(), Durability::None, 0);
+    let result = MaildirSink::create(
+        maildir.path(),
+        Durability::None,
+        0,
+        MessageStatus::default(),
+    );
 
     // Restore listing permission before assertions so test cleanup can always
     // enumerate and remove the temporary Maildir after a failure.
@@ -158,7 +247,15 @@ fn opens_maildir_through_a_search_only_directory() {
 #[test]
 fn abort_leaves_no_pending_or_published_file() {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
+    let mut sink = Box::new(
+        MaildirSink::create(
+            maildir.path(),
+            Durability::None,
+            0,
+            MessageStatus::default(),
+        )
+        .unwrap(),
+    );
     sink.write_all(b"partial").unwrap();
 
     PendingSink::abort(sink).unwrap();
@@ -169,7 +266,15 @@ fn abort_leaves_no_pending_or_published_file() {
 #[test]
 fn injected_file_sync_failure_happens_before_maildir_publication() {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::File, 0).unwrap());
+    let mut sink = Box::new(
+        MaildirSink::create(
+            maildir.path(),
+            Durability::File,
+            0,
+            MessageStatus::default(),
+        )
+        .unwrap(),
+    );
     sink.write_all(b"complete message").unwrap();
 
     let error = (*sink)
@@ -192,7 +297,15 @@ fn injected_directory_sync_failure_reports_visible_maildir_message() {
 
 fn assert_directory_sync_failure_preserves_publication(failed_call: usize) {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::Full, 0).unwrap());
+    let mut sink = Box::new(
+        MaildirSink::create(
+            maildir.path(),
+            Durability::Full,
+            0,
+            MessageStatus::default(),
+        )
+        .unwrap(),
+    );
     sink.write_all(b"complete message").unwrap();
     let mut sync_calls = 0usize;
 
@@ -234,8 +347,15 @@ fn partial_fanout_preserves_the_first_message_and_cleans_unpublished_sinks() {
     let sinks: Vec<Box<dyn PendingSink>> = maildirs
         .iter()
         .map(|maildir| {
-            Box::new(MaildirSink::create(maildir.path(), Durability::Full, 0).unwrap())
-                as Box<dyn PendingSink>
+            Box::new(
+                MaildirSink::create(
+                    maildir.path(),
+                    Durability::Full,
+                    0,
+                    MessageStatus::default(),
+                )
+                .unwrap(),
+            ) as Box<dyn PendingSink>
         })
         .collect();
     let input = b"Subject: fanout\n\ncomplete message\n";
@@ -276,7 +396,15 @@ fn partial_fanout_preserves_the_first_message_and_cleans_unpublished_sinks() {
 #[test]
 fn creates_a_file_without_group_or_other_access() {
     let maildir = TestMaildir::create();
-    let sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
+    let sink = Box::new(
+        MaildirSink::create(
+            maildir.path(),
+            Durability::None,
+            0,
+            MessageStatus::default(),
+        )
+        .unwrap(),
+    );
     let metadata = rustix::fs::fstat(sink.pending.file()).unwrap();
 
     assert_eq!(
@@ -292,7 +420,7 @@ fn rejects_symlinked_maildir_component() {
     let link = maildir.path().with_extension("link");
     symlink(maildir.path(), &link).unwrap();
 
-    let error = MaildirSink::create(&link, Durability::None, 0)
+    let error = MaildirSink::create(&link, Durability::None, 0, MessageStatus::default())
         .err()
         .unwrap();
     let code = error.raw_os_error();
@@ -310,7 +438,15 @@ fn rejects_symlinked_tmp_directory() {
     fs::remove_dir(maildir.path().join("tmp")).unwrap();
     symlink(maildir.path().join("new"), maildir.path().join("tmp")).unwrap();
 
-    assert!(MaildirSink::create(maildir.path(), Durability::None, 0).is_err());
+    assert!(
+        MaildirSink::create(
+            maildir.path(),
+            Durability::None,
+            0,
+            MessageStatus::default()
+        )
+        .is_err()
+    );
     assert_eq!(fs::read_dir(maildir.path().join("new")).unwrap().count(), 0);
 }
 
@@ -318,7 +454,15 @@ fn rejects_symlinked_tmp_directory() {
 fn directory_replacement_cannot_redirect_an_open_delivery() {
     let maildir = TestMaildir::create();
     let moved = maildir.path().with_extension("opened");
-    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
+    let mut sink = Box::new(
+        MaildirSink::create(
+            maildir.path(),
+            Durability::None,
+            0,
+            MessageStatus::default(),
+        )
+        .unwrap(),
+    );
     sink.write_all(b"Subject: original directories\n\nbody")
         .unwrap();
 
@@ -351,9 +495,14 @@ fn requires_an_existing_complete_maildir() {
         let maildir = TestMaildir::create();
         fs::remove_dir(maildir.path().join(component)).unwrap();
 
-        let error = MaildirSink::create(maildir.path(), Durability::None, 0)
-            .err()
-            .unwrap();
+        let error = MaildirSink::create(
+            maildir.path(),
+            Durability::None,
+            0,
+            MessageStatus::default(),
+        )
+        .err()
+        .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{component}");
         assert!(!maildir.path().join(component).exists());
     }
@@ -369,7 +518,9 @@ fn concurrent_deliveries_publish_unique_complete_messages() {
         let path = maildir.path().to_owned();
         threads.push(std::thread::spawn(move || {
             let message = format!("Subject: {index}\n\nbody {index}").into_bytes();
-            let mut sink = Box::new(MaildirSink::create(&path, Durability::None, 0).unwrap());
+            let mut sink = Box::new(
+                MaildirSink::create(&path, Durability::None, 0, MessageStatus::default()).unwrap(),
+            );
             sink.write_all(&message).unwrap();
             PendingSink::commit(sink).unwrap();
             message
@@ -392,8 +543,13 @@ fn concurrent_deliveries_publish_unique_complete_messages() {
 
 #[test]
 fn rejects_parent_components() {
-    let error = MaildirSink::create(Path::new("mail/../dir"), Durability::None, 0)
-        .err()
-        .unwrap();
+    let error = MaildirSink::create(
+        Path::new("mail/../dir"),
+        Durability::None,
+        0,
+        MessageStatus::default(),
+    )
+    .err()
+    .unwrap();
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 }

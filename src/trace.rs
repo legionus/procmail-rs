@@ -121,6 +121,13 @@ pub fn record_header_action(
                 Some(mode.name()),
                 None,
             ),
+            HeaderOperation::Status { line, mode } => (
+                *line,
+                HeaderOperationKind::Status,
+                "Status,X-Status",
+                Some(mode.name()),
+                None,
+            ),
         };
 
         // The parser has already bounded and validated header and variable

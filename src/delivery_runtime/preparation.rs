@@ -74,6 +74,7 @@ pub(super) fn open_sinks(
             delivery.destination(),
             durability,
             delivery.umask(),
+            delivery.status(),
             runtime,
             trace,
         )?);
@@ -85,6 +86,7 @@ pub(super) fn open_sink(
     unresolved: &Destination,
     durability: Durability,
     mask: u32,
+    status: MessageStatus,
     runtime: &RuntimeVariables,
     trace: &mut impl TraceSink,
 ) -> Result<Box<dyn PendingSink>, OperationalError> {
@@ -93,7 +95,7 @@ pub(super) fn open_sink(
     match destination.kind() {
         DestinationKind::Maildir => {
             let path = Path::new(destination.path());
-            let sink = MaildirSink::create(path, durability, mask).map_err(|error| {
+            let sink = MaildirSink::create(path, durability, mask, status).map_err(|error| {
                 report_delivery_failure(
                     &destination,
                     DeliveryFailure::from_io(DeliveryOperation::Open, &error, false),

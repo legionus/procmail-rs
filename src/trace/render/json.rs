@@ -232,6 +232,7 @@ fn header_operation_kind_name(kind: HeaderOperationKind) -> &'static str {
         HeaderOperationKind::Extract => "extract",
         HeaderOperationKind::Keywords => "keywords",
         HeaderOperationKind::Priority => "priority",
+        HeaderOperationKind::Status => "status",
     }
 }
 

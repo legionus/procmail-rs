@@ -16,8 +16,15 @@ pub(super) fn deliver_one_sink(
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))
         .map_err(OrderedStepError::before_publication)?;
-    let mut sink = open_sink(destination, durability, mask, runtime, trace)
-        .map_err(OrderedStepError::before_publication)?;
+    let mut sink = open_sink(
+        destination,
+        durability,
+        mask,
+        message.status(),
+        runtime,
+        trace,
+    )
+    .map_err(OrderedStepError::before_publication)?;
     message
         .write_to(&mut sink)
         .map_err(|error| {

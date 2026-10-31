@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use super::HeaderEditError;
+use crate::config::MessageStatus;
 use crate::limits::MessageLimits;
 use crate::message::MessageLimit;
 
@@ -20,6 +21,7 @@ pub(super) struct HeaderStorage {
     pub(super) separator: Vec<u8>,
     pub(super) line_ending: &'static [u8],
     pub(super) size: usize,
+    pub(super) status: MessageStatus,
     pub(super) raw: OnceLock<Vec<u8>>,
     pub(super) matching: OnceLock<Option<Vec<u8>>>,
 }
@@ -34,6 +36,7 @@ impl Clone for HeaderStorage {
             separator: self.separator.clone(),
             line_ending: self.line_ending,
             size: self.size,
+            status: self.status,
             raw: OnceLock::new(),
             matching: OnceLock::new(),
         }
@@ -42,7 +45,9 @@ impl Clone for HeaderStorage {
 
 impl PartialEq for EditedHeader {
     fn eq(&self, other: &Self) -> bool {
-        self.limits == other.limits && self.as_bytes() == other.as_bytes()
+        self.limits == other.limits
+            && self.status() == other.status()
+            && self.as_bytes() == other.as_bytes()
     }
 }
 
@@ -153,6 +158,16 @@ impl EditedHeader {
 
     pub(crate) fn len(&self) -> usize {
         self.storage.size
+    }
+
+    pub(crate) fn status(&self) -> MessageStatus {
+        self.storage.status
+    }
+
+    pub(super) fn set_status(&mut self, status: MessageStatus) {
+        if self.storage.status != status {
+            Arc::make_mut(&mut self.storage).status = status;
+        }
     }
 
     pub(super) fn parts(&self) -> impl Iterator<Item = &[u8]> {

@@ -50,6 +50,40 @@ fn header_edit_updates_following_header_rules_without_buffering_body() {
 }
 
 #[test]
+fn header_status_edit_updates_evaluation_status_and_headers() {
+    let config = config::parse(
+        ":0\nheaders {\n status add read, flagged\n}\n:0\nmaildir:selected\n",
+    )
+    .unwrap()
+    .expand(&[])
+    .unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    let mut head = head(b"Subject: status test\n\nbody");
+    let mut runtime = RuntimeVariables::default();
+
+    let result = plan.evaluate_headers_editing_with_trace(&mut head, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected a header-only decision");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+    assert_eq!(
+        delivery.deliveries()[0].status(),
+        config::MessageStatus {
+            read: true,
+            flagged: true,
+            replied: false,
+        }
+    );
+    assert_eq!(
+        head.as_bytes(),
+        b"Subject: status test\nStatus: RO\nX-Status: F\n\n"
+    );
+}
+
+#[test]
 fn decoded_header_extraction_drives_a_following_variable_condition() {
     let config = config::parse(
         ":0\nheaders {\n extract decoded Subject into MSG_SUBJECT\n}\n:0\n* MSG_SUBJECT ?? ^Scholar.*\nmaildir:selected\n",

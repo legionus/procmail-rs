@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
 use super::*;
+use crate::config::MessageStatus;
 use crate::delivery::PendingSink;
 use crate::delivery::maildir::{Durability, MaildirSink, open_directory_path, unique_name};
 
@@ -102,7 +103,7 @@ fn publication_never_replaces_an_existing_new_file() {
     fs::write(maildir.path().join("new").join(name), b"existing").unwrap();
 
     let error = pending
-        .publish(&tmp_dir, &new_dir, || Ok(name.to_owned()))
+        .publish(&tmp_dir, &new_dir, "", || Ok(name.to_owned()))
         .unwrap_err();
 
     assert_eq!(error.into_parts().0.kind(), io::ErrorKind::AlreadyExists);
@@ -116,7 +117,15 @@ fn publication_never_replaces_an_existing_new_file() {
 #[test]
 fn write_failure_never_creates_a_maildir_entry() {
     let maildir = TestMaildir::create();
-    let mut sink = Box::new(MaildirSink::create(maildir.path(), Durability::None, 0).unwrap());
+    let mut sink = Box::new(
+        MaildirSink::create(
+            maildir.path(),
+            Durability::None,
+            0,
+            MessageStatus::default(),
+        )
+        .unwrap(),
+    );
     sink.pending.file = openat(
         CWD,
         "/dev/full",
@@ -150,7 +159,7 @@ fn publication_failure_leaves_no_named_temporary_file() {
     let pending = PendingFile::create(&tmp_dir, 0, unique_name).unwrap();
     rustix::io::write(pending.file(), b"complete message").unwrap();
     let error = pending
-        .publish(&tmp_dir, &invalid_new, unique_name)
+        .publish(&tmp_dir, &invalid_new, "", unique_name)
         .unwrap_err();
     assert_eq!(error.into_parts().0.kind(), io::ErrorKind::NotADirectory);
     assert_eq!(fs::read_dir(maildir.path().join("tmp")).unwrap().count(), 0);

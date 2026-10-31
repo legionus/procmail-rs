@@ -3,7 +3,7 @@
 
 use crate::config::{
     ActionInput, Assignment, AssignmentTarget, Config, ContinuationMode, ControlFlow, Destination,
-    OutputEnding, PipeAction, RecipeOptions,
+    MessageStatus, OutputEnding, PipeAction, RecipeOptions,
 };
 use crate::limits::MessageLimits;
 #[cfg(test)]

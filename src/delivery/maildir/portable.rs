@@ -53,7 +53,8 @@ impl PendingFile {
     pub(super) fn publish(
         mut self,
         _tmp_dir: &OwnedFd,
-        new_dir: &OwnedFd,
+        target_dir: &OwnedFd,
+        info_suffix: &str,
         _next_name: impl FnMut() -> io::Result<String>,
     ) -> Result<String, PlatformPublishError> {
         let name = self.name.as_deref().ok_or_else(|| {
@@ -64,15 +65,21 @@ impl PendingFile {
         verify_named_file(&self.file, &self.directory, name)
             .map_err(PlatformPublishError::before)?;
 
+        let published_name = format!("{name}{info_suffix}");
         // linkat provides no-replace publication on Unix systems without the
         // Linux unnamed-file path. Its source is a pathname, so checks on both
         // sides detect substitutions except for the documented race during
         // each syscall.
-        linkat(&self.directory, name, new_dir, name, AtFlags::empty())
-            .map_err(io_error)
-            .map_err(PlatformPublishError::before)?;
-        let published_name = name.to_owned();
-        verify_named_file(&self.file, new_dir, name)
+        linkat(
+            &self.directory,
+            name,
+            target_dir,
+            published_name.as_str(),
+            AtFlags::empty(),
+        )
+        .map_err(io_error)
+        .map_err(PlatformPublishError::before)?;
+        verify_named_file(&self.file, target_dir, published_name.as_str())
             .map_err(|error| PlatformPublishError::after(error, published_name.clone()))?;
         self.cleanup()
             .map_err(|error| PlatformPublishError::after(error, published_name.clone()))?;

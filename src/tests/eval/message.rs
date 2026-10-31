@@ -33,9 +33,10 @@ fn header_versions_share_body_without_retaining_preceding_versions() {
         let mut current = CurrentMessage::default();
 
         if filtered {
-            current.replace(Message::from_bytes(
-                b"Subject: filtered\n\nbinary:\0\xff".to_vec(),
-            ));
+            current.replace(
+                Message::from_bytes(b"Subject: filtered\n\nbinary:\0\xff".to_vec()),
+                ActionInput::Message,
+            );
         }
 
         let view = current.view(original_view.complete(&original));
@@ -109,7 +110,10 @@ fn current_message_clones_share_the_complete_replacement() {
     let prepared = PreparedMatchingMessage::new(&original, true);
     let mut current = CurrentMessage::default();
     let replacement = b"X-State: replaced\n\nlarge body".repeat(1024);
-    current.replace(Message::from_bytes(replacement.clone()));
+    current.replace(
+        Message::from_bytes(replacement.clone()),
+        ActionInput::Message,
+    );
 
     let branch = current.clone();
 
@@ -129,7 +133,10 @@ fn replacement_matching_is_lazy_reused_and_reset_by_replacement() {
     let original = Message::from_bytes(b"Subject: original\n\nbody".to_vec());
     let prepared = PreparedMatchingMessage::new(&original, true);
     let mut current = CurrentMessage::default();
-    current.replace(Message::from_bytes(b"Subject: one\n two\n\nbody".to_vec()));
+    current.replace(
+        Message::from_bytes(b"Subject: one\n two\n\nbody".to_vec()),
+        ActionInput::Message,
+    );
     let branch = current.clone();
 
     assert_eq!(
@@ -151,9 +158,10 @@ fn replacement_matching_is_lazy_reused_and_reset_by_replacement() {
     let shared = branch.view(prepared.complete(&original)).full().unwrap();
     assert_eq!(first.as_ptr(), shared.as_ptr());
 
-    current.replace(Message::from_bytes(
-        b"Subject: changed\n again\n\nnew".to_vec(),
-    ));
+    current.replace(
+        Message::from_bytes(b"Subject: changed\n again\n\nnew".to_vec()),
+        ActionInput::Message,
+    );
     assert!(
         current
             .replacement
@@ -178,7 +186,10 @@ fn concurrent_copy_branches_share_one_normalized_full_view() {
     let original = Message::from_bytes(b"Subject: original\n\nbody".to_vec());
     let prepared = PreparedMatchingMessage::new(&original, true);
     let mut current = CurrentMessage::default();
-    current.replace(Message::from_bytes(b"Subject: one\n two\n\nbody".to_vec()));
+    current.replace(
+        Message::from_bytes(b"Subject: one\n two\n\nbody".to_vec()),
+        ActionInput::Message,
+    );
     let barrier = std::sync::Barrier::new(4);
 
     std::thread::scope(|scope| {

@@ -210,6 +210,7 @@ pub enum HeaderOperationKind {
     Extract,
     Keywords,
     Priority,
+    Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

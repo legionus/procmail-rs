@@ -63,8 +63,8 @@ type OrderedActionResult<H> = Result<
 >;
 
 impl<'a, H: OrderedExecutionHost + Send> OrderedTreeExecution<'a, H> {
-    fn replace_message(&mut self, message: Message) {
-        self.current_message.replace(message);
+    fn replace_message(&mut self, message: Message, area: ActionInput) {
+        self.current_message.replace(message, area);
     }
 
     fn action_succeeded(&mut self, control: SequenceControl) -> OrderedActionResult<H> {
@@ -602,7 +602,7 @@ impl CompiledNode {
                                     bytes: message.as_bytes().len(),
                                 },
                             );
-                            context.replace_message(message);
+                            context.replace_message(message, options.action_input);
                             context.action_succeeded(SequenceControl::Continue)
                         } else if replacement.is_some() {
                             Err(OrderedExecutionError::Evaluation(

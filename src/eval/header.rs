@@ -555,6 +555,7 @@ impl CompiledSequence {
                     }
                     CompiledAction::Deliver { .. } => {
                         let control = recipe.plan_delivery(
+                            context.head.status(),
                             context.runtime,
                             context.execution,
                             has_error_handler,
@@ -800,9 +801,12 @@ impl CompiledNode {
                     line: self.location.line(),
                 })
             }
-            CompiledAction::Deliver { .. } => {
-                self.plan_delivery(context.runtime, context.execution, has_error_handler)
-            }
+            CompiledAction::Deliver { .. } => self.plan_delivery(
+                context.message.status(),
+                context.runtime,
+                context.execution,
+                has_error_handler,
+            ),
             CompiledAction::Block(children) => {
                 if self.lock.is_some() {
                     return Err(EvalError::LocalLockExecutorUnavailable {
@@ -819,6 +823,7 @@ impl CompiledNode {
 
     fn plan_delivery(
         &self,
+        status: MessageStatus,
         runtime: &mut RuntimeVariables,
         execution: &mut FanoutPlanState,
         has_error_handler: bool,
@@ -849,6 +854,7 @@ impl CompiledNode {
             output_ending: *output_ending,
             lock,
             umask,
+            status,
         });
         execution.original_delivered |= !copy;
         if copy || has_error_handler {

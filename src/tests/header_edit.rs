@@ -721,3 +721,160 @@ Priority: non-urgent\r\n\r\n"
         b"From: sender@example.org\r\nSubject: alert\r\n\r\n"
     );
 }
+
+#[test]
+fn status_operations_synchronize_and_clear_headers_and_message_status() {
+    let source = b"From: sender@example.org\r\n\
+Status: O\r\n\
+Subject: alert\r\n\
+X-Status: whatever\r\n\r\n";
+
+    // Adding read creates Status: RO and removes unconfigured X-Status
+    let read_only = apply(
+        source,
+        0,
+        &action(vec![HeaderOperation::Status {
+            line: 1,
+            mode: HeaderStatusMode::Add(value("read")),
+        }]),
+    );
+    assert_eq!(
+        read_only.status(),
+        MessageStatus {
+            read: true,
+            flagged: false,
+            replied: false,
+        }
+    );
+    assert_eq!(
+        read_only.as_bytes(),
+        b"From: sender@example.org\r\n\
+Status: RO\r\n\
+Subject: alert\r\n\r\n"
+    );
+
+    // Adding flagged and replied updates both Status and X-Status
+    let all = apply_header_action(
+        HeaderView::Indexed(&read_only),
+        0,
+        &action(vec![HeaderOperation::Status {
+            line: 2,
+            mode: HeaderStatusMode::Add(value("flagged, replied")),
+        }]),
+        MessageLimits::default(),
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    assert_eq!(
+        all.status(),
+        MessageStatus {
+            read: true,
+            flagged: true,
+            replied: true,
+        }
+    );
+    assert_eq!(
+        all.as_bytes(),
+        b"From: sender@example.org\r\n\
+Status: RO\r\n\
+Subject: alert\r\n\
+X-Status: AF\r\n\r\n"
+    );
+
+    // Removing read and flagged drops Status: RO and changes X-Status to A
+    let replied_only = apply_header_action(
+        HeaderView::Indexed(&all),
+        0,
+        &action(vec![HeaderOperation::Status {
+            line: 3,
+            mode: HeaderStatusMode::Remove(value("read, flagged")),
+        }]),
+        MessageLimits::default(),
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    assert_eq!(
+        replied_only.status(),
+        MessageStatus {
+            read: false,
+            flagged: false,
+            replied: true,
+        }
+    );
+    assert_eq!(
+        replied_only.as_bytes(),
+        b"From: sender@example.org\r\n\
+Subject: alert\r\n\
+X-Status: A\r\n\r\n"
+    );
+
+    // Setting flagged clears other flags and sets X-Status: F
+    let flagged_only = apply_header_action(
+        HeaderView::Indexed(&replied_only),
+        0,
+        &action(vec![HeaderOperation::Status {
+            line: 4,
+            mode: HeaderStatusMode::Set(value("flagged")),
+        }]),
+        MessageLimits::default(),
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    assert_eq!(
+        flagged_only.status(),
+        MessageStatus {
+            read: false,
+            flagged: true,
+            replied: false,
+        }
+    );
+    assert_eq!(
+        flagged_only.as_bytes(),
+        b"From: sender@example.org\r\n\
+Subject: alert\r\n\
+X-Status: F\r\n\r\n"
+    );
+
+    // Clear removes all status flags and both headers
+    let cleared = apply_header_action(
+        HeaderView::Indexed(&flagged_only),
+        0,
+        &action(vec![HeaderOperation::Status {
+            line: 5,
+            mode: HeaderStatusMode::Clear,
+        }]),
+        MessageLimits::default(),
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    assert_eq!(cleared.status(), MessageStatus::NONE);
+    assert_eq!(
+        cleared.as_bytes(),
+        b"From: sender@example.org\r\n\
+Subject: alert\r\n\r\n"
+    );
+
+    // Without status operations, existing Status/X-Status headers pass through untouched
+    let untouched = apply(
+        source,
+        0,
+        &action(vec![HeaderOperation::Add {
+            line: 6,
+            name: "X-Custom".into(),
+            value: value("test"),
+        }]),
+    );
+    assert_eq!(untouched.status(), MessageStatus::NONE);
+    assert_eq!(
+        untouched.as_bytes(),
+        b"From: sender@example.org\r\n\
+Status: O\r\n\
+Subject: alert\r\n\
+X-Status: whatever\r\n\
+X-Custom: test\r\n\r\n"
+    );
+}

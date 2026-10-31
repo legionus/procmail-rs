@@ -116,6 +116,7 @@ pub struct HeaderOperationExplanation {
     pub(super) extract: usize,
     pub(super) keywords: usize,
     pub(super) priority: usize,
+    pub(super) status: usize,
 }
 
 impl HeaderOperationExplanation {
@@ -149,5 +150,9 @@ impl HeaderOperationExplanation {
 
     pub fn priority_count(self) -> usize {
         self.priority
+    }
+
+    pub fn status_count(self) -> usize {
+        self.status
     }
 }

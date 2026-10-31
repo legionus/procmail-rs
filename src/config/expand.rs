@@ -13,7 +13,8 @@ use super::{
     HeaderOperation, HeaderValue, KeywordField, MAX_ASSIGNMENT_VALUE_LEN, MAX_EXPANSION_DEPTH,
     MAX_PATH_EXPRESSION_LEN, ParameterOperation, PathExpression, PositionalArguments,
     RcFileExpression, Recipe, RecipeAction, ShellExpandedCondition, ShellExpression, ShellPart,
-    Statement, SuppliedVariable, VariablePolicy, VariableSource, variable_policy,
+    Statement, SuppliedVariable, VariablePolicy, VariableSource, parse_configured_status,
+    variable_policy,
 };
 use crate::header_value::validate_generated_header_value;
 use crate::structured_header::parse_configured_keywords;
@@ -1287,6 +1288,7 @@ fn shift_known_positionals(
 enum HeaderValueCheck<'a> {
     Field(&'a str),
     Keywords { checks_line_limit: bool },
+    Status,
 }
 
 fn header_operation_value(
@@ -1312,6 +1314,9 @@ fn header_operation_value(
                 )
             })
         }
+        HeaderOperation::Status { line, mode } => mode
+            .value_mut()
+            .map(|value| (*line, HeaderValueCheck::Status, value)),
     }
 }
 
@@ -1375,6 +1380,11 @@ fn validate_header_value(
                     ));
                 }
             }
+        }
+        HeaderValueCheck::Status => {
+            parse_configured_status(value).map_err(|reason| {
+                ExpansionError::new(line, format!("expanded status value {}", reason.reason()))
+            })?;
         }
     }
     Ok(())

@@ -4,7 +4,7 @@
 use std::fmt;
 
 use super::{FanoutPlanState, InputRequirements, SequenceState};
-use crate::config::{Destination, OutputEnding};
+use crate::config::{Destination, MessageStatus, OutputEnding};
 use crate::runtime::RuntimeVariables;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub struct PlannedDelivery {
     pub(super) output_ending: OutputEnding,
     pub(super) lock: Option<String>,
     pub(super) umask: u32,
+    pub(super) status: MessageStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +88,10 @@ impl PlannedDelivery {
 
     pub fn umask(&self) -> u32 {
         self.umask
+    }
+
+    pub fn status(&self) -> MessageStatus {
+        self.status
     }
 }
 

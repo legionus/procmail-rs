@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use procmail_rs::config::{self, Destination, DestinationKind, OutputEnding, RecipeOptions};
+use procmail_rs::config::{
+    self, Destination, DestinationKind, MessageStatus, OutputEnding, RecipeOptions,
+};
 use procmail_rs::delivery::discard::DiscardSink;
 use procmail_rs::delivery::local_lock::LocalLock;
 use procmail_rs::delivery::maildir::{Durability, MaildirSink};

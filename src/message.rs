@@ -5,7 +5,7 @@ use std::fmt;
 use std::io::{BufRead, Read, Write};
 use std::ops::Range;
 
-use crate::config::ActionInput;
+use crate::config::{ActionInput, MessageStatus};
 use crate::header_edit::{EditedHeader, HeaderEditError, HeaderView};
 use crate::limits::MessageLimits;
 
@@ -289,6 +289,13 @@ impl MessageHead {
         match &self.backing {
             HeaderBacking::Input(raw) => raw.len(),
             HeaderBacking::Indexed(header) => header.len(),
+        }
+    }
+
+    pub fn status(&self) -> MessageStatus {
+        match &self.backing {
+            HeaderBacking::Input(_) => MessageStatus::NONE,
+            HeaderBacking::Indexed(header) => header.status(),
         }
     }
 

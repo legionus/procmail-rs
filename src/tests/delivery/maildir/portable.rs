@@ -7,6 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::config::MessageStatus;
 use crate::delivery::maildir::{MaildirSink, open_directory_path, unique_name};
 
 struct TestMaildir {
@@ -96,7 +97,7 @@ fn publication_does_not_replace_an_existing_new_file() {
     fs::write(maildir.path().join("new").join(name), b"existing").unwrap();
 
     let error = pending
-        .publish(&tmp_dir, &new_dir, unique_name)
+        .publish(&tmp_dir, &new_dir, "", unique_name)
         .unwrap_err();
 
     assert_eq!(error.into_parts().0.kind(), io::ErrorKind::AlreadyExists);
@@ -115,9 +116,14 @@ fn writable_maildir_component_is_rejected() {
     )
     .unwrap();
 
-    let error = MaildirSink::create(maildir.path(), super::super::Durability::None, 0)
-        .err()
-        .unwrap();
+    let error = MaildirSink::create(
+        maildir.path(),
+        super::super::Durability::None,
+        0,
+        MessageStatus::default(),
+    )
+    .err()
+    .unwrap();
 
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
 }

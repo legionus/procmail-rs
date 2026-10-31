@@ -16,6 +16,7 @@ use rustix::fd::OwnedFd;
 use rustix::fs::{CWD, Mode, OFlags, fsync, openat};
 
 use super::{DeliveryOperation, PendingSink, PublishedDelivery, SinkCommitError};
+pub use crate::config::MessageStatus;
 
 #[cfg(all(unix, not(target_os = "linux")))]
 #[path = "maildir/portable.rs"]
@@ -77,18 +78,25 @@ const MAILDIR_FILE_MODE: u32 = 0o600;
 pub struct MaildirSink {
     pending: platform::PendingFile,
     tmp_dir: OwnedFd,
-    new_dir: OwnedFd,
+    target_dir: OwnedFd,
+    target_subdir: &'static str,
+    info_suffix: &'static str,
     maildir: PathBuf,
     durability: Durability,
 }
 
 impl MaildirSink {
-    pub fn create(path: &Path, durability: Durability, mask: u32) -> io::Result<Self> {
+    pub fn create(
+        path: &Path,
+        durability: Durability,
+        mask: u32,
+        status: MessageStatus,
+    ) -> io::Result<Self> {
         let maildir = open_directory_path(path)?;
 
         // Validate all three standard components before creating a pending
-        // file. Although delivery does not access `cur`, accepting an
-        // incomplete directory here would hide a configuration error until a
+        // file. Although an unmarked delivery does not access `cur`, accepting
+        // an incomplete directory here would hide a configuration error until a
         // mail reader tries to use the destination. Descriptor-relative opens
         // also reject a component replaced with a symlink during this step.
         let tmp_dir = open_directory_at(&maildir, OsStr::new("tmp"))?;
@@ -96,10 +104,17 @@ impl MaildirSink {
         let cur_dir = open_directory_at(&maildir, OsStr::new("cur"))?;
         platform::validate_directories(&maildir, &tmp_dir, &new_dir, &cur_dir)?;
         let pending = platform::PendingFile::create(&tmp_dir, mask, unique_name)?;
+        let (target_dir, target_subdir, info_suffix) = if status.is_empty() {
+            (new_dir, "new", "")
+        } else {
+            (cur_dir, "cur", status.maildir_suffix())
+        };
         Ok(Self {
             pending,
             tmp_dir,
-            new_dir,
+            target_dir,
+            target_subdir,
+            info_suffix,
             maildir: path.to_owned(),
             durability,
         })
@@ -147,18 +162,23 @@ impl MaildirSink {
 
         let name = self
             .pending
-            .publish(&self.tmp_dir, &self.new_dir, unique_name)
+            .publish(
+                &self.tmp_dir,
+                &self.target_dir,
+                self.info_suffix,
+                unique_name,
+            )
             .map_err(|error| match error.into_parts() {
                 (source, Some(name)) => SinkCommitError::after_publication(
                     source,
-                    PublishedDelivery::new(self.maildir.join("new").join(name)),
+                    PublishedDelivery::new(self.maildir.join(self.target_subdir).join(name)),
                 ),
                 (source, None) => SinkCommitError::before_publication(source),
             })?;
-        let published = PublishedDelivery::new(self.maildir.join("new").join(name));
+        let published = PublishedDelivery::new(self.maildir.join(self.target_subdir).join(name));
 
         if self.durability == Durability::Full {
-            for directory in [&self.tmp_dir, &self.new_dir] {
+            for directory in [&self.tmp_dir, &self.target_dir] {
                 if let Err(error) = sync(directory) {
                     return Err(SinkCommitError::after_publication(error, published)
                         .with_operation(DeliveryOperation::SyncDirectory));

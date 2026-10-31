@@ -581,6 +581,45 @@ fn prepares_and_validates_expanded_keywords_operations() {
     }
 }
 
+#[test]
+fn prepares_and_validates_expanded_status_operations() {
+    let config = parse("FLAG=flagged\n:0\nheaders {\n status add read, $FLAG\n status clear\n}\n")
+        .unwrap()
+        .expand(&[])
+        .unwrap();
+    let Statement::Recipe(recipe) = &config.statements[1] else {
+        panic!("expected recipe");
+    };
+    let RecipeAction::Headers(action) = &recipe.action else {
+        panic!("expected headers action");
+    };
+    let resolved = action
+        .resolve_with(|name| (name == "FLAG").then(|| "flagged".into()))
+        .unwrap();
+    assert!(matches!(
+        &resolved.operations[0],
+        HeaderOperation::Status {
+            mode: crate::config::HeaderStatusMode::Add(value),
+            ..
+        } if value.source == "read, flagged"
+    ));
+
+    for (source, expected) in [
+        (
+            "EMPTY=\n:0\nheaders {\n status set $EMPTY\n}\n",
+            "expanded status value must contain at least one status flag",
+        ),
+        (
+            "BAD=urgent\n:0\nheaders {\n status add $BAD\n}\n",
+            "expanded status value must contain only 'read', 'flagged', or 'replied'",
+        ),
+    ] {
+        let error = parse(source).unwrap().expand(&[]).unwrap_err();
+        assert_eq!(error.line, 4);
+        assert_eq!(error.message, expected);
+    }
+}
+
 fn resolved_destination(config: &Config, statement_index: usize) -> Destination {
     let mut variables = config
         .initial_variables()

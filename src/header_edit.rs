@@ -7,7 +7,8 @@ use std::sync::{Arc, OnceLock};
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use crate::config::{
     HeaderAction, HeaderExtractionMode, HeaderKeywordsMode, HeaderOperation, HeaderPriorityMode,
-    KeywordField, MAX_ASSIGNMENT_VALUE_LEN,
+    HeaderStatusMode, KeywordField, MAX_ASSIGNMENT_VALUE_LEN, MessageStatus,
+    parse_configured_status,
 };
 use crate::header_value::{
     DecodedHeaderError, GeneratedHeaderError, RFC5322_HEADER_LINE_LIMIT,
@@ -44,12 +45,15 @@ impl AppliedHeaderAction {
     pub(crate) fn changed_from(&self, source: HeaderView<'_>) -> bool {
         match source {
             HeaderView::Indexed(header) => !Arc::ptr_eq(&header.storage, &self.header.storage),
-            HeaderView::Raw(bytes) => !self
-                .header
-                .parts()
-                .flatten()
-                .copied()
-                .eq(bytes.iter().copied()),
+            HeaderView::Raw(bytes) => {
+                !self.header.status().is_empty()
+                    || !self
+                        .header
+                        .parts()
+                        .flatten()
+                        .copied()
+                        .eq(bytes.iter().copied())
+            }
         }
     }
     pub(crate) fn into_parts(self) -> (EditedHeader, Vec<HeaderExtraction>) {
@@ -64,6 +68,7 @@ pub(crate) enum HeaderEditError {
     InvalidGeneratedValue,
     InvalidKeywordValue(&'static str),
     KeywordLimitExceeded { limit: usize },
+    InvalidStatusValue(&'static str),
     GeneratedLineTooLong { limit: usize },
     Decode(DecodedHeaderError),
     ExtractedValueTooLong { limit: usize },
@@ -87,6 +92,9 @@ impl fmt::Display for HeaderEditError {
                     formatter,
                     "structured header value count exceeds the hard limit of {limit}"
                 )
+            }
+            Self::InvalidStatusValue(reason) => {
+                write!(formatter, "status header value {reason}")
             }
             Self::GeneratedLineTooLong { limit } => {
                 write!(
@@ -131,6 +139,7 @@ pub(crate) fn apply_header_action<'a>(
                     separator: separator.to_vec(),
                     line_ending,
                     size: bytes.len(),
+                    status: MessageStatus::NONE,
                     raw: OnceLock::new(),
                     matching: OnceLock::new(),
                 }),
@@ -202,6 +211,9 @@ pub(crate) fn apply_header_action<'a>(
             HeaderOperation::Priority { mode, .. } => {
                 apply_priority(&mut header, *mode, line_ending)?;
             }
+            HeaderOperation::Status { mode, .. } => {
+                apply_status(&mut header, mode, line_ending)?;
+            }
         }
 
         validate_aggregate_size(
@@ -236,6 +248,7 @@ pub(crate) fn apply_header_action<'a>(
     });
 
     if needs_reindex {
+        let status = header.status();
         let bytes = header.as_bytes();
         let (fields, separator, line_ending) = split_fields(bytes);
         let store = HeaderStore::new(&fields, limits.headers_size)?;
@@ -244,6 +257,7 @@ pub(crate) fn apply_header_action<'a>(
             separator: separator.to_vec(),
             line_ending,
             size,
+            status,
             raw: OnceLock::new(),
             matching: OnceLock::new(),
         });
@@ -361,6 +375,48 @@ fn apply_priority(
         }
     }
     Ok(())
+}
+
+fn apply_status(
+    header: &mut EditedHeader,
+    mode: &HeaderStatusMode,
+    line_ending: &[u8],
+) -> Result<(), HeaderEditError> {
+    let mut status = header.status();
+    match mode {
+        HeaderStatusMode::Add(value) => {
+            status.add(parse_status(&value.source)?);
+        }
+        HeaderStatusMode::Remove(value) => {
+            status.remove(parse_status(&value.source)?);
+        }
+        HeaderStatusMode::Set(value) => {
+            status = parse_status(&value.source)?;
+        }
+        HeaderStatusMode::Clear => {
+            status = MessageStatus::NONE;
+        }
+    }
+
+    if let Some(value) = status.status_header_value() {
+        set_field(header, "Status", value, line_ending)?;
+    } else {
+        remove_field(header, "Status");
+    }
+
+    if let Some(value) = status.x_status_header_value() {
+        set_field(header, "X-Status", value, line_ending)?;
+    } else {
+        remove_field(header, "X-Status");
+    }
+
+    header.set_status(status);
+    Ok(())
+}
+
+fn parse_status(value: &str) -> Result<MessageStatus, HeaderEditError> {
+    parse_configured_status(value)
+        .map_err(|error| HeaderEditError::InvalidStatusValue(error.reason()))
 }
 
 fn parse_keywords(value: &str) -> Result<Vec<String>, HeaderEditError> {

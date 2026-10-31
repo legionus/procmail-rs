@@ -12,13 +12,13 @@ use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaptureAction, CaseMode,
     ChildStatusMode, CommandAssignment, Condition, ConditionInput, ConditionKind, Config,
     ContinuationMode, ControlFlow, Destination, HeaderAction, HeaderExtractionMode,
-    HeaderKeywordsMode, HeaderOperation, HeaderPriorityMode, HeaderValue, MAX_ASSIGNMENT_NAME_LEN,
-    MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN,
-    MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_AST_NESTING, MAX_REGEX_CAPTURES,
-    MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS, MAX_REGEX_PATTERN_LEN, OutputEnding,
-    ParseBudget, ParseError, PathExpression, PipeAction, RcFileExpression, RcLimits, RcParseCounts,
-    Recipe, RecipeAction, RecipeOptions, RegexCondition, ShellExpression, Statement, Unset,
-    VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
+    HeaderKeywordsMode, HeaderOperation, HeaderPriorityMode, HeaderStatusMode, HeaderValue,
+    MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION,
+    MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_AST_NESTING,
+    MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS, MAX_REGEX_PATTERN_LEN,
+    OutputEnding, ParseBudget, ParseError, PathExpression, PipeAction, RcFileExpression, RcLimits,
+    RcParseCounts, Recipe, RecipeAction, RecipeOptions, RegexCondition, ShellExpression, Statement,
+    Unset, VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
 };
 
 #[cfg(test)]
@@ -1072,6 +1072,52 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
             ));
         }
         return Ok(HeaderOperation::Priority { line, mode });
+    }
+
+    if operation == "status" {
+        let mode = syntax.word().ok_or_else(|| {
+            ParseError::new(
+                line,
+                "header operation 'status' requires add|remove|set|clear",
+            )
+        })?;
+        if mode == "clear" {
+            if !syntax.is_end() {
+                return Err(ParseError::new(
+                    line,
+                    "header operation 'status clear' takes no arguments",
+                ));
+            }
+            return Ok(HeaderOperation::Status {
+                line,
+                mode: HeaderStatusMode::Clear,
+            });
+        }
+        if !matches!(mode, "add" | "remove" | "set") {
+            return Err(ParseError::new(
+                line,
+                "header status mode must be 'add', 'remove', 'set', or 'clear'",
+            ));
+        }
+        if syntax.is_end() {
+            return Err(ParseError::new(
+                line,
+                format!("header operation 'status {mode}' requires FLAGS"),
+            ));
+        }
+        let value = parse_header_value_source(syntax.remainder(), line)?;
+        let mode = match mode {
+            "add" => HeaderStatusMode::Add(value),
+            "remove" => HeaderStatusMode::Remove(value),
+            "set" => HeaderStatusMode::Set(value),
+            _ => {
+                return Err(ParseError::new(
+                    line,
+                    "header status mode must be 'add', 'remove', 'set', or 'clear'",
+                ));
+            }
+        };
+        return Ok(HeaderOperation::Status { line, mode });
     }
 
     if !matches!(operation, "set" | "add" | "prepend") {
