@@ -947,6 +947,34 @@ headers {
     priority clear
 }
 .EE
+.TP
+\f[CR]status add FLAGS\f[R], \f[CR]status remove FLAGS\f[R], \f[CR]status set FLAGS\f[R], \f[CR]status clear\f[R]
+Synchronize message status across \f[CR]Status\f[R] and
+\f[CR]X\-Status\f[R] headers, and directly control the Maildir
+publication directory and flags.
+Supported flags are \f[CR]read\f[R], \f[CR]flagged\f[R], and
+\f[CR]replied\f[R], separated by spaces or commas.
+\f[CR]status add\f[R] sets the specified flags; \f[CR]status remove\f[R]
+clears the specified flags; \f[CR]status set\f[R] replaces all status
+flags with the given set; and \f[CR]status clear\f[R] clears all flags.
+.PP
+In headers, \f[CR]read\f[R] sets \f[CR]Status: RO\f[R] (removed when
+unset), and \f[CR]flagged\f[R] or \f[CR]replied\f[R] set
+\f[CR]X\-Status\f[R] to \f[CR]F\f[R], \f[CR]A\f[R], or \f[CR]AF\f[R]
+(removed when neither is set).
+In Maildir deliveries, messages with any active status flag are
+delivered into the \f[CR]cur/\f[R] directory with canonical
+ASCII\-sorted Maildir flags (\f[CR]:2,F\f[R], \f[CR]:2,R\f[R],
+\f[CR]:2,S\f[R], \f[CR]:2,FR\f[R], \f[CR]:2,FS\f[R], \f[CR]:2,RS\f[R],
+or \f[CR]:2,FRS\f[R]), while messages with no flags are delivered into
+\f[CR]new/\f[R] without a suffix.
+.IP
+.EX
+headers {
+    status add read, flagged
+    status remove flagged
+}
+.EE
 .PP
 The decoded value can be matched explicitly without changing the raw
 header matching behavior:

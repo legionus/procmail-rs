@@ -820,6 +820,29 @@ headers {
 }
 ```
 
+`status add FLAGS`, `status remove FLAGS`, `status set FLAGS`, `status clear`
+
+: Synchronize message status across `Status` and `X-Status` headers, and directly
+  control the Maildir publication directory and flags. Supported flags are `read`,
+  `flagged`, and `replied`, separated by spaces or commas. `status add` sets the
+  specified flags; `status remove` clears the specified flags; `status set`
+  replaces all status flags with the given set; and `status clear` clears all
+  flags.
+
+  In headers, `read` sets `Status: RO` (removed when unset), and `flagged` or
+  `replied` set `X-Status` to `F`, `A`, or `AF` (removed when neither is set).
+  In Maildir deliveries, messages with any active status flag are delivered into
+  the `cur/` directory with canonical ASCII-sorted Maildir flags (`:2,F`, `:2,R`,
+  `:2,S`, `:2,FR`, `:2,FS`, `:2,RS`, or `:2,FRS`), while messages with no flags
+  are delivered into `new/` without a suffix.
+
+```
+headers {
+    status add read, flagged
+    status remove flagged
+}
+```
+
 The decoded value can be matched explicitly without changing the raw header
 matching behavior:
 

@@ -145,6 +145,32 @@ headers {
 - `priority clear` removes all `Importance`, `Priority`, and `X-Priority`
   fields.
 
+`status add|remove|set FLAGS` and `status clear` synchronize message status
+between RFC 5322 headers (`Status`, `X-Status`) and Maildir filename flags:
+
+```text
+headers {
+    status add read, flagged
+    status remove flagged
+    status set replied
+    status clear
+}
+```
+
+The supported flags are `read`, `flagged`, and `replied`, separated by spaces
+or commas. Shell variables are expanded before parsing.
+
+- In headers: `read` sets `Status: RO` (removed when unset), and `flagged` or
+  `replied` set `X-Status` to `F`, `A`, or `AF` (removed when neither is set).
+- In Maildir delivery: messages with any active status flag are delivered
+  directly into `cur/` with canonical ASCII-sorted flags (`:2,F`, `:2,R`,
+  `:2,S`, `:2,FR`, `:2,FS`, `:2,RS`, or `:2,FRS`). Messages with no active
+  status flags are delivered into `new/` without a suffix.
+- Incoming `Status` and `X-Status` headers from the network are untrusted. If
+  no `status` operation is invoked in recipe configuration, incoming headers
+  are preserved untouched. When a `status` operation is invoked, the status
+  headers are generated fresh from the synchronized internal message status.
+
 ## Values and field names
 
 Field names follow RFC 5322 `1*ftext`: printable ASCII bytes from 33 through

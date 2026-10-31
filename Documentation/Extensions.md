@@ -11,9 +11,10 @@ procmail.
 ## Native header editing
 
 The `headers { ... }` action removes, replaces, adds, renames, extracts, or
-synchronizes keyword and priority fields without passing the complete message
+synchronizes keyword, priority, and status fields without passing the complete message
 through `formail`. Changes are visible to every following recipe, including
-structured conditions and external filters.
+structured conditions and external filters. Setting message status also
+synchronizes Maildir delivery flags and target subdirectories (`cur/` vs `new/`).
 
 ```text
 :0
@@ -23,6 +24,7 @@ headers {
     add X-Processed-By procmail-rs
     keywords add Work, Urgent
     priority high
+    status add read, flagged
 }
 ```
 
