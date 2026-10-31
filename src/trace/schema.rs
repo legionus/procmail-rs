@@ -209,6 +209,7 @@ pub enum HeaderOperationKind {
     Rename,
     Extract,
     Keywords,
+    Priority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

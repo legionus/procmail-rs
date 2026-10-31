@@ -349,6 +349,9 @@ impl CompiledSequence {
                             crate::config::HeaderOperation::Keywords { .. } => {
                                 operations.keywords += 1;
                             }
+                            crate::config::HeaderOperation::Priority { .. } => {
+                                operations.priority += 1;
+                            }
                         }
                     }
                     explanations.push(RecipeExplanation {

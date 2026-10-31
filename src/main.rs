@@ -557,14 +557,15 @@ fn write_text_plan_explanation(
         if let Some(operations) = recipe.header_operations() {
             writeln!(
                 writer,
-                "  header-operations remove={} set={} add={} prepend={} rename={} extract={} keywords={}",
+                "  header-operations remove={} set={} add={} prepend={} rename={} extract={} keywords={} priority={}",
                 operations.remove_count(),
                 operations.set_count(),
                 operations.add_count(),
                 operations.prepend_count(),
                 operations.rename_count(),
                 operations.extract_count(),
-                operations.keywords_count()
+                operations.keywords_count(),
+                operations.priority_count()
             )?;
         }
         for condition in recipe.conditions() {
@@ -609,14 +610,15 @@ fn write_json_plan_explanation(
         if let Some(operations) = recipe.header_operations() {
             write!(
                 writer,
-                ",\"header_operations\":{{\"remove\":{},\"set\":{},\"add\":{},\"prepend\":{},\"rename\":{},\"extract\":{},\"keywords\":{}}}",
+                ",\"header_operations\":{{\"remove\":{},\"set\":{},\"add\":{},\"prepend\":{},\"rename\":{},\"extract\":{},\"keywords\":{},\"priority\":{}}}",
                 operations.remove_count(),
                 operations.set_count(),
                 operations.add_count(),
                 operations.prepend_count(),
                 operations.rename_count(),
                 operations.extract_count(),
-                operations.keywords_count()
+                operations.keywords_count(),
+                operations.priority_count()
             )?;
         }
         writer.write_all(b",\"conditions\":[")?;

@@ -649,3 +649,75 @@ fn keywords_add_enforces_rfc5322_line_limit_and_value_ceiling() {
         }
     }
 }
+
+#[test]
+fn priority_operations_synchronize_and_clear_all_three_headers() {
+    let source = b"From: sender@example.org\r\n\
+x-priority: 5\r\n\
+Subject: alert\r\n\
+X-Priority: 2\r\n\r\n";
+
+    let high = apply(
+        source,
+        0,
+        &action(vec![HeaderOperation::Priority {
+            line: 1,
+            mode: HeaderPriorityMode::High,
+        }]),
+    );
+    assert_eq!(
+        high.as_bytes(),
+        b"From: sender@example.org\r\n\
+X-Priority: 1\r\n\
+Subject: alert\r\n\
+Importance: high\r\n\
+Priority: urgent\r\n\r\n"
+    );
+
+    let normal = apply(
+        high.as_bytes(),
+        0,
+        &action(vec![HeaderOperation::Priority {
+            line: 2,
+            mode: HeaderPriorityMode::Normal,
+        }]),
+    );
+    assert_eq!(
+        normal.as_bytes(),
+        b"From: sender@example.org\r\n\
+X-Priority: 3\r\n\
+Subject: alert\r\n\
+Importance: normal\r\n\
+Priority: normal\r\n\r\n"
+    );
+
+    let low = apply(
+        normal.as_bytes(),
+        0,
+        &action(vec![HeaderOperation::Priority {
+            line: 3,
+            mode: HeaderPriorityMode::Low,
+        }]),
+    );
+    assert_eq!(
+        low.as_bytes(),
+        b"From: sender@example.org\r\n\
+X-Priority: 5\r\n\
+Subject: alert\r\n\
+Importance: low\r\n\
+Priority: non-urgent\r\n\r\n"
+    );
+
+    let cleared = apply(
+        low.as_bytes(),
+        0,
+        &action(vec![HeaderOperation::Priority {
+            line: 4,
+            mode: HeaderPriorityMode::Clear,
+        }]),
+    );
+    assert_eq!(
+        cleared.as_bytes(),
+        b"From: sender@example.org\r\nSubject: alert\r\n\r\n"
+    );
+}

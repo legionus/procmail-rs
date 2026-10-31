@@ -6,8 +6,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use crate::config::{
-    HeaderAction, HeaderExtractionMode, HeaderKeywordsMode, HeaderOperation, KeywordField,
-    MAX_ASSIGNMENT_VALUE_LEN,
+    HeaderAction, HeaderExtractionMode, HeaderKeywordsMode, HeaderOperation, HeaderPriorityMode,
+    KeywordField, MAX_ASSIGNMENT_VALUE_LEN,
 };
 use crate::header_value::{
     DecodedHeaderError, GeneratedHeaderError, RFC5322_HEADER_LINE_LIMIT,
@@ -199,6 +199,9 @@ pub(crate) fn apply_header_action<'a>(
             HeaderOperation::Keywords { mode, .. } => {
                 apply_keywords(&mut header, mode, line_ending)?;
             }
+            HeaderOperation::Priority { mode, .. } => {
+                apply_priority(&mut header, *mode, line_ending)?;
+            }
         }
 
         validate_aggregate_size(
@@ -339,6 +342,23 @@ fn apply_keywords(
     let joined = keywords.join(", ");
     for field in KeywordField::ALL {
         set_field(header, field.name(), &joined, line_ending)?;
+    }
+    Ok(())
+}
+
+fn apply_priority(
+    header: &mut EditedHeader,
+    mode: HeaderPriorityMode,
+    line_ending: &[u8],
+) -> Result<(), HeaderEditError> {
+    if let Some(fields) = mode.fields() {
+        for (name, value) in fields {
+            set_field(header, name, value, line_ending)?;
+        }
+    } else {
+        for name in ["Importance", "Priority", "X-Priority"] {
+            remove_field(header, name);
+        }
     }
     Ok(())
 }

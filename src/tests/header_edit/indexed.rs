@@ -361,4 +361,37 @@ fn noop_keywords_operations_preserve_shared_indexed_storage() {
     assert!(!cleared.changed_from(HeaderView::Indexed(&without_keywords)));
     let (next, _) = cleared.into_parts();
     assert!(Arc::ptr_eq(&without_keywords.storage, &next.storage));
+
+    let prioritized = apply(
+        b"Importance: high\nPriority: urgent\nX-Priority: 1\n\n",
+        0,
+        &action(Vec::new()),
+    );
+    let unchanged_priority = apply_header_action(
+        HeaderView::Indexed(&prioritized),
+        0,
+        &action(vec![HeaderOperation::Priority {
+            line: 1,
+            mode: HeaderPriorityMode::High,
+        }]),
+        MessageLimits::default(),
+    )
+    .unwrap();
+    assert!(!unchanged_priority.changed_from(HeaderView::Indexed(&prioritized)));
+    let (next, _) = unchanged_priority.into_parts();
+    assert!(Arc::ptr_eq(&prioritized.storage, &next.storage));
+
+    let cleared_priority = apply_header_action(
+        HeaderView::Indexed(&without_keywords),
+        0,
+        &action(vec![HeaderOperation::Priority {
+            line: 1,
+            mode: HeaderPriorityMode::Clear,
+        }]),
+        MessageLimits::default(),
+    )
+    .unwrap();
+    assert!(!cleared_priority.changed_from(HeaderView::Indexed(&without_keywords)));
+    let (next, _) = cleared_priority.into_parts();
+    assert!(Arc::ptr_eq(&without_keywords.storage, &next.storage));
 }

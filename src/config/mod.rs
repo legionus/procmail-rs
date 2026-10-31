@@ -455,6 +455,50 @@ pub enum HeaderOperation {
         line: usize,
         mode: HeaderKeywordsMode,
     },
+    Priority {
+        line: usize,
+        mode: HeaderPriorityMode,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderPriorityMode {
+    High,
+    Normal,
+    Low,
+    Clear,
+}
+
+impl HeaderPriorityMode {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Low => "low",
+            Self::Clear => "clear",
+        }
+    }
+
+    pub(crate) fn fields(self) -> Option<[(&'static str, &'static str); 3]> {
+        match self {
+            Self::High => Some([
+                ("Importance", "high"),
+                ("Priority", "urgent"),
+                ("X-Priority", "1"),
+            ]),
+            Self::Normal => Some([
+                ("Importance", "normal"),
+                ("Priority", "normal"),
+                ("X-Priority", "3"),
+            ]),
+            Self::Low => Some([
+                ("Importance", "low"),
+                ("Priority", "non-urgent"),
+                ("X-Priority", "5"),
+            ]),
+            Self::Clear => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

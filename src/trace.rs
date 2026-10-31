@@ -114,6 +114,13 @@ pub fn record_header_action(
                 Some(mode.name()),
                 None,
             ),
+            HeaderOperation::Priority { line, mode } => (
+                *line,
+                HeaderOperationKind::Priority,
+                "Importance,Priority,X-Priority",
+                Some(mode.name()),
+                None,
+            ),
         };
 
         // The parser has already bounded and validated header and variable

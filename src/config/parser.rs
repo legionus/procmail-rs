@@ -12,7 +12,7 @@ use super::{
     ActionInput, ActionMode, Assignment, AssignmentTarget, CaptureAction, CaseMode,
     ChildStatusMode, CommandAssignment, Condition, ConditionInput, ConditionKind, Config,
     ContinuationMode, ControlFlow, Destination, HeaderAction, HeaderExtractionMode,
-    HeaderKeywordsMode, HeaderOperation, HeaderValue, MAX_ASSIGNMENT_NAME_LEN,
+    HeaderKeywordsMode, HeaderOperation, HeaderPriorityMode, HeaderValue, MAX_ASSIGNMENT_NAME_LEN,
     MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION, MAX_PATH_EXPRESSION_LEN,
     MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_AST_NESTING, MAX_REGEX_CAPTURES,
     MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS, MAX_REGEX_PATTERN_LEN, OutputEnding,
@@ -1041,6 +1041,37 @@ fn parse_header_operation(text: &str, line: usize) -> Result<HeaderOperation, Pa
             }
         };
         return Ok(HeaderOperation::Keywords { line, mode });
+    }
+
+    if operation == "priority" {
+        let mode = syntax.word().ok_or_else(|| {
+            ParseError::new(
+                line,
+                "header operation 'priority' requires high|normal|low|clear",
+            )
+        })?;
+        let mode = match mode {
+            "high" => HeaderPriorityMode::High,
+            "normal" => HeaderPriorityMode::Normal,
+            "low" => HeaderPriorityMode::Low,
+            "clear" => HeaderPriorityMode::Clear,
+            _ => {
+                return Err(ParseError::new(
+                    line,
+                    "header priority mode must be 'high', 'normal', 'low', or 'clear'",
+                ));
+            }
+        };
+        if !syntax.is_end() {
+            return Err(ParseError::new(
+                line,
+                format!(
+                    "header operation 'priority {}' takes no arguments",
+                    mode.name()
+                ),
+            ));
+        }
+        return Ok(HeaderOperation::Priority { line, mode });
     }
 
     if !matches!(operation, "set" | "add" | "prepend") {

@@ -115,6 +115,7 @@ pub struct HeaderOperationExplanation {
     pub(super) rename: usize,
     pub(super) extract: usize,
     pub(super) keywords: usize,
+    pub(super) priority: usize,
 }
 
 impl HeaderOperationExplanation {
@@ -144,5 +145,9 @@ impl HeaderOperationExplanation {
 
     pub fn keywords_count(self) -> usize {
         self.keywords
+    }
+
+    pub fn priority_count(self) -> usize {
+        self.priority
     }
 }

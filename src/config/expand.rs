@@ -1295,7 +1295,8 @@ fn header_operation_value(
     match operation {
         HeaderOperation::Remove { .. }
         | HeaderOperation::Rename { .. }
-        | HeaderOperation::Extract { .. } => None,
+        | HeaderOperation::Extract { .. }
+        | HeaderOperation::Priority { .. } => None,
         HeaderOperation::Set { line, name, value }
         | HeaderOperation::Add { line, name, value }
         | HeaderOperation::Prepend { line, name, value } => {

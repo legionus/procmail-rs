@@ -1892,7 +1892,7 @@ fn config_with_conditions(mut count: usize) -> String {
 #[test]
 fn parses_typed_header_action_operations() {
     let config = parse(
-        ":0\nheaders {\n remove X-Old\n set X-State ready\n add X-State later\n prepend X-First yes\n rename X-Legacy to X-Current\n extract unfolded Subject into SUBJECT\n keywords add Work, Urgent\n keywords remove Urgent\n keywords set Work\n keywords clear\n}\n",
+        ":0\nheaders {\n remove X-Old\n set X-State ready\n add X-State later\n prepend X-First yes\n rename X-Legacy to X-Current\n extract unfolded Subject into SUBJECT\n keywords add Work, Urgent\n keywords remove Urgent\n keywords set Work\n keywords clear\n priority high\n priority normal\n priority low\n priority clear\n}\n",
     )
     .unwrap();
     let Statement::Recipe(recipe) = &config.statements[0] else {
@@ -1967,9 +1967,48 @@ fn parses_typed_header_action_operations() {
                     line: 12,
                     mode: HeaderKeywordsMode::Clear,
                 },
+                HeaderOperation::Priority {
+                    line: 13,
+                    mode: HeaderPriorityMode::High,
+                },
+                HeaderOperation::Priority {
+                    line: 14,
+                    mode: HeaderPriorityMode::Normal,
+                },
+                HeaderOperation::Priority {
+                    line: 15,
+                    mode: HeaderPriorityMode::Low,
+                },
+                HeaderOperation::Priority {
+                    line: 16,
+                    mode: HeaderPriorityMode::Clear,
+                },
             ],
         })
     );
+}
+
+#[test]
+fn rejects_malformed_header_priority_operations() {
+    for (operation, message) in [
+        ("priority", "header operation 'priority' has no arguments"),
+        (
+            "priority urgent",
+            "header priority mode must be 'high', 'normal', 'low', or 'clear'",
+        ),
+        (
+            "priority high extra",
+            "header operation 'priority high' takes no arguments",
+        ),
+        (
+            "priority clear extra",
+            "header operation 'priority clear' takes no arguments",
+        ),
+    ] {
+        let error = parse(&format!(":0\nheaders {{\n {operation}\n}}\n")).unwrap_err();
+        assert_eq!(error.line, 3, "{operation}");
+        assert_eq!(error.message, message, "{operation}");
+    }
 }
 
 #[test]
