@@ -15,23 +15,45 @@ The syntax is:
 
 ```text
 address FIELD[,FIELD...] ?? REGEX
+address %recipient ?? REGEX
+address %delivered ?? REGEX
+address %sender ?? REGEX
 ```
 
-Supported fields are `From`, `To`, `Cc`, `Sender`, and `Reply-To`. Field names
-are ASCII case-insensitive, and repeated or unsupported names are rejected.
+Supported individual fields are:
+- Message originators: `From`, `Sender`, `Reply-To`
+- Recipients: `To`, `Cc`
+- MTA delivery headers: `Delivered-To`, `X-Original-To`, `Envelope-To`
+- Resent headers: `Resent-From`, `Resent-Sender`, `Resent-To`, `Resent-Cc`
+
+Aliases expand to groups of related fields:
+- `%recipient`: expands to `To,Cc,Resent-To,Resent-Cc,Delivered-To,X-Original-To,Envelope-To`
+  to match any destination address, including subaddresses (`user+tag@example.org`),
+  virtual aliases, Bcc, or forwarding;
+- `%delivered`: expands to `Delivered-To,X-Original-To,Envelope-To` to match only
+  the delivery envelope headers added by the receiving MTA;
+- `%sender`: expands to `From,Sender,Reply-To,Resent-From,Resent-Sender` to match
+  any message originator.
+
+Field and alias names are ASCII case-insensitive. Repeated names across explicit
+fields and aliases, empty list items, or unsupported names are rejected.
 
 ```text
 :0
-* address From ?? ^notifications@example\.org$
-notifications/
+* address %sender ?? .*@trusted\.example$
+trusted/
+
+:0
+* address %recipient ?? ^user\+alerts@example\.org$
+alerts/
+
+:0
+* address %delivered ?? ^user\+cron@example\.org$
+cron/
 
 :0
 * address To,Cc ?? .*@lists\.example\.net$
 example-lists/
-
-:0
-* address Sender,Reply-To ?? ^support(?:\+[^@]+)?@example\.com$
-support/
 ```
 
 Every mailbox is tested separately. Display names, nested comments, groups,

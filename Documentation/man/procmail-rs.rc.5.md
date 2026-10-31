@@ -373,18 +373,28 @@ address:
 
 ```
 :0
-* address From,Sender,Reply-To ?? ^alerts(?:\+[^@]+)?@example\.org$
+* address %sender ?? ^alerts(?:\+[^@]+)?@example\.org$
 alerts/
+
+:0
+* address %recipient ?? ^user\+dev@example\.org$
+dev/
 ```
 
-Its syntax is `address FIELD[,FIELD...] ?? REGEX`. The supported field names
-are `From`, `To`, `Cc`, `Sender`, and `Reply-To`; names are ASCII
-case-insensitive and repetitions are rejected. Display names, comments,
-groups, angle brackets, folding whitespace, and separators are not presented
-to the regex. The local part retains its spelling and case, while ASCII domain
-letters are converted to lowercase. A quoted local part remains quoted.
-Malformed mailbox elements are ignored, so text resembling an address in a
-display name cannot accidentally become the match input. At most 4096 valid
+Its syntax is `address FIELD[,FIELD...] ?? REGEX`. Supported individual field
+names are `From`, `To`, `Cc`, `Sender`, `Reply-To`, `Delivered-To`,
+`X-Original-To`, `Envelope-To`, `Resent-From`, `Resent-Sender`, `Resent-To`,
+and `Resent-Cc`. The aliases `%recipient`
+(`To,Cc,Resent-To,Resent-Cc,Delivered-To,X-Original-To,Envelope-To`),
+`%delivered` (`Delivered-To,X-Original-To,Envelope-To`), and `%sender`
+(`From,Sender,Reply-To,Resent-From,Resent-Sender`) match groups of destination,
+delivery envelope, or originator fields. Names are ASCII case-insensitive, and
+repetitions across explicit names and aliases are rejected. Display names,
+comments, groups, angle brackets, folding whitespace, and separators are not
+presented to the regex. The local part retains its spelling and case, while
+ASCII domain letters are converted to lowercase. A quoted local part remains
+quoted. Malformed mailbox elements are ignored, so text resembling an address in
+a display name cannot accidentally become the match input. At most 4096 valid
 mailboxes from the selected fields are tested for one condition.
 
 Use `identifier FIELD[,FIELD...] ?? REGEX` to match structured identifiers from

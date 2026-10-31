@@ -33,17 +33,22 @@ failure behavior, and examples.
 
 ## Structured header conditions
 
-`address` extracts mailbox addresses before matching, `identifier` extracts
-identifiers from `List-Id`, `Message-Id`, `In-Reply-To`, `References`, or the
-`%thread` alias, and `keyword` extracts individual tags from `Keywords`,
-`X-Label`, and `X-Keywords`. This avoids regular expressions which
-accidentally consume display names, comments, brackets, comma separators, or
-folding.
+`address` extracts mailbox addresses from message originators, recipients, MTA
+delivery headers, and resent fields (with `%recipient`, `%delivered`, and `%sender`
+aliases), `identifier` extracts identifiers from `List-Id`, `Message-Id`,
+`In-Reply-To`, `References`, or the `%thread` alias, and `keyword` extracts
+individual tags from `Keywords`, `X-Label`, and `X-Keywords`. This avoids
+regular expressions which accidentally consume display names, comments,
+brackets, comma separators, or folding.
 
 ```text
 :0
-* address From,Reply-To ?? .*@example\.org$
+* address %sender ?? .*@example\.org$
 from-example/
+
+:0
+* address %recipient ?? ^user\+alerts@example\.org$
+alerts/
 
 :0
 * identifier List-Id ?? ^users\.lists\.example\.org$

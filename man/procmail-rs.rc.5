@@ -471,14 +471,30 @@ addresses from one or more address\-bearing fields and applies
 .IP
 .EX
 :0
-* address From,Sender,Reply\-To ?? \(haalerts(?:\(rs+[\(ha\(at]+)?\(atexample\(rs.org$
+* address %sender ?? \(haalerts(?:\(rs+[\(ha\(at]+)?\(atexample\(rs.org$
 alerts/
+
+:0
+* address %recipient ?? \(hauser\(rs+dev\(atexample\(rs.org$
+dev/
 .EE
 .PP
 Its syntax is \f[CR]address FIELD[,FIELD...] ?? REGEX\f[R].
-The supported field names are \f[CR]From\f[R], \f[CR]To\f[R],
-\f[CR]Cc\f[R], \f[CR]Sender\f[R], and \f[CR]Reply\-To\f[R]; names are
-ASCII case\-insensitive and repetitions are rejected.
+Supported individual field names are \f[CR]From\f[R], \f[CR]To\f[R],
+\f[CR]Cc\f[R], \f[CR]Sender\f[R], \f[CR]Reply\-To\f[R],
+\f[CR]Delivered\-To\f[R], \f[CR]X\-Original\-To\f[R],
+\f[CR]Envelope\-To\f[R], \f[CR]Resent\-From\f[R],
+\f[CR]Resent\-Sender\f[R], \f[CR]Resent\-To\f[R], and
+\f[CR]Resent\-Cc\f[R].
+The aliases \f[CR]%recipient\f[R]
+(\f[CR]To,Cc,Resent\-To,Resent\-Cc,Delivered\-To,X\-Original\-To,Envelope\-To\f[R]),
+\f[CR]%delivered\f[R]
+(\f[CR]Delivered\-To,X\-Original\-To,Envelope\-To\f[R]), and
+\f[CR]%sender\f[R]
+(\f[CR]From,Sender,Reply\-To,Resent\-From,Resent\-Sender\f[R]) match
+groups of destination, delivery envelope, or originator fields.
+Names are ASCII case\-insensitive, and repetitions across explicit names
+and aliases are rejected.
 Display names, comments, groups, angle brackets, folding whitespace, and
 separators are not presented to the regex.
 The local part retains its spelling and case, while ASCII domain letters
