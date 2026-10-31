@@ -180,3 +180,78 @@ Subject: Unrelated\n\nOther\n";
 
     fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn recipient_and_delivered_aliases_match_subaddresses_and_envelope_headers() {
+    let base = temporary_directory();
+    let alerts_dir = base.join("alerts");
+    let cron_dir = base.join("cron");
+    let fallback_dir = base.join("fallback");
+    create_maildir(&alerts_dir);
+    create_maildir(&cron_dir);
+    create_maildir(&fallback_dir);
+
+    let config = base.join("rules.rc");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\n\
+:0\n\
+* address %delivered ?? ^user\\+cron@example\\.org$\n\
+cron/\n\
+\n\
+:0\n\
+* address %recipient ?? ^user\\+alerts@example\\.org$\n\
+alerts/\n\
+\n\
+:0\n\
+fallback/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+
+    let cron_msg = b"From: system@example.org\n\
+Delivered-To: <user+cron@example.org>\n\
+To: undisclosed-recipients:;\n\
+Subject: Cron job\n\nDaily report\n";
+
+    let alias_msg = b"From: monitoring@example.org\n\
+X-Original-To: \"Oncall\" <user+alerts@example.org>\n\
+Delivered-To: user@example.org\n\
+To: dev-team@example.org\n\
+Subject: Alert\n\nHigh load\n";
+
+    let direct_msg = b"From: friend@example.org\n\
+To: user+alerts@example.org\n\
+Subject: Heads up\n\nCheck this\n";
+
+    let other_msg = b"From: stranger@example.org\n\
+To: someone-else@example.org\n\
+Subject: Hello\n\nOther\n";
+
+    for msg in [
+        cron_msg.as_slice(),
+        alias_msg.as_slice(),
+        direct_msg.as_slice(),
+        other_msg.as_slice(),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(msg).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    }
+
+    assert_eq!(delivered_messages(&cron_dir).len(), 1);
+    assert_eq!(delivered_messages(&alerts_dir).len(), 2);
+    assert_eq!(delivered_messages(&fallback_dir).len(), 1);
+
+    fs::remove_dir_all(base).unwrap();
+}

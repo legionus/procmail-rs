@@ -721,9 +721,37 @@ pub enum AddressField {
     Cc,
     Sender,
     ReplyTo,
+    DeliveredTo,
+    XOriginalTo,
+    EnvelopeTo,
+    ResentFrom,
+    ResentSender,
+    ResentTo,
+    ResentCc,
 }
 
 impl AddressField {
+    pub(crate) const RECIPIENT: [Self; 7] = [
+        Self::To,
+        Self::Cc,
+        Self::ResentTo,
+        Self::ResentCc,
+        Self::DeliveredTo,
+        Self::XOriginalTo,
+        Self::EnvelopeTo,
+    ];
+
+    pub(crate) const DELIVERED: [Self; 3] =
+        [Self::DeliveredTo, Self::XOriginalTo, Self::EnvelopeTo];
+
+    pub(crate) const SENDER: [Self; 5] = [
+        Self::From,
+        Self::Sender,
+        Self::ReplyTo,
+        Self::ResentFrom,
+        Self::ResentSender,
+    ];
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::From => "From",
@@ -731,6 +759,13 @@ impl AddressField {
             Self::Cc => "Cc",
             Self::Sender => "Sender",
             Self::ReplyTo => "Reply-To",
+            Self::DeliveredTo => "Delivered-To",
+            Self::XOriginalTo => "X-Original-To",
+            Self::EnvelopeTo => "Envelope-To",
+            Self::ResentFrom => "Resent-From",
+            Self::ResentSender => "Resent-Sender",
+            Self::ResentTo => "Resent-To",
+            Self::ResentCc => "Resent-Cc",
         }
     }
 }

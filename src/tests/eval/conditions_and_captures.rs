@@ -64,6 +64,37 @@ List-Id: Discussion <Project.Example>\r\n\r\nbody",
 }
 
 #[test]
+fn address_aliases_match_delivery_and_resent_headers_with_captures() {
+    let source = "\
+:0\n\
+* address %sender ?? ^forwarder@example\\.org$\n\
+* address %delivered ?? ^user\\+cron@example\\.org$\n\
+* address %recipient ?? ^user\\+alert([a-z]+)@example\\.org$\n\
+maildir:selected\n";
+    let config = config::parse(source).unwrap().expand(&[]).unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    assert!(plan.requirements().needs_headers);
+    assert!(!plan.requirements().needs_body_contents);
+    let mut message = head(
+        b"Resent-From: \"Mail Forwarder\" <forwarder@Example.ORG>\r\n\
+Delivered-To: user+cron@Example.ORG\r\n\
+X-Original-To: \"Sub Address\" <user+alerts@Example.ORG>\r\n\
+To: other-team@example.com\r\n\r\nbody",
+    );
+    let mut runtime = RuntimeVariables::default();
+    let result =
+        plan.evaluate_headers_editing_with_trace(&mut message, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected headers-only decision");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+    assert_eq!(runtime.get("MATCH1"), Some("s"));
+}
+
+#[test]
 fn keyword_conditions_observe_header_edits_captures_and_case_flags() {
     let source = "\
 :0\n\

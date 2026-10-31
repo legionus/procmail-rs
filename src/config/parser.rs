@@ -1983,26 +1983,77 @@ fn structured_condition_target(
         let mut fields = Vec::new();
         for name in field_text.split(',') {
             let name = name.trim();
-            let field = match name.to_ascii_lowercase().as_str() {
-                "from" => super::AddressField::From,
-                "to" => super::AddressField::To,
-                "cc" => super::AddressField::Cc,
-                "sender" => super::AddressField::Sender,
-                "reply-to" => super::AddressField::ReplyTo,
-                _ => {
-                    return Err(ParseError::new(
-                        line,
-                        format!("address condition does not support field '{name}'"),
-                    ));
-                }
-            };
-            if fields.contains(&field) {
+            if name.is_empty() {
                 return Err(ParseError::new(
                     line,
-                    format!("address condition repeats field '{name}'"),
+                    "address condition field list contains an empty item",
                 ));
             }
-            fields.push(field);
+            if name.eq_ignore_ascii_case("%recipient") {
+                for recipient_field in super::AddressField::RECIPIENT {
+                    if fields.contains(&recipient_field) {
+                        return Err(ParseError::new(
+                            line,
+                            format!(
+                                "address condition repeats field '{}'",
+                                recipient_field.name()
+                            ),
+                        ));
+                    }
+                    fields.push(recipient_field);
+                }
+            } else if name.eq_ignore_ascii_case("%delivered") {
+                for delivered_field in super::AddressField::DELIVERED {
+                    if fields.contains(&delivered_field) {
+                        return Err(ParseError::new(
+                            line,
+                            format!(
+                                "address condition repeats field '{}'",
+                                delivered_field.name()
+                            ),
+                        ));
+                    }
+                    fields.push(delivered_field);
+                }
+            } else if name.eq_ignore_ascii_case("%sender") {
+                for sender_field in super::AddressField::SENDER {
+                    if fields.contains(&sender_field) {
+                        return Err(ParseError::new(
+                            line,
+                            format!("address condition repeats field '{}'", sender_field.name()),
+                        ));
+                    }
+                    fields.push(sender_field);
+                }
+            } else {
+                let field = match name.to_ascii_lowercase().as_str() {
+                    "from" => super::AddressField::From,
+                    "to" => super::AddressField::To,
+                    "cc" => super::AddressField::Cc,
+                    "sender" => super::AddressField::Sender,
+                    "reply-to" => super::AddressField::ReplyTo,
+                    "delivered-to" => super::AddressField::DeliveredTo,
+                    "x-original-to" => super::AddressField::XOriginalTo,
+                    "envelope-to" => super::AddressField::EnvelopeTo,
+                    "resent-from" => super::AddressField::ResentFrom,
+                    "resent-sender" => super::AddressField::ResentSender,
+                    "resent-to" => super::AddressField::ResentTo,
+                    "resent-cc" => super::AddressField::ResentCc,
+                    _ => {
+                        return Err(ParseError::new(
+                            line,
+                            format!("address condition does not support field '{name}'"),
+                        ));
+                    }
+                };
+                if fields.contains(&field) {
+                    return Err(ParseError::new(
+                        line,
+                        format!("address condition repeats field '{name}'"),
+                    ));
+                }
+                fields.push(field);
+            }
         }
         return Ok(Some((
             ConditionRegexTarget::Address(fields),

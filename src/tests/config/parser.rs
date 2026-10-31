@@ -1158,6 +1158,29 @@ fn parses_structured_header_conditions_without_confusing_variables() {
     assert_eq!(fields, &IdentifierField::THREAD);
     assert_eq!(regex.pattern(), "^parent@example\\.org$");
 
+    let addr_config = parse(
+        ":0\n* address %recipient ?? ^user@example\\.org$\n* address %delivered ?? ^deliv@example\\.org$\n* address %sender ?? ^send@example\\.org$\nmaildir:matched\n",
+    )
+    .unwrap();
+    let [Statement::Recipe(addr_recipe)] = addr_config.statements.as_slice() else {
+        panic!("expected one recipe");
+    };
+    let ConditionKind::AddressRegex { fields, regex } = &addr_recipe.conditions[0].kind else {
+        panic!("expected address condition");
+    };
+    assert_eq!(fields, &AddressField::RECIPIENT);
+    assert_eq!(regex.pattern(), "^user@example\\.org$");
+    let ConditionKind::AddressRegex { fields, regex } = &addr_recipe.conditions[1].kind else {
+        panic!("expected address condition");
+    };
+    assert_eq!(fields, &AddressField::DELIVERED);
+    assert_eq!(regex.pattern(), "^deliv@example\\.org$");
+    let ConditionKind::AddressRegex { fields, regex } = &addr_recipe.conditions[2].kind else {
+        panic!("expected address condition");
+    };
+    assert_eq!(fields, &AddressField::SENDER);
+    assert_eq!(regex.pattern(), "^send@example\\.org$");
+
     for variable in ["address", "identifier", "keyword"] {
         let config = parse(&format!(
             ":0\n* {variable} ?? ^ordinary-variable$\nmaildir:matched\n"
@@ -1178,6 +1201,14 @@ fn rejects_unknown_or_repeated_structured_header_fields() {
     for condition in [
         "address Bcc ?? value",
         "address From,from ?? value",
+        "address %recipient,To ?? value",
+        "address %recipient,Delivered-To ?? value",
+        "address %delivered,%delivered ?? value",
+        "address %delivered,%recipient ?? value",
+        "address %sender,From ?? value",
+        "address ,To ?? value",
+        "address To, ?? value",
+        "address %unknown ?? value",
         "identifier Subject ?? value",
         "identifier List-Id,list-id ?? value",
         "identifier %thread,Message-Id ?? value",

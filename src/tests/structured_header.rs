@@ -40,6 +40,45 @@ fn ignores_malformed_mailboxes_and_unbalanced_comments() {
 }
 
 #[test]
+fn extracts_mailboxes_from_delivery_and_resent_headers() {
+    let header = b"Delivered-To: <user+tag@Example.ORG>\r\n\
+X-Original-To: \"Sub Address\" <user+orig@Example.NET>\r\n\
+Envelope-To: env@example.com\r\n\
+Resent-From: forwarder@Example.org\r\n\
+Resent-Sender: sender@example.com\r\n\
+Resent-To: \"Resent Recipient\" <resent-to@example.org>\r\n\
+Resent-Cc: resent-cc@example.net\r\n\r\n";
+
+    assert_eq!(
+        addresses(header, &AddressField::DELIVERED),
+        [
+            b"user+tag@example.org".to_vec(),
+            b"user+orig@example.net".to_vec(),
+            b"env@example.com".to_vec(),
+        ]
+    );
+
+    assert_eq!(
+        addresses(header, &AddressField::SENDER),
+        [
+            b"forwarder@example.org".to_vec(),
+            b"sender@example.com".to_vec(),
+        ]
+    );
+
+    assert_eq!(
+        addresses(header, &AddressField::RECIPIENT),
+        [
+            b"user+tag@example.org".to_vec(),
+            b"user+orig@example.net".to_vec(),
+            b"env@example.com".to_vec(),
+            b"resent-to@example.org".to_vec(),
+            b"resent-cc@example.net".to_vec(),
+        ]
+    );
+}
+
+#[test]
 fn extracts_and_normalizes_list_id() {
     let mut found = Vec::new();
     any_identifier(
