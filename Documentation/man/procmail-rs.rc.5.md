@@ -387,14 +387,27 @@ Malformed mailbox elements are ignored, so text resembling an address in a
 display name cannot accidentally become the match input. At most 4096 valid
 mailboxes from the selected fields are tested for one condition.
 
-`List-Id` is not a mailbox field. Use the separate syntax
-`identifier List-Id ?? REGEX`; the regex receives only the identifier between
-angle brackets, with ASCII letters converted to lowercase:
+Use `identifier FIELD[,FIELD...] ?? REGEX` to match structured identifiers from
+`List-Id`, `Message-Id`, `In-Reply-To`, or `References`, or `identifier %thread ?? REGEX`
+to test all three threading headers (`Message-Id`, `In-Reply-To`, and `References`).
+The regex receives each identifier without angle brackets `<...>`:
+
+- For `List-Id`, ASCII letters are converted to lowercase, and the value must be
+  a dot-atom with at least one dot (RFC 2919). The descriptive phrase is
+  ignored, and `List-Id` is kept separate from mailbox addresses.
+- For `Message-Id`, `In-Reply-To`, and `References`, each enclosed message ID is
+  extracted while preserving token case. Multiple identifiers in `References`
+  and `In-Reply-To` are tested in order until a match is found.
+- At most 4096 valid identifiers are scanned per condition.
 
 ```
 :0
-* identifier List-Id ?? ^linux-kernel\.vger\.kernel\.org$
-lists/linux-kernel/
+* identifier List-Id ?? ^users\.lists\.example\.org$
+lists/example-users/
+
+:0
+* identifier %thread ?? ^root-discuss-42@example\.org$
+threads/project-launch/
 ```
 
 Keyword fields carry message tags across indexers and mail clients. Use

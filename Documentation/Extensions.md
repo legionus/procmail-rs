@@ -33,9 +33,10 @@ failure behavior, and examples.
 
 ## Structured header conditions
 
-`address` extracts mailbox addresses before matching, `identifier` extracts the
-identifier carried by `List-Id`, and `keyword` extracts individual tags from
-`Keywords`, `X-Label`, and `X-Keywords`. This avoids regular expressions which
+`address` extracts mailbox addresses before matching, `identifier` extracts
+identifiers from `List-Id`, `Message-Id`, `In-Reply-To`, `References`, or the
+`%thread` alias, and `keyword` extracts individual tags from `Keywords`,
+`X-Label`, and `X-Keywords`. This avoids regular expressions which
 accidentally consume display names, comments, brackets, comma separators, or
 folding.
 
@@ -47,6 +48,10 @@ from-example/
 :0
 * identifier List-Id ?? ^users\.lists\.example\.org$
 lists/example-users/
+
+:0
+* identifier %thread ?? ^root-discuss-42@example\.org$
+threads/project-launch/
 
 :0
 * keyword all ?? ^Urgent$

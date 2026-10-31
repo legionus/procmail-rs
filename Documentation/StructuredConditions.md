@@ -61,32 +61,68 @@ make the complete field unusable. At most 4096 valid mailbox values are
 presented to one condition; exceeding that ceiling fails message evaluation
 explicitly.
 
-## List identifier matching
+## Identifier and thread matching
 
-`List-Id` is not an email address. Its dedicated condition is:
+The syntax is:
 
 ```text
-identifier List-Id ?? REGEX
+identifier FIELD[,FIELD...] ?? REGEX
+identifier %thread ?? REGEX
 ```
 
-Only the identifier inside angle brackets is presented to the regex. ASCII
-letters are converted to lowercase.
+Supported fields are `List-Id`, `Message-Id`, `In-Reply-To`, and `References`.
+The alias `%thread` expands to `Message-Id,In-Reply-To,References` and matches
+any message belonging to the specified discussion thread. Field names are
+ASCII case-insensitive, and repeated or unsupported names are rejected.
+
+Angle brackets, comments, and folding whitespace are stripped. Only the inner
+identifier is presented to the regex:
+
+- For `List-Id`: ASCII letters are converted to lowercase, and the value must
+  be a valid dot-atom containing at least one dot (RFC 2919). The descriptive
+  phrase is ignored. `List-Id` is intentionally separate from `address`;
+  treating it as a mailbox would invent an at-sign and make its list hierarchy
+  ambiguous.
+- For `Message-Id`, `In-Reply-To`, and `References`: every message identifier
+  enclosed in angle brackets `<...>` is extracted. Token spelling and case are
+  preserved. Matching remains case-insensitive by default unless the recipe has
+  the `D` flag.
+- When multiple identifiers appear across the selected fields (such as ancestral
+  IDs in `References` or parent IDs in `In-Reply-To`), each identifier is
+  tested in order until a match is found. Identical tokens are deduplicated.
+- At most 4096 valid identifiers are scanned per condition; exceeding that
+  ceiling fails message evaluation explicitly.
+
+For mailing lists, `identifier List-Id` matches against the list identifier,
+ignoring any descriptive phrase or comments:
 
 ```text
+:0
+* identifier List-Id ?? ^users\.lists\.example\.org$
+lists/example-users/
+
 :0
 * identifier List-Id ?? ^linux-kernel\.vger\.kernel\.org$
 lists/linux-kernel/
 ```
 
-The descriptive phrase is ignored:
+For example, given:
 
 ```text
 List-Id: Linux kernel development <linux-kernel.vger.kernel.org>
 ```
 
-A missing or malformed identifier does not match. `List-Id` is intentionally
-separate from `address`; treating it as a mailbox would invent an at-sign and
-make its list hierarchy ambiguous.
+the regex receives `linux-kernel.vger.kernel.org`. A missing or malformed
+identifier does not match.
+
+For discussion threads, `%thread` tests whether any message ID in the thread
+matches the target conversation:
+
+```text
+:0
+* identifier %thread ?? ^root-discuss-42@example\.org$
+threads/project-launch/
+```
 
 ## Keyword matching
 
