@@ -95,3 +95,88 @@ Text\n";
 
     fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn thread_condition_routes_all_replies_to_same_discussion_folder() {
+    let base = temporary_directory();
+    let thread_dir = base.join("thread");
+    let other_dir = base.join("other");
+    create_maildir(&thread_dir);
+    create_maildir(&other_dir);
+
+    let config = base.join("rules.rc");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\n\
+:0\n\
+* identifier %thread ?? ^root-discuss-42@example\\.org$\n\
+thread/\n\
+\n\
+:0\n\
+other/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+
+    let root_msg = b"Message-ID: <root-discuss-42@example.org>\n\
+From: author@example.org\n\
+Subject: Start of discussion\n\nHello\n";
+
+    let reply_msg = b"Message-ID: <reply-101@example.org>\n\
+From: peer@example.org\n\
+In-Reply-To: <root-discuss-42@example.org>\n\
+References: <root-discuss-42@example.org>\n\
+Subject: Re: Start of discussion\n\nReply\n";
+
+    let subreply_msg = b"Message-ID: <subreply-202@example.org>\n\
+From: third@example.org\n\
+In-Reply-To: <reply-101@example.org>\n\
+References: <root-discuss-42@example.org> <reply-101@example.org>\n\
+Subject: Re: Start of discussion\n\nSubreply\n";
+
+    let unrelated_msg = b"Message-ID: <unrelated-303@example.org>\n\
+From: stranger@example.org\n\
+Subject: Unrelated\n\nOther\n";
+
+    for msg in [
+        root_msg.as_slice(),
+        reply_msg.as_slice(),
+        subreply_msg.as_slice(),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(msg).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    }
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+        .args(["filter", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(unrelated_msg)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+
+    assert_eq!(delivered_messages(&thread_dir).len(), 3);
+    assert_eq!(delivered_messages(&other_dir).len(), 1);
+
+    fs::remove_dir_all(base).unwrap();
+}

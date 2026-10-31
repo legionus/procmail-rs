@@ -702,7 +702,7 @@ pub enum ConditionKind {
         regex: RegexCondition,
     },
     IdentifierRegex {
-        field: IdentifierField,
+        fields: Vec<IdentifierField>,
         regex: RegexCondition,
     },
     KeywordRegex {
@@ -738,12 +738,20 @@ impl AddressField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentifierField {
     ListId,
+    MessageId,
+    InReplyTo,
+    References,
 }
 
 impl IdentifierField {
+    pub(crate) const THREAD: [Self; 3] = [Self::MessageId, Self::InReplyTo, Self::References];
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::ListId => "List-Id",
+            Self::MessageId => "Message-Id",
+            Self::InReplyTo => "In-Reply-To",
+            Self::References => "References",
         }
     }
 }

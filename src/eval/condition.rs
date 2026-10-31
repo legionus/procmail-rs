@@ -45,7 +45,7 @@ enum CompiledConditionKind {
         regex: Regex,
     },
     IdentifierRegex {
-        field: IdentifierField,
+        fields: Vec<IdentifierField>,
         regex: Regex,
     },
     KeywordRegex {
@@ -106,9 +106,15 @@ fn compile_condition(
                 .join(","),
             regex.pattern()
         ),
-        ConditionKind::IdentifierRegex { field, regex } => {
-            format!("identifier {} ?? {}", field.name(), regex.pattern())
-        }
+        ConditionKind::IdentifierRegex { fields, regex } => format!(
+            "identifier {} ?? {}",
+            fields
+                .iter()
+                .map(|field| field.name())
+                .collect::<Vec<_>>()
+                .join(","),
+            regex.pattern()
+        ),
         ConditionKind::KeywordRegex { fields, regex } => format!(
             "keyword {} ?? {}",
             fields
@@ -170,10 +176,12 @@ fn compile_condition(
             fields: fields.clone(),
             regex: regex.compiled().clone(),
         },
-        ConditionKind::IdentifierRegex { field, regex } => CompiledConditionKind::IdentifierRegex {
-            field: *field,
-            regex: regex.compiled().clone(),
-        },
+        ConditionKind::IdentifierRegex { fields, regex } => {
+            CompiledConditionKind::IdentifierRegex {
+                fields: fields.clone(),
+                regex: regex.compiled().clone(),
+            }
+        }
         ConditionKind::KeywordRegex { fields, regex } => CompiledConditionKind::KeywordRegex {
             fields: fields.clone(),
             regex: regex.compiled().clone(),
@@ -436,8 +444,8 @@ impl CompiledCondition {
             CompiledConditionKind::AddressRegex { fields, regex } => {
                 self.matches_addresses(head.header_view(), fields, regex, runtime)?
             }
-            CompiledConditionKind::IdentifierRegex { field, regex } => {
-                self.matches_identifier(head.header_view(), *field, regex, runtime)?
+            CompiledConditionKind::IdentifierRegex { fields, regex } => {
+                self.matches_identifier(head.header_view(), fields, regex, runtime)?
             }
             CompiledConditionKind::KeywordRegex { fields, regex } => {
                 self.matches_keywords(head.header_view(), fields, regex, runtime)?
@@ -499,8 +507,8 @@ impl CompiledCondition {
             CompiledConditionKind::AddressRegex { fields, regex } => {
                 self.matches_addresses(message.header_view(), fields, regex, runtime)?
             }
-            CompiledConditionKind::IdentifierRegex { field, regex } => {
-                self.matches_identifier(message.header_view(), *field, regex, runtime)?
+            CompiledConditionKind::IdentifierRegex { fields, regex } => {
+                self.matches_identifier(message.header_view(), fields, regex, runtime)?
             }
             CompiledConditionKind::KeywordRegex { fields, regex } => {
                 self.matches_keywords(message.header_view(), fields, regex, runtime)?
@@ -560,11 +568,11 @@ impl CompiledCondition {
     fn matches_identifier(
         &self,
         header: crate::header_edit::HeaderView<'_>,
-        field: IdentifierField,
+        fields: &[IdentifierField],
         regex: &Regex,
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, EvalError> {
-        let matched = structured_header::any_identifier(header, field, |identifier| {
+        let matched = structured_header::any_identifier(header, fields, |identifier| {
             self.regex_matches(regex, identifier, runtime)
         })
         .map_err(|error| self.structured_header_error(error))?;

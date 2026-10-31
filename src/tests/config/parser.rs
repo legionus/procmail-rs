@@ -1123,11 +1123,11 @@ fn parses_structured_header_conditions_without_confusing_variables() {
     );
     assert_eq!(regex.pattern(), "^user@example\\.org$");
     assert!(matches!(
-        recipe.conditions[1].kind,
+        &recipe.conditions[1].kind,
         ConditionKind::IdentifierRegex {
-            field: IdentifierField::ListId,
+            fields,
             ..
-        }
+        } if fields == &[IdentifierField::ListId]
     ));
     let ConditionKind::KeywordRegex { fields, regex } = &recipe.conditions[2].kind else {
         panic!("expected a keyword condition");
@@ -1139,6 +1139,24 @@ fn parses_structured_header_conditions_without_confusing_variables() {
     };
     assert_eq!(fields, &[KeywordField::XLabel, KeywordField::XKeywords]);
     assert_eq!(regex.pattern(), "^Work$");
+
+    let thread_config = parse(
+        ":0\n* identifier %thread ?? ^msg-id@example\\.org$\n* identifier Message-Id, In-Reply-To, References ?? ^parent@example\\.org$\nmaildir:matched\n",
+    )
+    .unwrap();
+    let [Statement::Recipe(thread_recipe)] = thread_config.statements.as_slice() else {
+        panic!("expected one recipe");
+    };
+    let ConditionKind::IdentifierRegex { fields, regex } = &thread_recipe.conditions[0].kind else {
+        panic!("expected identifier condition");
+    };
+    assert_eq!(fields, &IdentifierField::THREAD);
+    assert_eq!(regex.pattern(), "^msg-id@example\\.org$");
+    let ConditionKind::IdentifierRegex { fields, regex } = &thread_recipe.conditions[1].kind else {
+        panic!("expected identifier condition");
+    };
+    assert_eq!(fields, &IdentifierField::THREAD);
+    assert_eq!(regex.pattern(), "^parent@example\\.org$");
 
     for variable in ["address", "identifier", "keyword"] {
         let config = parse(&format!(
@@ -1160,7 +1178,11 @@ fn rejects_unknown_or_repeated_structured_header_fields() {
     for condition in [
         "address Bcc ?? value",
         "address From,from ?? value",
-        "identifier Message-Id ?? value",
+        "identifier Subject ?? value",
+        "identifier List-Id,list-id ?? value",
+        "identifier %thread,Message-Id ?? value",
+        "identifier %thread,%thread ?? value",
+        "identifier List-Id, ?? value",
         "keyword Subject ?? value",
         "keyword X-Label,x-label ?? value",
         "keyword all,Keywords ?? value",

@@ -80,27 +80,59 @@ pub(crate) fn any_address<'a, E>(
 
 pub(crate) fn any_identifier<'a, E>(
     header: impl Into<HeaderView<'a>>,
-    field: IdentifierField,
+    wanted: &[IdentifierField],
     mut matches: impl FnMut(&[u8]) -> Result<bool, E>,
 ) -> Result<bool, StructuredVisitError<E>> {
     let mut count = 0usize;
+    let mut seen: Vec<Vec<u8>> = Vec::new();
     visit_fields(header.into(), |name, value| {
-        if !name.eq_ignore_ascii_case(field.name().as_bytes()) {
+        let Some(field) = wanted
+            .iter()
+            .find(|field| name.eq_ignore_ascii_case(field.name().as_bytes()))
+        else {
             return Ok(false);
-        }
+        };
         let Some(value) = remove_comments_and_unfold(value) else {
             return Ok(false);
         };
-        let Some(identifier) = normalize_list_id(&value) else {
-            return Ok(false);
-        };
-        count = count
-            .checked_add(1)
-            .ok_or_else(|| StructuredVisitError::Header(work_limit_error()))?;
-        if count > MAX_STRUCTURED_HEADER_VALUES {
-            return Err(StructuredVisitError::Header(work_limit_error()));
+        match field {
+            IdentifierField::ListId => {
+                let Some(identifier) = normalize_list_id(&value) else {
+                    return Ok(false);
+                };
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| StructuredVisitError::Header(work_limit_error()))?;
+                if count > MAX_STRUCTURED_HEADER_VALUES {
+                    return Err(StructuredVisitError::Header(work_limit_error()));
+                }
+                if seen.iter().any(|existing| existing == &identifier) {
+                    return Ok(false);
+                }
+                seen.push(identifier.clone());
+                matches(&identifier).map_err(StructuredVisitError::Visitor)
+            }
+            IdentifierField::MessageId
+            | IdentifierField::InReplyTo
+            | IdentifierField::References => {
+                for identifier in message_id_tokens(&value) {
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| StructuredVisitError::Header(work_limit_error()))?;
+                    if count > MAX_STRUCTURED_HEADER_VALUES {
+                        return Err(StructuredVisitError::Header(work_limit_error()));
+                    }
+                    if seen.iter().any(|existing| existing == &identifier) {
+                        continue;
+                    }
+                    seen.push(identifier.clone());
+                    if matches(&identifier).map_err(StructuredVisitError::Visitor)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
         }
-        matches(&identifier).map_err(StructuredVisitError::Visitor)
     })
 }
 
@@ -461,6 +493,39 @@ fn normalize_list_id(input: &[u8]) -> Option<Vec<u8>> {
             .map(|byte| byte.to_ascii_lowercase())
             .collect(),
     )
+}
+
+fn message_id_tokens(input: &[u8]) -> Vec<Vec<u8>> {
+    let mut tokens = Vec::new();
+    let mut open = None;
+    let mut quoted = false;
+    let mut escaped = false;
+
+    for (index, &byte) in input.iter().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if quoted && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            quoted = !quoted;
+        } else if !quoted {
+            if byte == b'<' {
+                open = Some(index);
+            } else if byte == b'>' {
+                if let Some(start) = open.take() {
+                    let token = trim_ascii(&input[start + 1..index]);
+                    if !token.is_empty()
+                        && !token
+                            .iter()
+                            .any(|b| b.is_ascii_control() || *b == b'<' || *b == b'>')
+                    {
+                        tokens.push(token.to_vec());
+                    }
+                }
+            }
+        }
+    }
+    tokens
 }
 
 fn find_unquoted(input: &[u8], wanted: u8) -> Option<usize> {

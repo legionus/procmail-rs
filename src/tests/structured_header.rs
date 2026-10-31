@@ -44,7 +44,7 @@ fn extracts_and_normalizes_list_id() {
     let mut found = Vec::new();
     any_identifier(
         b"List-Id: Project discussion <Project.Users.Example.ORG>\n\n",
-        IdentifierField::ListId,
+        &[IdentifierField::ListId],
         |value| {
             found.push(value.to_vec());
             Ok::<bool, ()>(false)
@@ -52,6 +52,50 @@ fn extracts_and_normalizes_list_id() {
     )
     .unwrap();
     assert_eq!(found, [b"project.users.example.org".to_vec()]);
+}
+
+#[test]
+fn extracts_message_identifiers_and_deduplicates_across_thread_fields() {
+    let mut found = Vec::new();
+    let header = b"Message-ID: <Msg.123@Example.ORG>\n\
+In-Reply-To: (parent) <Parent.456@Example.ORG>\n\
+References: <Root.000@Example.ORG> <Parent.456@Example.ORG>\n\n";
+
+    any_identifier(header, &IdentifierField::THREAD, |value| {
+        found.push(value.to_vec());
+        Ok::<bool, ()>(false)
+    })
+    .unwrap();
+
+    assert_eq!(
+        found,
+        [
+            b"Msg.123@Example.ORG".to_vec(),
+            b"Parent.456@Example.ORG".to_vec(),
+            b"Root.000@Example.ORG".to_vec(),
+        ]
+    );
+}
+
+#[test]
+fn extracts_references_with_folding_commas_and_ignores_malformed_tokens() {
+    let mut found = Vec::new();
+    let header = b"References: <first@example.org>,\n <second@example.org> malformed <>\n <third@example.org>\n\n";
+
+    any_identifier(header, &[IdentifierField::References], |value| {
+        found.push(value.to_vec());
+        Ok::<bool, ()>(false)
+    })
+    .unwrap();
+
+    assert_eq!(
+        found,
+        [
+            b"first@example.org".to_vec(),
+            b"second@example.org".to_vec(),
+            b"third@example.org".to_vec(),
+        ]
+    );
 }
 
 #[test]

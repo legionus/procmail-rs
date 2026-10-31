@@ -1530,8 +1530,8 @@ fn parse_condition(
             Some(ConditionRegexTarget::Address(fields)) => {
                 (ConditionKind::AddressRegex { fields, regex }, true)
             }
-            Some(ConditionRegexTarget::Identifier(field)) => {
-                (ConditionKind::IdentifierRegex { field, regex }, true)
+            Some(ConditionRegexTarget::Identifier(fields)) => {
+                (ConditionKind::IdentifierRegex { fields, regex }, true)
             }
             Some(ConditionRegexTarget::Keyword(fields)) => {
                 (ConditionKind::KeywordRegex { fields, regex }, true)
@@ -1959,7 +1959,7 @@ enum ConditionRegexTarget {
     Variable(String),
     Area(ConditionInput),
     Address(Vec<super::AddressField>),
-    Identifier(super::IdentifierField),
+    Identifier(Vec<super::IdentifierField>),
     Keyword(Vec<super::KeywordField>),
 }
 
@@ -2015,21 +2015,59 @@ fn structured_condition_target(
             .is_some_and(u8::is_ascii_whitespace)
             .then_some(rest.trim_start())
     }) {
-        let (field, pattern) = rest
-            .split_once("??")
-            .ok_or_else(|| ParseError::new(line, "identifier condition requires FIELD ?? REGEX"))?;
-        let field = field.trim();
-        if field.is_empty() {
+        let (field_text, pattern) = rest.split_once("??").ok_or_else(|| {
+            ParseError::new(line, "identifier condition requires FIELD-LIST ?? REGEX")
+        })?;
+        let field_text = field_text.trim();
+        if field_text.is_empty() {
             return Ok(None);
         }
-        if !field.eq_ignore_ascii_case("List-Id") {
-            return Err(ParseError::new(
-                line,
-                format!("identifier condition does not support field '{field}'"),
-            ));
+        let mut fields = Vec::new();
+        for name in field_text.split(',') {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(ParseError::new(
+                    line,
+                    "identifier condition field list contains an empty item",
+                ));
+            }
+            if name.eq_ignore_ascii_case("%thread") {
+                for thread_field in super::IdentifierField::THREAD {
+                    if fields.contains(&thread_field) {
+                        return Err(ParseError::new(
+                            line,
+                            format!(
+                                "identifier condition repeats field '{}'",
+                                thread_field.name()
+                            ),
+                        ));
+                    }
+                    fields.push(thread_field);
+                }
+            } else {
+                let field = match name.to_ascii_lowercase().as_str() {
+                    "list-id" => super::IdentifierField::ListId,
+                    "message-id" => super::IdentifierField::MessageId,
+                    "in-reply-to" => super::IdentifierField::InReplyTo,
+                    "references" => super::IdentifierField::References,
+                    _ => {
+                        return Err(ParseError::new(
+                            line,
+                            format!("identifier condition does not support field '{name}'"),
+                        ));
+                    }
+                };
+                if fields.contains(&field) {
+                    return Err(ParseError::new(
+                        line,
+                        format!("identifier condition repeats field '{name}'"),
+                    ));
+                }
+                fields.push(field);
+            }
         }
         return Ok(Some((
-            ConditionRegexTarget::Identifier(super::IdentifierField::ListId),
+            ConditionRegexTarget::Identifier(fields),
             pattern.trim_start(),
         )));
     }

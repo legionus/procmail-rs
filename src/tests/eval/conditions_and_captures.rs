@@ -105,6 +105,70 @@ X-Keywords: Initial, Work, Project:Alpha\r\n\r\n"
 }
 
 #[test]
+fn thread_identifier_conditions_match_root_and_replies_with_captures() {
+    let source =
+        ":0\n* identifier %thread ?? ^root\\.([0-9]+)@example\\.org$\nmaildir:selected\n";
+    let config = config::parse(source).unwrap().expand(&[]).unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+
+    // 1. Root message
+    let mut root_msg = head(b"Message-ID: <root.123@example.org>\nSubject: Thread root\n\nBody");
+    let mut runtime = RuntimeVariables::default();
+    let result =
+        plan.evaluate_headers_editing_with_trace(&mut root_msg, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected decision on root message");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+    assert_eq!(runtime.get("MATCH1"), Some("123"));
+
+    // 2. Direct reply (matches In-Reply-To)
+    let mut reply_msg = head(
+        b"Message-ID: <reply.456@example.org>\nIn-Reply-To: <root.123@example.org>\nReferences: <root.123@example.org>\n\nBody",
+    );
+    let mut runtime = RuntimeVariables::default();
+    let result =
+        plan.evaluate_headers_editing_with_trace(&mut reply_msg, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected decision on direct reply");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+    assert_eq!(runtime.get("MATCH1"), Some("123"));
+
+    // 3. Sub-reply (matches References)
+    let mut subreply_msg = head(
+        b"Message-ID: <subreply.789@example.org>\nIn-Reply-To: <reply.456@example.org>\nReferences: <root.123@example.org> <reply.456@example.org>\n\nBody",
+    );
+    let mut runtime = RuntimeVariables::default();
+    let result =
+        plan.evaluate_headers_editing_with_trace(&mut subreply_msg, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected decision on sub-reply");
+    };
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("selected".into())]
+    );
+    assert_eq!(runtime.get("MATCH1"), Some("123"));
+
+    // 4. Unrelated message does not match
+    let mut unrelated_msg = head(b"Message-ID: <unrelated.999@example.org>\n\nBody");
+    let mut runtime = RuntimeVariables::default();
+    let result =
+        plan.evaluate_headers_editing_with_trace(&mut unrelated_msg, &mut runtime, &mut NoTrace);
+    let HeaderEvaluation::Decided(delivery) = result else {
+        panic!("expected decision on unrelated message");
+    };
+    assert!(delivery.deliveries().is_empty());
+}
+
+#[test]
 fn runtime_shell_condition_reparses_match_as_a_size_test() {
     let config =
         config::parse(":0 c\n* ^X-Condition: \\/(.*)$\nmbox:first\n:0\n* $$MATCH\nmbox:second\n")
