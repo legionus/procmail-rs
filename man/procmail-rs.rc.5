@@ -464,7 +464,7 @@ condition.
 * urgent
 urgent\-body/
 .EE
-.SS Structured address, identifier, and keyword conditions
+.SS Structured address, identifier, keyword, and multipart conditions
 The \f[B]procmail\-rs\f[R] \f[CR]address\f[R] condition extracts mailbox
 addresses from one or more address\-bearing fields and applies
 \f[CR]REGEX\f[R] separately to every resulting address:
@@ -553,14 +553,40 @@ Each unique valid keyword token (printable US\-ASCII without spaces or
 commas) is tested in first\-seen order; malformed tokens are ignored and
 at most 4096 valid tokens are scanned per condition.
 .PP
-All three forms require only the header section and stop at the first
-matching value.
+Use \f[CR]multipart SELECTOR ?? REGEX\f[R],
+\f[CR]multipart { SELECTOR ?? REGEX }\f[R], or the multi\-line block
+form:
+.IP
+.EX
+:0
+* multipart {
+  %mimetype ?? \(hatext/x\-(?:diff|patch)$
+  %filename ?? \(rs.(?:patch|diff)$
+}
+patches/
+.EE
+.PP
+to inspect MIME structure across single\-part and multipart messages.
+Supported selectors are \f[CR]%mimetype\f[R] (canonical lowercase media
+type), \f[CR]%disposition\f[R] (\f[CR]inline\f[R] or
+\f[CR]attachment\f[R]), and \f[CR]%filename\f[R] (file name decoded from
+\f[CR]Content\-Disposition\f[R] or \f[CR]Content\-Type\f[R] parameters
+according to RFC 2047 and RFC 2231).
+All selectors within a \f[CR]multipart { ... }\f[R] block must match on
+the same MIME part.
+Single\-part messages are treated as a single part.
+Nested multiparts are traversed up to 8 levels deep and at most 256
+parts.
+Unlike address and keyword conditions, multipart conditions require the
+message body contents.
+.PP
 Their regex groups and \f[CR]\(rs/\f[R] marker update \f[CR]MATCH\f[R],
 \f[CR]MATCH1\f[R], and later numbered values in the same way as other
 regex conditions.
 The leading keywords do not reserve variable names:
-\f[CR]address ?? REGEX\f[R], \f[CR]identifier ?? REGEX\f[R], and
-\f[CR]keyword ?? REGEX\f[R] remain ordinary variable conditions.
+\f[CR]address ?? REGEX\f[R], \f[CR]identifier ?? REGEX\f[R],
+\f[CR]keyword ?? REGEX\f[R], and \f[CR]multipart ?? REGEX\f[R] remain
+ordinary variable conditions.
 .PP
 The ordinary operators are:
 .TP

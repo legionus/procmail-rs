@@ -31,15 +31,19 @@ headers {
 See [HeaderEditing.md](HeaderEditing.md) for every operation, value encoding,
 failure behavior, and examples.
 
-## Structured header conditions
+## Structured conditions
 
 `address` extracts mailbox addresses from message originators, recipients, MTA
 delivery headers, and resent fields (with `%recipient`, `%delivered`, and `%sender`
 aliases), `identifier` extracts identifiers from `List-Id`, `Message-Id`,
 `In-Reply-To`, `References`, or the `%thread` alias, and `keyword` extracts
-individual tags from `Keywords`, `X-Label`, and `X-Keywords`. This avoids
-regular expressions which accidentally consume display names, comments,
-brackets, comma separators, or folding.
+individual tags from `Keywords`, `X-Label`, and `X-Keywords`. `multipart`
+inspects MIME structure, media types (`%mimetype`), disposition (`%disposition`),
+and decoded file names (`%filename`) across single-part and multipart messages,
+supporting combined `multipart { ... }` blocks to verify multiple attributes on
+the same MIME part. This avoids regular expressions which accidentally consume
+display names, comments, brackets, comma separators, MIME parameter boundaries,
+or folding.
 
 ```text
 :0
@@ -61,6 +65,13 @@ threads/project-launch/
 :0
 * keyword all ?? ^Urgent$
 urgent/
+
+:0
+* multipart {
+  %mimetype ?? ^text/x-(?:diff|patch)$
+  %filename ?? \.(?:patch|diff)$
+}
+patches/
 ```
 
 See [StructuredConditions.md](StructuredConditions.md) for normalization,

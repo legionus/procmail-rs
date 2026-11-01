@@ -365,7 +365,7 @@ byte value of a variable.
 urgent-body/
 ```
 
-## Structured address, identifier, and keyword conditions
+## Structured address, identifier, keyword, and multipart conditions
 
 The **procmail-rs** `address` condition extracts mailbox addresses from one or
 more address-bearing fields and applies `REGEX` separately to every resulting
@@ -435,12 +435,33 @@ Each unique valid keyword token (printable US-ASCII without spaces or commas)
 is tested in first-seen order; malformed tokens are ignored and at most 4096
 valid tokens are scanned per condition.
 
-All three forms require only the header section and stop at the first matching
-value. Their regex groups and `\/` marker update `MATCH`, `MATCH1`, and later
+Use `multipart SELECTOR ?? REGEX`, `multipart { SELECTOR ?? REGEX }`, or
+the multi-line block form:
+
+```
+:0
+* multipart {
+  %mimetype ?? ^text/x-(?:diff|patch)$
+  %filename ?? \.(?:patch|diff)$
+}
+patches/
+```
+
+to inspect MIME structure across single-part and multipart messages. Supported
+selectors are `%mimetype` (canonical lowercase media type), `%disposition`
+(`inline` or `attachment`), and `%filename` (file name decoded from
+`Content-Disposition` or `Content-Type` parameters according to RFC 2047 and
+RFC 2231). All selectors within a `multipart { ... }` block must match on the
+same MIME part. Single-part messages are treated as a single part. Nested
+multiparts are traversed up to 8 levels deep and at most 256 parts. Unlike
+address and keyword conditions, multipart conditions require the message body
+contents.
+
+Their regex groups and `\/` marker update `MATCH`, `MATCH1`, and later
 numbered values in the same way as other regex conditions. The leading
 keywords do not reserve variable names: `address ?? REGEX`,
-`identifier ?? REGEX`, and `keyword ?? REGEX` remain ordinary variable
-conditions.
+`identifier ?? REGEX`, `keyword ?? REGEX`, and `multipart ?? REGEX` remain
+ordinary variable conditions.
 
 The ordinary operators are:
 

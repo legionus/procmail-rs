@@ -6,8 +6,8 @@
 Raw header regexes operate on transport syntax. A display name, comment,
 folding sequence, encoded text, or angle bracket can therefore obscure the
 value a recipe intends to test. procmail-rs provides bounded `address`,
-`identifier`, and `keyword` conditions which parse selected field values before
-applying a byte regex.
+`identifier`, `keyword`, and `multipart` conditions which parse structured
+values before applying a byte regex.
 
 ## Address matching
 
@@ -175,6 +175,83 @@ discarded, and malformed tokens in incoming headers are ignored. At most 4096
 valid keyword tokens are scanned for one condition; exceeding that ceiling
 fails message evaluation explicitly.
 
+## Multipart MIME matching
+
+The `multipart` condition inspects MIME structure across single-part and
+multipart messages without brittle raw regex parsing of `Content-Type` and
+`Content-Disposition` headers.
+
+The syntax supports single selectors as well as block forms:
+
+```text
+multipart SELECTOR ?? REGEX
+multipart { SELECTOR ?? REGEX }
+
+multipart {
+  SELECTOR1 ?? REGEX1
+  SELECTOR2 ?? REGEX2
+}
+```
+
+Supported selectors are:
+- `%mimetype`: the canonical media type `type/subtype` in lowercase (such as
+  `text/plain`, `text/x-patch`, `text/calendar`, `image/png`, or `application/pdf`);
+- `%disposition`: the presentation disposition in lowercase (`inline` or `attachment`);
+- `%filename`: the file name extracted from the `Content-Disposition` `filename`
+  parameter or `Content-Type` `name` parameter, with RFC 2047 encoded-word and
+  RFC 2231 character set/language and continuation decoding, comment removal,
+  and unquoting.
+
+Aliases without the leading `%` sign (such as `mimetype`, `disposition`, and
+`filename`) or standard header names (`content-type`, `content-disposition`)
+are also accepted.
+
+### Combined block matching
+
+When multiple attributes are checked on a message (for example, verifying that an
+attachment is both a patch and has a `.patch` file extension), placing them on
+independent recipe condition lines tests the whole message independently:
+
+```text
+# Independent conditions (may match different parts):
+:0
+* multipart %mimetype ?? ^text/x-patch$
+* multipart %filename ?? \.patch$
+patches/
+```
+
+If a message has an inline `text/x-patch` description and a separate binary
+`application/octet-stream` attachment named `payload.patch`, the independent
+conditions both match, routing the binary file to `patches/`.
+
+The `multipart { ... }` block form requires all enclosed selectors to match on
+the **same** MIME part:
+
+```text
+# Block condition (must match on the same MIME part):
+:0
+* multipart {
+  %mimetype ?? ^text/x-(?:diff|patch)$
+  %disposition ?? ^attachment$
+  %filename ?? \.(?:patch|diff)$
+}
+patches/
+```
+
+### Traversal and bounds
+
+- Single-part messages are treated as messages containing 1 MIME part (the root
+  message itself), allowing uniform filtering across single-part and multipart
+  emails (e.g. matching single-part calendar invites with `* multipart %mimetype ?? ^text/calendar$`).
+- Multipart messages are recursively traversed in depth-first order up to a
+  maximum nesting depth of 8 levels (`MAX_MIME_DEPTH`) and at most 256 parts
+  (`MAX_MIME_PARTS`). Preambles, epilogues, and boundary lines are skipped.
+- Repeated selectors in the same block, empty blocks, or unsupported selector
+  names are rejected during configuration parsing.
+- Unlike address and keyword conditions which only require the message headers,
+  evaluating multipart conditions defers delivery decision until message body
+  contents are available.
+
 ## Captures and negation
 
 Capturing groups populate `MATCH1`, `MATCH2`, and later numbered variables.
@@ -236,4 +313,5 @@ conditions:
 * address ?? ^manual-value$
 * identifier ?? ^another-value$
 * keyword ?? ^third-value$
+* multipart ?? ^fourth-value$
 ```
