@@ -26,7 +26,7 @@ impl PublicationTracker {
 
     pub(super) fn record_outcome(
         &mut self,
-        outcome: procmail_rs::eval::DeliveryOutcome,
+        outcome: crate::eval::DeliveryOutcome,
     ) -> Result<(), OperationalError> {
         self.record(outcome.published(), outcome.original_delivered())
     }
@@ -182,7 +182,7 @@ impl OrderedStepError {
 }
 
 pub(super) fn commit_delivery(
-    validated: procmail_rs::delivery::ValidatedFanout,
+    validated: crate::delivery::ValidatedFanout,
     deliveries: &[PlannedDelivery],
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,

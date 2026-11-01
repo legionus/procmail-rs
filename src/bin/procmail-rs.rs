@@ -12,7 +12,6 @@ use std::process::ExitCode;
 
 use procmail_rs::config::{MAX_COMMAND_LINE_VARIABLES, PositionalArguments, SuppliedVariable};
 use procmail_rs::configuration;
-use procmail_rs::delivery::{DeliveryFailure, DeliveryFailureClass};
 use procmail_rs::eval::{
     ActionKindExplanation, ConditionKindExplanation, ExecutionPlan, HeaderEvaluation,
     OrderedExecutionError, PlanExplanation,
@@ -21,16 +20,14 @@ use procmail_rs::hostname::current_hostname;
 use procmail_rs::message::Message;
 use procmail_rs::rc_file::{LoadedRcFile, RcFileLoader};
 use procmail_rs::runtime::RuntimeVariables;
-use procmail_rs::signal_state::{self, InterruptibleReader, ReceivedSignal};
+use procmail_rs::signal_state::{self, InterruptibleReader};
 use procmail_rs::trace::{BoundedTraceWriter, NoTrace, TraceDetail, TraceFormat, TraceSink};
 use procmail_rs::user_identity::UserIdentity;
 
-mod command_log;
-mod command_runner;
-mod delivery_runtime;
-
-use command_runner::CommandRunner;
-use delivery_runtime::{DeliveryRuntime, validate_maildir_path};
+use procmail_rs::command_runner::CommandRunner;
+use procmail_rs::delivery_runtime::{
+    DeliveryRuntime, ExitStatus, OperationalError, validate_maildir_path,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
@@ -121,83 +118,6 @@ impl FilterTrace {
         match self {
             Self::Disabled(_) => None,
             Self::Enabled(trace) => trace.stop_reason(),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum OperationalError {
-    Delivery {
-        failure: DeliveryFailure,
-        message: String,
-    },
-    Configuration(String),
-    Input(String),
-    TemporaryDelivery(String),
-    PermanentDestination(String),
-    Undelivered(String),
-    Internal(String),
-    Signaled(ReceivedSignal),
-}
-
-// Use the established sysexits values when they describe the action a caller
-// should take. Keep unmatched delivery separate because none of those names
-// accurately describes a valid message for which no final recipe was selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum ExitStatus {
-    Success = 0,
-    Input = 65,
-    PermanentDestination = 73,
-    TemporaryDelivery = 75,
-    Configuration = 78,
-    Undelivered = 79,
-    Internal = 70,
-}
-
-impl std::fmt::Display for OperationalError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::Delivery { message, .. } => message,
-            Self::Configuration(message)
-            | Self::Input(message)
-            | Self::TemporaryDelivery(message)
-            | Self::PermanentDestination(message)
-            | Self::Undelivered(message)
-            | Self::Internal(message) => message,
-            Self::Signaled(signal) => return write!(formatter, "interrupted by {}", signal.name()),
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl OperationalError {
-    fn delivery_failure(failure: DeliveryFailure, message: String) -> Self {
-        Self::Delivery { failure, message }
-    }
-
-    fn delivery(class: DeliveryFailureClass, message: String) -> Self {
-        match class {
-            DeliveryFailureClass::Retryable => Self::TemporaryDelivery(message),
-            DeliveryFailureClass::Permanent => Self::PermanentDestination(message),
-            DeliveryFailureClass::Internal => Self::Internal(message),
-        }
-    }
-
-    fn exit_code(&self) -> u8 {
-        match self {
-            Self::Delivery { failure, .. } => match failure.class {
-                DeliveryFailureClass::Retryable => ExitStatus::TemporaryDelivery as u8,
-                DeliveryFailureClass::Permanent => ExitStatus::PermanentDestination as u8,
-                DeliveryFailureClass::Internal => ExitStatus::Internal as u8,
-            },
-            Self::Configuration(_) => ExitStatus::Configuration as u8,
-            Self::Input(_) => ExitStatus::Input as u8,
-            Self::TemporaryDelivery(_) => ExitStatus::TemporaryDelivery as u8,
-            Self::PermanentDestination(_) => ExitStatus::PermanentDestination as u8,
-            Self::Undelivered(_) => ExitStatus::Undelivered as u8,
-            Self::Internal(_) => ExitStatus::Internal as u8,
-            Self::Signaled(signal) => signal.exit_code(),
         }
     }
 }
@@ -856,5 +776,5 @@ fn load_root_config(
 }
 
 #[cfg(test)]
-#[path = "tests/main.rs"]
+#[path = "../tests/main.rs"]
 mod tests;

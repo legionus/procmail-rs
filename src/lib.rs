@@ -11,15 +11,18 @@ mod bounded_bytes;
 #[cfg(any(feature = "fuzzing", test))]
 pub mod fuzzing;
 
+pub mod command_log;
+pub mod command_runner;
 pub mod config;
 pub mod configuration;
 pub mod delivery;
+pub mod delivery_runtime;
 pub mod environment;
 pub mod eval;
 pub mod external_command;
 pub mod external_process;
-pub(crate) mod header_edit;
-pub(crate) mod header_value;
+pub mod header_edit;
+pub mod header_value;
 pub mod hostname;
 pub mod limits;
 pub mod message;

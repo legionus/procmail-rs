@@ -36,7 +36,7 @@ pub(crate) enum GeneratedHeaderEncoding {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DecodedHeaderError {
+pub enum DecodedHeaderError {
     MalformedWord,
     UnsupportedCharset,
     UnsupportedEncoding,
@@ -45,7 +45,7 @@ pub(crate) enum DecodedHeaderError {
 }
 
 impl DecodedHeaderError {
-    pub(crate) fn description(self) -> &'static str {
+    pub fn description(self) -> &'static str {
         match self {
             Self::MalformedWord => "malformed RFC 2047 encoded-word",
             Self::UnsupportedCharset => "unsupported RFC 2047 charset",

@@ -66,7 +66,7 @@ pub(super) fn deliver_one_sink(
 pub(super) fn deliver_file_destination(
     unresolved: &Destination,
     message: FinalMessage<'_>,
-    output_ending: procmail_rs::config::OutputEnding,
+    output_ending: crate::config::OutputEnding,
     durability: Durability,
     runtime: &mut RuntimeVariables,
     trace: &mut impl TraceSink,
@@ -80,8 +80,7 @@ pub(super) fn deliver_file_destination(
     // input validation, while avoiding device writes also keeps mbox locking,
     // rollback, and durability assumptions limited to regular files.
     if destination.kind() == DestinationKind::Discard {
-        let published =
-            procmail_rs::delivery::PublishedDelivery::new(PathBuf::from(destination.path()));
+        let published = crate::delivery::PublishedDelivery::new(PathBuf::from(destination.path()));
         return apply_publication(
             PublicationAttempt::published(PublicationResult::Delivery(&published)),
             PublicationDestinations::One(&destination),
@@ -112,7 +111,7 @@ pub(super) fn deliver_file_destination(
             let message = format!("cannot deliver to mbox {}: {error}", path.display());
             let published = error
                 .published()
-                .then(|| procmail_rs::delivery::PublishedDelivery::new(path.to_owned()));
+                .then(|| crate::delivery::PublishedDelivery::new(path.to_owned()));
             apply_publication(
                 PublicationAttempt::failed(
                     published.as_ref().map(PublicationResult::Delivery),

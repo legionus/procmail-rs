@@ -6,25 +6,25 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
 
-use procmail_rs::runtime::{RuntimeSettings, RuntimeVariables};
+use crate::runtime::{RuntimeSettings, RuntimeVariables};
 
-pub(super) struct CommandLog<'a> {
+pub struct CommandLog<'a> {
     runtime: &'a RuntimeVariables,
 }
 
 impl<'a> CommandLog<'a> {
-    pub(super) fn new(runtime: &'a RuntimeVariables) -> Self {
+    pub fn new(runtime: &'a RuntimeVariables) -> Self {
         Self { runtime }
     }
 
-    pub(super) fn stderr(&self) -> io::Result<Stdio> {
+    pub fn stderr(&self) -> io::Result<Stdio> {
         Ok(match self.open()? {
             Some(file) => Stdio::from(file),
             None => Stdio::inherit(),
         })
     }
 
-    pub(super) fn write_diagnostic(&self, record: &[u8]) -> Result<(), DiagnosticWriteError> {
+    pub fn write_diagnostic(&self, record: &[u8]) -> Result<(), DiagnosticWriteError> {
         match self.open().map_err(DiagnosticWriteError::Open)? {
             Some(mut file) => file.write_all(record).map_err(DiagnosticWriteError::Write),
             None => io::stderr()
@@ -34,7 +34,7 @@ impl<'a> CommandLog<'a> {
         }
     }
 
-    pub(super) fn trap_output(&self) -> Result<(Stdio, Stdio), TrapOutputError> {
+    pub fn trap_output(&self) -> Result<(Stdio, Stdio), TrapOutputError> {
         let Some(file) = self.open().map_err(TrapOutputError::Open)? else {
             return Ok(Self::inherited_trap_output());
         };
@@ -42,7 +42,7 @@ impl<'a> CommandLog<'a> {
         Ok((Stdio::from(stdout), Stdio::from(file)))
     }
 
-    pub(super) fn inherited_trap_output() -> (Stdio, Stdio) {
+    pub fn inherited_trap_output() -> (Stdio, Stdio) {
         // TRAP combines stdout with stderr in original procmail. Duplicate the
         // inherited descriptor instead of routing stdout to normal command
         // output, where diagnostics could corrupt a protocol-facing response.
@@ -80,19 +80,19 @@ impl<'a> CommandLog<'a> {
     }
 }
 
-pub(super) enum TrapOutputError {
+pub enum TrapOutputError {
     Open(io::Error),
     Duplicate(io::Error),
 }
 
 #[derive(Debug)]
-pub(super) enum DiagnosticWriteError {
+pub enum DiagnosticWriteError {
     Open(io::Error),
     Write(io::Error),
 }
 
 impl DiagnosticWriteError {
-    pub(super) fn into_io_error(self) -> io::Error {
+    pub fn into_io_error(self) -> io::Error {
         match self {
             Self::Open(error) | Self::Write(error) => error,
         }

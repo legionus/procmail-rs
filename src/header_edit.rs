@@ -2,7 +2,7 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::bounded_bytes::{BoundedBytes, BoundedBytesError};
 use crate::config::{
@@ -22,11 +22,12 @@ use crate::structured_header::{
 };
 
 mod storage;
-pub(crate) use storage::{EditedHeader, HeaderView};
-use storage::{
-    Field, HeaderStorage, HeaderStore, preferred_line_ending, serialized_size, split_fields,
-    validate_aggregate_size,
+use storage::validate_aggregate_size;
+pub use storage::{
+    EditedHeader, Field, HeaderView, field_matches_pattern, strip_line_ending, unfold_field_bytes,
 };
+#[cfg(test)]
+pub(crate) use storage::{HeaderStore, split_fields};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeaderExtraction {
@@ -62,7 +63,7 @@ impl AppliedHeaderAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HeaderEditError {
+pub enum HeaderEditError {
     SizeOverflow,
     LimitExceeded { kind: MessageLimit, limit: usize },
     InvalidGeneratedValue,
@@ -127,27 +128,7 @@ pub(crate) fn apply_header_action<'a>(
     action: &HeaderAction,
     limits: MessageLimits,
 ) -> Result<AppliedHeaderAction, HeaderEditError> {
-    let source = source.into();
-    let mut header = match source {
-        HeaderView::Indexed(header) => header.clone(),
-        HeaderView::Raw(bytes) => {
-            let (fields, separator, line_ending) = split_fields(bytes);
-            let store = HeaderStore::new(&fields, limits.headers_size.max(bytes.len()))?;
-            EditedHeader {
-                storage: Arc::new(HeaderStorage {
-                    store,
-                    separator: separator.to_vec(),
-                    line_ending,
-                    size: bytes.len(),
-                    status: MessageStatus::NONE,
-                    raw: OnceLock::new(),
-                    matching: OnceLock::new(),
-                }),
-                limits,
-            }
-        }
-    };
-    header.limits = limits;
+    let mut header = EditedHeader::new(source, limits)?;
     let line_ending = header.storage.line_ending;
     let mut extractions = Vec::new();
 
@@ -157,7 +138,7 @@ pub(crate) fn apply_header_action<'a>(
     for operation in &action.operations {
         match operation {
             HeaderOperation::Remove { name, .. } => {
-                remove_field(&mut header, name);
+                header.remove_matching(name);
             }
             HeaderOperation::Set { name, value, .. } => {
                 set_field(&mut header, name, &value.source, line_ending)?;
@@ -225,52 +206,7 @@ pub(crate) fn apply_header_action<'a>(
         )?;
     }
 
-    let size = serialized_size(
-        &header.storage.store,
-        &header.storage.separator,
-        line_ending,
-    )?;
-
-    if let Some(storage) = Arc::get_mut(&mut header.storage) {
-        storage.size = size;
-    }
-
-    header.validate(body_len, limits)?;
-
-    // Orphan continuations can join a prepended field, and a missing newline
-    // needs an inserted delimiter before another field. Reindex these malformed
-    // boundaries after validation so future preferences cannot change existing
-    // delimiters or disagree with the checked serialized size.
-    let store = &header.storage.store;
-    let needs_reindex = (1..store.fields.len()).any(|index| {
-        matches!(store.field(index).bytes.first(), Some(b' ' | b'\t'))
-            || !store.field(index - 1).bytes.ends_with(b"\n")
-    });
-
-    if needs_reindex {
-        let status = header.status();
-        let bytes = header.as_bytes();
-        let (fields, separator, line_ending) = split_fields(bytes);
-        let store = HeaderStore::new(&fields, limits.headers_size)?;
-        header.storage = Arc::new(HeaderStorage {
-            store,
-            separator: separator.to_vec(),
-            line_ending,
-            size,
-            status,
-            raw: OnceLock::new(),
-            matching: OnceLock::new(),
-        });
-    }
-
-    // Removed fields or a newly inserted delimiter can change the first
-    // physical newline. Later actions must choose exactly the ending a fresh
-    // parse would observe, without serializing merely to make that choice.
-    let line_ending = preferred_line_ending(header.parts());
-
-    if let Some(storage) = Arc::get_mut(&mut header.storage) {
-        storage.line_ending = line_ending;
-    }
+    header.finish(body_len)?;
 
     Ok(AppliedHeaderAction {
         header,
@@ -491,20 +427,13 @@ fn unfold_value(value: &[u8]) -> Result<Vec<u8>, HeaderEditError> {
     Ok(output.into_vec())
 }
 
-fn strip_line_ending(value: &[u8]) -> &[u8] {
-    value
-        .strip_suffix(b"\r\n")
-        .or_else(|| value.strip_suffix(b"\n"))
-        .unwrap_or(value)
-}
-
 fn extraction_length_error(_: BoundedBytesError) -> HeaderEditError {
     HeaderEditError::ExtractedValueTooLong {
         limit: MAX_ASSIGNMENT_VALUE_LEN,
     }
 }
 
-fn make_field(name: &str, value: &str, line_ending: &[u8]) -> Result<Vec<u8>, HeaderEditError> {
+pub fn make_field(name: &str, value: &str, line_ending: &[u8]) -> Result<Vec<u8>, HeaderEditError> {
     serialize_generated_header(name, value, line_ending).map_err(|error| match error {
         GeneratedHeaderError::InvalidValue => HeaderEditError::InvalidGeneratedValue,
         GeneratedHeaderError::LineTooLong => HeaderEditError::GeneratedLineTooLong {

@@ -44,6 +44,10 @@ installation_root="$temporary_directory/image"
 make -C "$package_directory" install DESTDIR="$installation_root" PREFIX=/usr
 test -x "$installation_root/usr/bin/procmail-rs"
 test "$(stat -c %a "$installation_root/usr/bin/procmail-rs")" = 755
+test -x "$installation_root/usr/bin/formail-rs"
+test "$(stat -c %a "$installation_root/usr/bin/formail-rs")" = 755
+test -L "$installation_root/usr/bin/formail"
 test "$(stat -c %a "$installation_root/usr/share/man/man1/procmail-rs.1")" = 644
 test "$(stat -c %a "$installation_root/usr/share/man/man5/procmail-rs.rc.5")" = 644
 "$installation_root/usr/bin/procmail-rs" --version
+"$installation_root/usr/bin/formail-rs" -v

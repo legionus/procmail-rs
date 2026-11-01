@@ -33,6 +33,9 @@ install: build-release
 		'$(DESTDIR)$(MANDIR)/man5'
 	$(INSTALL) -m 0755 target/release/procmail-rs \
 		'$(DESTDIR)$(BINDIR)/procmail-rs'
+	$(INSTALL) -m 0755 target/release/formail-rs \
+		'$(DESTDIR)$(BINDIR)/formail-rs'
+	ln -sf formail-rs '$(DESTDIR)$(BINDIR)/formail'
 	$(INSTALL) -m 0644 man/procmail-rs.1 \
 		'$(DESTDIR)$(MANDIR)/man1/procmail-rs.1'
 	$(INSTALL) -m 0644 man/procmail-rs.rc.5 \

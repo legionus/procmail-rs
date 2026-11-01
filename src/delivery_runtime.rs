@@ -5,30 +5,104 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use procmail_rs::config::{
+use crate::command_runner::CommandRunner;
+use crate::config::{
     self, Destination, DestinationKind, MessageStatus, OutputEnding, RecipeOptions,
 };
-use procmail_rs::delivery::discard::DiscardSink;
-use procmail_rs::delivery::local_lock::LocalLock;
-use procmail_rs::delivery::maildir::{Durability, MaildirSink};
-use procmail_rs::delivery::mbox::MboxFile;
-use procmail_rs::delivery::staging::StagingFile;
-use procmail_rs::delivery::{
+use crate::delivery::discard::DiscardSink;
+use crate::delivery::local_lock::LocalLock;
+use crate::delivery::maildir::{Durability, MaildirSink};
+use crate::delivery::mbox::MboxFile;
+use crate::delivery::staging::StagingFile;
+use crate::delivery::{
     DeliveryFailure, DeliveryFailureClass, DeliveryOperation, PendingFanout, PendingSink,
 };
-use procmail_rs::eval::{
+use crate::eval::{
     CapturedCommand, CompletionState, DeliveryAttemptError, DeliveryPlan, ExecutionPlan,
     ExternalActionInput, FinalMessage, MappedMessageInput, MatchingMessage, OrderedExecutionError,
     OrderedExecutionHost, PlannedDelivery, RecipeLockGuard,
 };
-use procmail_rs::limits::{MAX_MESSAGE_SIZE, MessageLimits};
-use procmail_rs::runtime::{PublicationResult, RuntimeSettings, RuntimeVariables};
-use procmail_rs::trace::{
+use crate::limits::{MAX_MESSAGE_SIZE, MessageLimits};
+use crate::runtime::{PublicationResult, RuntimeSettings, RuntimeVariables};
+use crate::trace::{
     DeliveryStage, DestinationKind as TraceDestinationKind, FailureClass, TraceEvent, TraceSink,
 };
 
-use crate::command_runner::CommandRunner;
-use crate::{ExitStatus, OperationalError};
+#[derive(Debug)]
+pub enum OperationalError {
+    Delivery {
+        failure: DeliveryFailure,
+        message: String,
+    },
+    Configuration(String),
+    Input(String),
+    TemporaryDelivery(String),
+    PermanentDestination(String),
+    Undelivered(String),
+    Internal(String),
+    Signaled(crate::signal_state::ReceivedSignal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ExitStatus {
+    Success = 0,
+    Input = 65,
+    PermanentDestination = 73,
+    TemporaryDelivery = 75,
+    Configuration = 78,
+    Undelivered = 79,
+    Internal = 70,
+}
+
+impl std::fmt::Display for OperationalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::Delivery { message, .. } => message,
+            Self::Configuration(message)
+            | Self::Input(message)
+            | Self::TemporaryDelivery(message)
+            | Self::PermanentDestination(message)
+            | Self::Undelivered(message)
+            | Self::Internal(message) => message,
+            Self::Signaled(signal) => return write!(formatter, "interrupted by {}", signal.name()),
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for OperationalError {}
+
+impl OperationalError {
+    pub fn delivery_failure(failure: DeliveryFailure, message: String) -> Self {
+        Self::Delivery { failure, message }
+    }
+
+    pub fn delivery(class: DeliveryFailureClass, message: String) -> Self {
+        match class {
+            DeliveryFailureClass::Retryable => Self::TemporaryDelivery(message),
+            DeliveryFailureClass::Permanent => Self::PermanentDestination(message),
+            DeliveryFailureClass::Internal => Self::Internal(message),
+        }
+    }
+
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Delivery { failure, .. } => match failure.class {
+                DeliveryFailureClass::Retryable => ExitStatus::TemporaryDelivery as u8,
+                DeliveryFailureClass::Permanent => ExitStatus::PermanentDestination as u8,
+                DeliveryFailureClass::Internal => ExitStatus::Internal as u8,
+            },
+            Self::Configuration(_) => ExitStatus::Configuration as u8,
+            Self::Input(_) => ExitStatus::Input as u8,
+            Self::TemporaryDelivery(_) => ExitStatus::TemporaryDelivery as u8,
+            Self::PermanentDestination(_) => ExitStatus::PermanentDestination as u8,
+            Self::Undelivered(_) => ExitStatus::Undelivered as u8,
+            Self::Internal(_) => ExitStatus::Internal as u8,
+            Self::Signaled(signal) => signal.exit_code(),
+        }
+    }
+}
 
 mod execution;
 mod preparation;
@@ -41,7 +115,7 @@ use publication::{
     apply_publication, commit_delivery,
 };
 
-pub(super) struct DeliveryRuntime {
+pub struct DeliveryRuntime {
     staging_directory: Option<PathBuf>,
     durability: Durability,
     limits: MessageLimits,
@@ -64,14 +138,14 @@ impl<T> Clone for SharedTrace<'_, T> {
 }
 
 impl<T: TraceSink> TraceSink for SharedTrace<'_, T> {
-    fn detail(&self) -> procmail_rs::trace::TraceDetail {
+    fn detail(&self) -> crate::trace::TraceDetail {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .detail()
     }
 
-    fn record(&mut self, event: impl Into<procmail_rs::trace::TraceRecord>) {
+    fn record(&mut self, event: impl Into<crate::trace::TraceRecord>) {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -85,7 +159,7 @@ impl<T: TraceSink> TraceSink for SharedTrace<'_, T> {
             .set_verbose(enabled);
     }
 
-    fn set_log_abstract(&mut self, mode: procmail_rs::trace::LogAbstractMode) {
+    fn set_log_abstract(&mut self, mode: crate::trace::LogAbstractMode) {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -156,12 +230,12 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
 
     fn external_action(
         &mut self,
-        action: &procmail_rs::config::PipeAction,
+        action: &crate::config::PipeAction,
         options: RecipeOptions,
         lock: Option<&str>,
         input: ExternalActionInput<'_>,
         runtime: &mut RuntimeVariables,
-    ) -> Result<Option<procmail_rs::message::Message>, DeliveryAttemptError<Self::Error>> {
+    ) -> Result<Option<crate::message::Message>, DeliveryAttemptError<Self::Error>> {
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
         if self.dry_run && options.action_mode == config::ActionMode::Deliver {
             // A delivery pipe is intentionally not started, but later recipes
@@ -189,7 +263,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
     fn capture(
         &mut self,
         command: &str,
-        input: procmail_rs::message::MessageBytes<'_>,
+        input: crate::message::MessageBytes<'_>,
         output_ending: OutputEnding,
         options: Option<RecipeOptions>,
         limit: usize,
@@ -206,7 +280,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
     fn external_condition(
         &mut self,
         command: &str,
-        input: procmail_rs::message::MessageBytes<'_>,
+        input: crate::message::MessageBytes<'_>,
         runtime: &mut RuntimeVariables,
     ) -> Result<bool, DeliveryAttemptError<Self::Error>> {
         check_signal().map_err(DeliveryAttemptError::Fatal)?;
@@ -292,7 +366,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
         runtime: &mut RuntimeVariables,
         state: CompletionState<'_, Self::Error>,
     ) {
-        if procmail_rs::signal_state::received().is_some() {
+        if crate::signal_state::received().is_some() {
             return;
         }
         if self.dry_run {
@@ -304,7 +378,7 @@ impl<'a, T: TraceSink + Send> OrderedExecutionHost for OrderedDeliveryHost<'a, T
 }
 
 impl DeliveryRuntime {
-    pub(super) fn new(
+    pub fn new(
         staging_directory: Option<PathBuf>,
         durability: Durability,
         limits: MessageLimits,
@@ -322,9 +396,9 @@ impl DeliveryRuntime {
         }
     }
 
-    pub(super) fn deliver_decided(
+    pub fn deliver_decided(
         &mut self,
-        head: procmail_rs::message::MessageHead,
+        head: crate::message::MessageHead,
         reader: &mut impl io::BufRead,
         plan: &DeliveryPlan,
         runtime: &mut RuntimeVariables,
@@ -350,12 +424,12 @@ impl DeliveryRuntime {
         self.publications.finish()
     }
 
-    pub(super) fn deliver_staged<T: TraceSink + Send>(
+    pub fn deliver_staged<T: TraceSink + Send>(
         &mut self,
-        mut head: procmail_rs::message::MessageHead,
+        mut head: crate::message::MessageHead,
         reader: &mut impl io::BufRead,
         execution: &ExecutionPlan,
-        continuation: procmail_rs::eval::Continuation,
+        continuation: crate::eval::Continuation,
         runtime: &mut RuntimeVariables,
         trace: &mut T,
     ) -> Result<(), OperationalError> {
@@ -537,7 +611,7 @@ fn completion_exit_status(state: CompletionState<'_, OperationalError>) -> u8 {
 }
 
 fn check_signal() -> Result<(), OperationalError> {
-    match procmail_rs::signal_state::received() {
+    match crate::signal_state::received() {
         Some(signal) => Err(OperationalError::Signaled(signal)),
         None => Ok(()),
     }
@@ -629,7 +703,7 @@ fn acquire_configured_lock(
         .umask()
         .map_err(|error| OperationalError::PermanentDestination(error.to_string()))?;
     LocalLock::acquire(Path::new(path), method, uid, timeout, retry, mask).map_err(|error| {
-        if let Some(signal) = procmail_rs::signal_state::received() {
+        if let Some(signal) = crate::signal_state::received() {
             return OperationalError::Signaled(signal);
         }
         OperationalError::delivery(
@@ -642,8 +716,8 @@ fn acquire_configured_lock(
 fn stage_matching_message(
     directory: &Path,
     matching_header: &[u8],
-    staged: &procmail_rs::delivery::staging::StagedMessage,
-) -> Result<procmail_rs::delivery::staging::StagedMessage, OperationalError> {
+    staged: &crate::delivery::staging::StagedMessage,
+) -> Result<crate::delivery::staging::StagedMessage, OperationalError> {
     let mut matching = StagingFile::create(directory).map_err(|error| {
         OperationalError::TemporaryDelivery(format!(
             "cannot create private regex staging file: {error}"
@@ -699,7 +773,7 @@ fn report_indexed_failure(
 }
 
 fn report_stream_failure(
-    error: procmail_rs::delivery::StreamDeliveryError,
+    error: crate::delivery::StreamDeliveryError,
     deliveries: &[PlannedDelivery],
     trace: &mut impl TraceSink,
 ) -> OperationalError {
@@ -724,7 +798,7 @@ fn record_delivery(destination: &Destination, stage: DeliveryStage, trace: &mut 
     let path = trace
         .detail()
         .includes_variable_values()
-        .then(|| procmail_rs::trace::TraceValue::new(destination.path().as_bytes()));
+        .then(|| crate::trace::TraceValue::new(destination.path().as_bytes()));
     trace.record_at(
         destination.location(),
         TraceEvent::Delivery {
@@ -736,7 +810,7 @@ fn record_delivery(destination: &Destination, stage: DeliveryStage, trace: &mut 
     );
 }
 
-pub(super) fn validate_maildir_path(path: &Path) -> Result<(), String> {
+pub fn validate_maildir_path(path: &Path) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err("path is empty".into());
     }

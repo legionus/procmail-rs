@@ -9,7 +9,7 @@ pub(super) fn prepare_mbox(
     destination: &Destination,
     runtime: &RuntimeVariables,
     trace: &mut impl TraceSink,
-) -> Result<procmail_rs::delivery::mbox::LockedMbox, OperationalError> {
+) -> Result<crate::delivery::mbox::LockedMbox, OperationalError> {
     let path = Path::new(destination.path());
     let settings = RuntimeSettings::new(runtime);
     let lock_timeout = settings

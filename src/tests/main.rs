@@ -5,7 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{ExitStatus, OperationalError, load_root_config};
+use super::load_root_config;
+use procmail_rs::delivery_runtime::{ExitStatus, OperationalError};
 
 #[test]
 fn operational_errors_have_distinct_stable_exit_statuses() {

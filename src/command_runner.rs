@@ -6,25 +6,22 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use procmail_rs::config::{ActionInput, ActionMode, OutputEnding, RecipeOptions, WriteErrorMode};
-use procmail_rs::environment::{ProcessEnvironment, ShellPolicy};
-use procmail_rs::eval::{
-    CapturedCommand, DeliveryAttemptError, ExternalActionInput, RecipeLockGuard,
-};
-use procmail_rs::external_command::{
+use crate::command_log::{CommandLog, DiagnosticWriteError, TrapOutputError};
+use crate::config::{ActionInput, ActionMode, OutputEnding, RecipeOptions, WriteErrorMode};
+use crate::delivery_runtime::{ExitStatus, OperationalError};
+use crate::environment::{ProcessEnvironment, ShellPolicy};
+use crate::eval::{CapturedCommand, DeliveryAttemptError, ExternalActionInput, RecipeLockGuard};
+use crate::external_command::{
     ChildExit, CommandDecision, CommandOutcome, CommandOutcomePolicy, FilterOutput,
 };
-use procmail_rs::external_process::{
+use crate::external_process::{
     BackgroundProgramRun, CaptureOptions, CaptureRun, FilterOptions, FilterRun, ProgramOptions,
     ProgramRun, run_capture_with_timeout, run_filter, run_program_in_background,
     run_program_with_timeout, run_trap_with_timeout,
 };
-use procmail_rs::limits::MessageLimits;
-use procmail_rs::message::{Message, MessageBytes};
-use procmail_rs::runtime::{RuntimeSettings, RuntimeVariables};
-
-use super::{ExitStatus, OperationalError};
-use crate::command_log::{CommandLog, DiagnosticWriteError, TrapOutputError};
+use crate::limits::MessageLimits;
+use crate::message::{Message, MessageBytes};
+use crate::runtime::{RuntimeSettings, RuntimeVariables};
 
 pub const MAX_BACKGROUND_COMMANDS: usize = 128;
 
@@ -253,7 +250,7 @@ impl CommandRunner {
             return write_stdout(input.selected(), options, runtime);
         }
         if options.action_mode == ActionMode::Deliver
-            && options.child_status == procmail_rs::config::ChildStatusMode::Ignore
+            && options.child_status == crate::config::ChildStatusMode::Ignore
         {
             return self.start_unwaited_action(command, options, input.selected(), lock, runtime);
         }

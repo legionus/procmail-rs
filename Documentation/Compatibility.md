@@ -142,7 +142,8 @@ Detailed descriptions of procmail-rs-only syntax live outside this comparison:
 - [Extensions.md](Extensions.md) provides the overview;
 - [ShellExpressions.md](ShellExpressions.md) defines bounded rc expansion;
 - [HeaderEditing.md](HeaderEditing.md) describes the `headers { ... }` action;
-- [StructuredConditions.md](StructuredConditions.md) describes `address` and `identifier`.
+- [StructuredConditions.md](StructuredConditions.md) describes `address` and `identifier`;
+- [Formail.md](Formail.md) describes the `formail-rs` companion filter and header utility.
 
 The complete rc manual remains self-contained and includes both compatible and
 extended syntax.

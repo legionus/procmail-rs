@@ -71,7 +71,7 @@ fn filter_include_copy_and_error_recovery_preserve_parent_message() {
     fs::write(&child, ":0\n* ^Subject: \\/(filtered)$\nheaders {\n set X-Include $MATCH1\n}\n:0 cw\n{\n:0\nheaders {\n set X-Branch copy\n}\n:0\nmaildir:copy\n}\n").unwrap();
     fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
     fs::write(&path, format!(
-        "MAILDIR={}\n:0 fw\n| printf 'Subject: filtered\\n\\nbody\\n'\n:0 c\nmaildir:before\nINCLUDERC=child.rc\n:0 fw\n| printf 'Subject: rejected\\n\\nwrong\\n'; exit 7\n:0 e\nheaders {{\n set X-Status $?\n set X-Folder $LASTFOLDER\n}}\n:0\n* ^X-Status: 7$\n* ^X-Include: filtered$\nmaildir:parent\n:0\nmaildir:unexpected\n",
+        "MAILDIR={}\n:0 fwi\n| printf 'Subject: filtered\\n\\nbody\\n'\n:0 c\nmaildir:before\nINCLUDERC=child.rc\n:0 fw\n| printf 'Subject: rejected\\n\\nwrong\\n'; exit 7\n:0 e\nheaders {{\n set X-Status $?\n set X-Folder $LASTFOLDER\n}}\n:0\n* ^X-Status: 7$\n* ^X-Include: filtered$\nmaildir:parent\n:0\nmaildir:unexpected\n",
         base.display()
     )).unwrap();
     let output = filter(&path, b"Subject: original\n\noriginal body\n");

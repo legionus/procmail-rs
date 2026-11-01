@@ -7,19 +7,17 @@ use super::{
     OperationalError, PublicationAttempt, PublicationDestinations, PublicationTracker,
     apply_publication, derive_implicit_lockfile_path, report_stream_failure,
 };
-use procmail_rs::config::{self, Destination};
-use procmail_rs::delivery::{DeliveryFailure, DeliveryOperation, PublishedDelivery};
-use procmail_rs::runtime::{PublicationResult, RuntimeVariables};
-use procmail_rs::trace::{
+use crate::config::{self, Destination};
+use crate::delivery::{DeliveryFailure, DeliveryOperation, PublishedDelivery};
+use crate::runtime::{PublicationResult, RuntimeVariables};
+use crate::trace::{
     DeliveryStage, DestinationKind as TraceDestinationKind, MemoryTrace, TraceEvent,
 };
 
-fn two_destination_plan() -> procmail_rs::eval::DeliveryPlan {
-    use procmail_rs::eval::{
-        CapturedCommand, DeliveryAttemptError, ExecutionPlan, HeaderEvaluation,
-    };
-    use procmail_rs::limits::MessageLimits;
-    use procmail_rs::message::Message;
+fn two_destination_plan() -> crate::eval::DeliveryPlan {
+    use crate::eval::{CapturedCommand, DeliveryAttemptError, ExecutionPlan, HeaderEvaluation};
+    use crate::limits::MessageLimits;
+    use crate::message::Message;
 
     let config = config::parse(":0c\nmaildir:/first\n:0\nmaildir:/second\n")
         .unwrap()
@@ -99,10 +97,8 @@ impl std::io::Write for WriteFailureSink {
     }
 }
 
-impl procmail_rs::delivery::PendingSink for WriteFailureSink {
-    fn commit(
-        self: Box<Self>,
-    ) -> Result<PublishedDelivery, procmail_rs::delivery::SinkCommitError> {
+impl crate::delivery::PendingSink for WriteFailureSink {
+    fn commit(self: Box<Self>) -> Result<PublishedDelivery, crate::delivery::SinkCommitError> {
         panic!("failed streaming must not commit")
     }
 
@@ -113,9 +109,9 @@ impl procmail_rs::delivery::PendingSink for WriteFailureSink {
 
 #[test]
 fn streaming_write_failure_keeps_delivery_status_and_sink_location() {
-    use procmail_rs::delivery::PendingFanout;
-    use procmail_rs::limits::MessageLimits;
-    use procmail_rs::message::Message;
+    use crate::delivery::PendingFanout;
+    use crate::limits::MessageLimits;
+    use crate::message::Message;
 
     let plan = two_destination_plan();
     let mut reader =

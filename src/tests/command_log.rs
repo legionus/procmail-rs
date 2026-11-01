@@ -4,7 +4,7 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use procmail_rs::runtime::RuntimeVariables;
+use crate::runtime::RuntimeVariables;
 
 use super::CommandLog;
 

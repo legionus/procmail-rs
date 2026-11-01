@@ -10,7 +10,7 @@ use crate::limits::MessageLimits;
 use crate::message::MessageLimit;
 
 #[derive(Debug, Clone)]
-pub(crate) struct EditedHeader {
+pub struct EditedHeader {
     pub(super) storage: Arc<HeaderStorage>,
     pub(super) limits: MessageLimits,
 }
@@ -54,7 +54,7 @@ impl PartialEq for EditedHeader {
 impl Eq for EditedHeader {}
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum HeaderView<'a> {
+pub enum HeaderView<'a> {
     Raw(&'a [u8]),
     Indexed(&'a EditedHeader),
 }
@@ -135,6 +135,199 @@ impl<'a> Iterator for HeaderFields<'a> {
 }
 
 impl EditedHeader {
+    pub fn new<'a>(
+        source: impl Into<HeaderView<'a>>,
+        limits: MessageLimits,
+    ) -> Result<Self, HeaderEditError> {
+        let source = source.into();
+        let header = match source {
+            HeaderView::Indexed(header) => {
+                let mut cloned = header.clone();
+                cloned.limits = limits;
+                cloned
+            }
+            HeaderView::Raw(bytes) => {
+                let (fields, separator, line_ending) = split_fields(bytes);
+                let store = HeaderStore::new(&fields, limits.headers_size.max(bytes.len()))?;
+                EditedHeader {
+                    storage: Arc::new(HeaderStorage {
+                        store,
+                        separator: separator.to_vec(),
+                        line_ending,
+                        size: bytes.len(),
+                        status: MessageStatus::NONE,
+                        raw: OnceLock::new(),
+                        matching: OnceLock::new(),
+                    }),
+                    limits,
+                }
+            }
+        };
+        Ok(header)
+    }
+
+    pub fn field_count(&self) -> usize {
+        self.storage.store.fields.len()
+    }
+
+    pub fn field(&self, index: usize) -> Field<'_> {
+        self.storage.store.field(index)
+    }
+
+    pub fn has_matching_pattern(&self, pattern: &[u8]) -> bool {
+        self.storage.store.has_matching_pattern(pattern)
+    }
+
+    pub fn remove_matching(&mut self, name: &str) {
+        if (0..self.storage.store.fields.len())
+            .any(|index| self.storage.store.matches(index, name.as_bytes()))
+        {
+            self.store_mut().remove_matching(name.as_bytes());
+        }
+    }
+
+    pub fn remove_matching_pattern(&mut self, pattern: &[u8]) {
+        self.store_mut().remove_matching_pattern(pattern);
+    }
+
+    pub fn rename_matching_pattern(
+        &mut self,
+        from_pattern: &[u8],
+        to_pattern: &[u8],
+    ) -> Result<(), HeaderEditError> {
+        self.store_mut()
+            .rename_matching_pattern(from_pattern, to_pattern)
+    }
+
+    pub fn prepend_prefix_to_matching(
+        &mut self,
+        pattern: &[u8],
+        prefix: &[u8],
+    ) -> Result<(), HeaderEditError> {
+        self.store_mut().prepend_prefix_to_matching(pattern, prefix)
+    }
+
+    pub fn make_unique_first(&mut self, pattern: &[u8]) {
+        self.store_mut().make_unique_first(pattern);
+    }
+
+    pub fn make_unique_last(&mut self, pattern: &[u8]) {
+        self.store_mut().make_unique_last(pattern);
+    }
+
+    pub fn add_raw_field(&mut self, raw: &[u8]) -> Result<(), HeaderEditError> {
+        let line_ending = self.storage.line_ending;
+        let mut bytes = raw.to_vec();
+        if !bytes.ends_with(b"\n") {
+            bytes.extend_from_slice(line_ending);
+        }
+        let pos = self.storage.store.fields.len();
+        self.store_mut().insert(pos, &bytes)
+    }
+
+    pub fn concatenate_continued_fields(&mut self) -> Result<(), HeaderEditError> {
+        self.store_mut().concatenate_continued()
+    }
+
+    pub fn zap_whitespace(&mut self) -> Result<(), HeaderEditError> {
+        self.store_mut().zap_whitespace()
+    }
+
+    pub fn extract_fields(
+        &self,
+        pattern: &[u8],
+        include_name: bool,
+        concatenate: bool,
+        zap: bool,
+    ) -> Vec<Vec<u8>> {
+        let store = &self.storage.store;
+        let mut results = Vec::new();
+
+        for i in 0..store.fields.len() {
+            let field = store.field(i);
+            if field_matches_pattern(field, pattern) {
+                let mut bytes = if include_name {
+                    if concatenate {
+                        unfold_field_bytes(field.bytes)
+                    } else {
+                        field.bytes.to_vec()
+                    }
+                } else {
+                    let val = field.value().unwrap_or_default();
+                    if concatenate {
+                        unfold_field_bytes(val)
+                    } else {
+                        val.to_vec()
+                    }
+                };
+
+                if zap && !include_name {
+                    let stripped = strip_line_ending(&bytes);
+                    let start = stripped
+                        .iter()
+                        .position(|b| *b != b' ' && *b != b'\t')
+                        .unwrap_or(stripped.len());
+                    let end = stripped
+                        .iter()
+                        .rposition(|b| *b != b' ' && *b != b'\t')
+                        .map_or(0, |idx| idx + 1);
+                    if start < end {
+                        let mut trimmed = stripped[start..end].to_vec();
+                        trimmed.push(b'\n');
+                        bytes = trimmed;
+                    } else {
+                        bytes = vec![b'\n'];
+                    }
+                } else if !bytes.ends_with(b"\n") {
+                    bytes.push(b'\n');
+                }
+                results.push(bytes);
+            }
+        }
+        results
+    }
+
+    pub fn finish(&mut self, body_len: usize) -> Result<(), HeaderEditError> {
+        let line_ending = self.storage.line_ending;
+        let size = serialized_size(&self.storage.store, &self.storage.separator, line_ending)?;
+
+        if let Some(storage) = Arc::get_mut(&mut self.storage) {
+            storage.size = size;
+        }
+
+        self.validate(body_len, self.limits)?;
+
+        let store = &self.storage.store;
+        let needs_reindex = (1..store.fields.len()).any(|index| {
+            matches!(store.field(index).bytes.first(), Some(b' ' | b'\t'))
+                || !store.field(index - 1).bytes.ends_with(b"\n")
+        });
+
+        if needs_reindex {
+            let status = self.status();
+            let bytes = self.as_bytes();
+            let (fields, separator, line_ending) = split_fields(bytes);
+            let store = HeaderStore::new(&fields, self.limits.headers_size)?;
+            self.storage = Arc::new(HeaderStorage {
+                store,
+                separator: separator.to_vec(),
+                line_ending,
+                size,
+                status,
+                raw: OnceLock::new(),
+                matching: OnceLock::new(),
+            });
+        }
+
+        let line_ending = preferred_line_ending(self.parts());
+
+        if let Some(storage) = Arc::get_mut(&mut self.storage) {
+            storage.line_ending = line_ending;
+        }
+
+        Ok(())
+    }
+
     pub(super) fn store_mut(&mut self) -> &mut HeaderStore {
         // Lowering an active limit may leave accepted input above it. Removal
         // may repair that input, but subsequent growth never gets a larger
@@ -144,7 +337,7 @@ impl EditedHeader {
         storage.store.ceiling = ceiling;
         &mut storage.store
     }
-    pub(crate) fn as_bytes(&self) -> &[u8] {
+    pub fn as_bytes(&self) -> &[u8] {
         self.storage.raw.get_or_init(|| {
             let mut bytes = Vec::with_capacity(self.len());
 
@@ -156,11 +349,15 @@ impl EditedHeader {
         })
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.storage.size
     }
 
-    pub(crate) fn status(&self) -> MessageStatus {
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn status(&self) -> MessageStatus {
         self.storage.status
     }
 
@@ -178,26 +375,22 @@ impl EditedHeader {
         )
     }
 
-    pub(crate) fn matching_header(&self) -> &[u8] {
+    pub fn matching_header(&self) -> &[u8] {
         self.normalized().unwrap_or_else(|| self.as_bytes())
     }
 
-    pub(crate) fn normalized(&self) -> Option<&[u8]> {
+    pub fn normalized(&self) -> Option<&[u8]> {
         self.storage
             .matching
             .get_or_init(|| crate::message::normalize_folded_header(self.as_bytes()))
             .as_deref()
     }
 
-    pub(crate) fn validate(
-        &self,
-        body_len: usize,
-        limits: MessageLimits,
-    ) -> Result<(), HeaderEditError> {
+    pub fn validate(&self, body_len: usize, limits: MessageLimits) -> Result<(), HeaderEditError> {
         validate_header_parts(self.parts(), self.len(), body_len, limits)
     }
 
-    pub(crate) fn into_streaming_bytes(self) -> Vec<u8> {
+    pub fn into_streaming_bytes(self) -> Vec<u8> {
         match Arc::try_unwrap(self.storage) {
             Ok(storage) => storage.raw.into_inner().unwrap_or_else(|| {
                 header_parts(&storage.store, &storage.separator, storage.line_ending)
@@ -215,14 +408,14 @@ impl EditedHeader {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct Field<'a> {
-    pub(crate) bytes: &'a [u8],
-    pub(crate) name: Option<&'a [u8]>,
+#[derive(Debug, Clone, Copy)]
+pub struct Field<'a> {
+    pub bytes: &'a [u8],
+    pub name: Option<&'a [u8]>,
 }
 
 impl<'a> Field<'a> {
-    pub(crate) fn value(&self) -> Option<&'a [u8]> {
+    pub fn value(&self) -> Option<&'a [u8]> {
         let start = self.name?.len().checked_add(1)?;
         self.bytes.get(start..)
     }
@@ -235,7 +428,7 @@ pub(super) struct HeaderField {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct HeaderStore {
+pub(crate) struct HeaderStore {
     pub(super) bytes: Vec<u8>,
     pub(super) fields: Vec<HeaderField>,
     pub(super) free: Vec<Range<usize>>,
@@ -301,6 +494,181 @@ impl HeaderStore {
             !matches
         });
         self.coalesce_free();
+    }
+
+    pub(super) fn has_matching_pattern(&self, pattern: &[u8]) -> bool {
+        (0..self.fields.len()).any(|index| field_matches_pattern(self.field(index), pattern))
+    }
+
+    pub(super) fn remove_matching_pattern(&mut self, pattern: &[u8]) {
+        let bytes = &self.bytes;
+        let free = &mut self.free;
+
+        self.fields.retain(|field| {
+            let f = Field {
+                bytes: &bytes[field.raw.clone()],
+                name: field.name.as_ref().map(|range| &bytes[range.clone()]),
+            };
+            let matches = field_matches_pattern(f, pattern);
+            if matches {
+                free.push(field.raw.clone());
+            }
+            !matches
+        });
+        self.coalesce_free();
+    }
+
+    pub(super) fn make_unique_first(&mut self, pattern: &[u8]) {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let bytes = &self.bytes;
+        let free = &mut self.free;
+
+        self.fields.retain(|field| {
+            let f = Field {
+                bytes: &bytes[field.raw.clone()],
+                name: field.name.as_ref().map(|range| &bytes[range.clone()]),
+            };
+            if field_matches_pattern(f, pattern) {
+                let name_key = if let Some(name) = f.name {
+                    name.to_ascii_lowercase()
+                } else {
+                    b"from ".to_vec()
+                };
+                if seen.iter().any(|s| s == &name_key) {
+                    free.push(field.raw.clone());
+                    return false;
+                }
+                seen.push(name_key);
+            }
+            true
+        });
+        self.coalesce_free();
+    }
+
+    pub(super) fn make_unique_last(&mut self, pattern: &[u8]) {
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let mut retain_indices = Vec::with_capacity(self.fields.len());
+        for (idx, field) in self.fields.iter().enumerate().rev() {
+            let f = Field {
+                bytes: &self.bytes[field.raw.clone()],
+                name: field.name.as_ref().map(|range| &self.bytes[range.clone()]),
+            };
+            if field_matches_pattern(f, pattern) {
+                let name_key = if let Some(name) = f.name {
+                    name.to_ascii_lowercase()
+                } else {
+                    b"from ".to_vec()
+                };
+                if seen.iter().any(|s| s == &name_key) {
+                    continue;
+                }
+                seen.push(name_key);
+            }
+            retain_indices.push(idx);
+        }
+        retain_indices.sort_unstable();
+
+        let mut current_idx = 0;
+        let free = &mut self.free;
+        self.fields.retain(|field| {
+            let keep = retain_indices.binary_search(&current_idx).is_ok();
+            if !keep {
+                free.push(field.raw.clone());
+            }
+            current_idx += 1;
+            keep
+        });
+        self.coalesce_free();
+    }
+
+    pub(super) fn rename_matching_pattern(
+        &mut self,
+        from_pattern: &[u8],
+        to_pattern: &[u8],
+    ) -> Result<(), HeaderEditError> {
+        let mut i = 0;
+        while i < self.fields.len() {
+            let field = self.field(i);
+            if field_matches_pattern(field, from_pattern) {
+                if let Some(replacement) = rename_field_pattern(field, from_pattern, to_pattern)? {
+                    if field.bytes != replacement.as_slice() {
+                        self.remove(i);
+                        self.insert(i, &replacement)?;
+                    }
+                }
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
+    pub(super) fn prepend_prefix_to_matching(
+        &mut self,
+        pattern: &[u8],
+        prefix: &[u8],
+    ) -> Result<(), HeaderEditError> {
+        let mut i = 0;
+        while i < self.fields.len() {
+            let field = self.field(i);
+            if field_matches_pattern(field, pattern) && field.name.is_some() {
+                let mut replacement = Vec::with_capacity(prefix.len() + field.bytes.len());
+                replacement.extend_from_slice(prefix);
+                replacement.extend_from_slice(field.bytes);
+                self.remove(i);
+                self.insert(i, &replacement)?;
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
+    pub(super) fn concatenate_continued(&mut self) -> Result<(), HeaderEditError> {
+        let mut i = 0;
+        while i < self.fields.len() {
+            let field = self.field(i);
+            if !field.bytes.starts_with(b"From ") {
+                let unfolded = unfold_field_bytes(field.bytes);
+                if unfolded != field.bytes {
+                    self.remove(i);
+                    self.insert(i, &unfolded)?;
+                }
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
+    pub(super) fn zap_whitespace(&mut self) -> Result<(), HeaderEditError> {
+        let mut i = 0;
+        while i < self.fields.len() {
+            let field = self.field(i);
+            if let Some(name) = field.name {
+                let after_colon = &field.bytes[name.len() + 1..];
+                let trimmed_ending = strip_line_ending(after_colon);
+                if trimmed_ending.len() == 1
+                    && (trimmed_ending[0] == b' ' || trimmed_ending[0] == b'\t')
+                {
+                    self.remove(i);
+                    continue;
+                }
+                if !after_colon.is_empty()
+                    && after_colon[0] != b' '
+                    && after_colon[0] != b'\t'
+                    && after_colon[0] != b'\r'
+                    && after_colon[0] != b'\n'
+                {
+                    let mut replacement = Vec::with_capacity(field.bytes.len() + 1);
+                    replacement.extend_from_slice(name);
+                    replacement.push(b':');
+                    replacement.push(b' ');
+                    replacement.extend_from_slice(after_colon);
+                    self.remove(i);
+                    self.insert(i, &replacement)?;
+                }
+            }
+            i += 1;
+        }
+        Ok(())
     }
 
     pub(super) fn coalesce_free(&mut self) {
@@ -592,7 +960,7 @@ pub(super) fn preferred_line_ending<'a>(parts: impl Iterator<Item = &'a [u8]>) -
     b"\n"
 }
 
-pub(super) fn split_fields(header: &[u8]) -> (Vec<Field<'_>>, &[u8], &'static [u8]) {
+pub(crate) fn split_fields(header: &[u8]) -> (Vec<Field<'_>>, &[u8], &'static [u8]) {
     let separator_start = header_separator_start(header).unwrap_or(header.len());
     let content = &header[..separator_start];
     let separator = &header[separator_start..];
@@ -626,4 +994,87 @@ pub(super) fn header_separator_start(header: &[u8]) -> Option<usize> {
         line_start = line_end;
     }
     None
+}
+
+pub fn strip_line_ending(value: &[u8]) -> &[u8] {
+    value
+        .strip_suffix(b"\r\n")
+        .or_else(|| value.strip_suffix(b"\n"))
+        .unwrap_or(value)
+}
+
+pub fn field_matches_pattern(field: Field<'_>, pattern: &[u8]) -> bool {
+    if let Some(name) = field.name {
+        if let Some(target) = pattern.strip_suffix(b":") {
+            name.eq_ignore_ascii_case(target)
+        } else {
+            name.len() >= pattern.len() && name[..pattern.len()].eq_ignore_ascii_case(pattern)
+        }
+    } else if field.bytes.starts_with(b"From ") {
+        pattern == b"From " || pattern == b"From" || pattern == b"From:"
+    } else {
+        false
+    }
+}
+
+fn rename_field_pattern(
+    field: Field<'_>,
+    from_pattern: &[u8],
+    to_pattern: &[u8],
+) -> Result<Option<Vec<u8>>, HeaderEditError> {
+    let Some(name) = field.name else {
+        return Ok(None);
+    };
+    let to_clean = to_pattern.strip_suffix(b":").unwrap_or(to_pattern);
+    let mut renamed_name = Vec::new();
+
+    if let Some(from_clean) = from_pattern.strip_suffix(b":") {
+        if name.eq_ignore_ascii_case(from_clean) {
+            renamed_name.extend_from_slice(to_clean);
+        } else {
+            return Ok(None);
+        }
+    } else if name.len() >= from_pattern.len()
+        && name[..from_pattern.len()].eq_ignore_ascii_case(from_pattern)
+    {
+        renamed_name.extend_from_slice(to_clean);
+        renamed_name.extend_from_slice(&name[from_pattern.len()..]);
+    } else {
+        return Ok(None);
+    }
+
+    let suffix = &field.bytes[name.len()..];
+    let mut result = Vec::with_capacity(renamed_name.len() + suffix.len());
+    result.extend_from_slice(&renamed_name);
+    result.extend_from_slice(suffix);
+    Ok(Some(result))
+}
+
+pub fn unfold_field_bytes(raw: &[u8]) -> Vec<u8> {
+    if !raw
+        .windows(2)
+        .any(|w| w[0] == b'\n' && (w[1] == b' ' || w[1] == b'\t'))
+    {
+        return raw.to_vec();
+    }
+    let mut normalized = Vec::with_capacity(raw.len());
+    let mut copied = 0usize;
+    let mut scanned = 0usize;
+
+    while let Some(offset) = raw[scanned..].iter().position(|byte| *byte == b'\n') {
+        let newline = scanned + offset;
+        scanned = newline + 1;
+        if matches!(raw.get(scanned), Some(b' ' | b'\t')) {
+            let line_ending_start = if newline > copied && raw.get(newline - 1) == Some(&b'\r') {
+                newline - 1
+            } else {
+                newline
+            };
+            normalized.extend_from_slice(&raw[copied..line_ending_start]);
+            normalized.push(b' ');
+            copied = scanned;
+        }
+    }
+    normalized.extend_from_slice(&raw[copied..]);
+    normalized
 }
