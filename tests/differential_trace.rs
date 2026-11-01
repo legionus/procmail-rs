@@ -89,6 +89,7 @@ fn condition_kind(kind: ConditionKind) -> &'static str {
         ConditionKind::Address => "address",
         ConditionKind::Identifier => "identifier",
         ConditionKind::Keyword => "keyword",
+        ConditionKind::Multipart => "multipart",
         ConditionKind::Program => "program",
         ConditionKind::SmallerThan => "smaller-than",
         ConditionKind::LargerThan => "larger-than",

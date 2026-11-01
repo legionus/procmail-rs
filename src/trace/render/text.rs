@@ -272,6 +272,7 @@ fn human_condition_kind(kind: ConditionKind) -> &'static str {
         ConditionKind::Address => "address regular expression",
         ConditionKind::Identifier => "identifier regular expression",
         ConditionKind::Keyword => "keyword regular expression",
+        ConditionKind::Multipart => "multipart part regular expression",
         ConditionKind::Program => "external program",
         ConditionKind::SmallerThan => "message size is smaller than",
         ConditionKind::LargerThan => "message size is larger than",

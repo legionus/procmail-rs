@@ -661,6 +661,7 @@ fn explanation_condition_name(condition: ConditionKindExplanation) -> &'static s
         ConditionKindExplanation::Address => "address",
         ConditionKindExplanation::Identifier => "identifier",
         ConditionKindExplanation::Keyword => "keyword",
+        ConditionKindExplanation::Multipart => "multipart",
         ConditionKindExplanation::Program => "program",
         ConditionKindExplanation::SmallerThan => "smaller-than",
         ConditionKindExplanation::LargerThan => "larger-than",

@@ -61,17 +61,25 @@ impl ExecutionPlan {
     }
 
     pub fn evaluate_full(&self, message: &Message) -> Result<DeliveryPlan, EvalError> {
+        self.evaluate_full_with_runtime(message, &mut RuntimeVariables::default())
+    }
+
+    pub fn evaluate_full_with_runtime(
+        &self,
+        message: &Message,
+        runtime: &mut RuntimeVariables,
+    ) -> Result<DeliveryPlan, EvalError> {
         let continuation = Continuation {
             frames: Vec::new(),
             execution: FanoutPlanState::default(),
-            runtime: RuntimeVariables::default(),
+            runtime: runtime.clone(),
             requirements: self.requirements(),
             restart: true,
         };
         self.resume_input(
             continuation,
             ResumeInput::Buffered(message),
-            &mut RuntimeVariables::default(),
+            runtime,
             &mut NoTrace,
         )
     }

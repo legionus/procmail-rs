@@ -16,9 +16,10 @@ use super::{
     MAX_ASSIGNMENT_NAME_LEN, MAX_ASSIGNMENT_VALUE_LEN, MAX_HEADER_OPERATIONS_PER_ACTION,
     MAX_PATH_EXPRESSION_LEN, MAX_PIPE_COMMAND_LEN, MAX_RC_SIZE, MAX_REGEX_AST_NESTING,
     MAX_REGEX_CAPTURES, MAX_REGEX_COMPILED_SIZE, MAX_REGEX_MATCH_MARKERS, MAX_REGEX_PATTERN_LEN,
-    OutputEnding, ParseBudget, ParseError, PathExpression, PipeAction, RcFileExpression, RcLimits,
-    RcParseCounts, Recipe, RecipeAction, RecipeOptions, RegexCondition, ShellExpression, Statement,
-    Unset, VariablePolicy, VariableSource, WriteErrorMode, variable_policy,
+    MultipartCheck, MultipartField, OutputEnding, ParseBudget, ParseError, PathExpression,
+    PipeAction, RcFileExpression, RcLimits, RcParseCounts, Recipe, RecipeAction, RecipeOptions,
+    RegexCondition, ShellExpression, Statement, Unset, VariablePolicy, VariableSource,
+    WriteErrorMode, variable_policy,
 };
 
 #[cfg(test)]
@@ -572,6 +573,20 @@ fn parse_recipe(
             // budgets are separate because either shape can make later plan
             // construction disproportionately expensive.
             state.check_condition(conditions.len(), index + 1)?;
+            if let Some(negated) = is_multipart_block_start(line) {
+                let (condition, new_regexes, next) = parse_multipart_block(
+                    lines,
+                    index,
+                    negated,
+                    options.case_mode == CaseMode::Sensitive,
+                    regex_count,
+                    state,
+                )?;
+                conditions.push(condition);
+                regex_count = new_regexes;
+                index = next;
+                continue;
+            }
             let (source, next) = parse_condition_continuation(lines, index, state.linebuf())?;
             let (condition, is_regex) = parse_condition(
                 &source,
@@ -1495,6 +1510,19 @@ fn parse_condition(
         ));
     }
 
+    if let Some((kind, is_regex)) =
+        parse_single_line_multipart(input, line, case_sensitive, recipe_regexes, budget)?
+    {
+        return Ok((
+            Condition {
+                line,
+                negated,
+                kind,
+            },
+            is_regex,
+        ));
+    }
+
     let (kind, is_regex) = if let Some(source) = input.strip_prefix('$') {
         (
             ConditionKind::ShellExpanded(super::ShellExpandedCondition {
@@ -2169,6 +2197,173 @@ fn structured_condition_target(
         )));
     }
     Ok(None)
+}
+
+fn is_multipart_block_start(input: &str) -> Option<bool> {
+    let mut rest = input.trim_start().strip_prefix('*')?;
+    let mut negated = false;
+    loop {
+        rest = rest.trim_start();
+        if let Some(stripped) = rest.strip_prefix('!') {
+            negated = !negated;
+            rest = stripped;
+        } else {
+            break;
+        }
+    }
+    let rest = rest.trim();
+    let after_kw = rest.strip_prefix("multipart")?;
+    if !after_kw.starts_with(char::is_whitespace) && !after_kw.starts_with('{') {
+        return None;
+    }
+    let after_kw = after_kw.trim_start();
+    let after_brace = after_kw.strip_prefix('{')?;
+    let after_brace = after_brace.trim();
+    if after_brace.is_empty() || after_brace.starts_with('#') {
+        Some(negated)
+    } else {
+        None
+    }
+}
+
+fn parse_multipart_block(
+    lines: &[&str],
+    opening: usize,
+    negated: bool,
+    case_sensitive: bool,
+    mut recipe_regexes: usize,
+    state: &mut ParseBudget,
+) -> Result<(Condition, usize, usize), ParseError> {
+    let mut checks = Vec::new();
+    let mut index = opening + 1;
+    while let Some(raw) = lines.get(index) {
+        state.check_line(raw, index + 1)?;
+        let text = raw.trim();
+        if text.is_empty() || text.starts_with('#') {
+            index += 1;
+            continue;
+        }
+        if text == "}" {
+            if checks.is_empty() {
+                return Err(ParseError::new(
+                    opening + 1,
+                    "multipart condition block cannot be empty",
+                ));
+            }
+            return Ok((
+                Condition {
+                    line: opening + 1,
+                    negated,
+                    kind: ConditionKind::Multipart { checks },
+                },
+                recipe_regexes,
+                index + 1,
+            ));
+        }
+        let check = parse_multipart_check(text, index + 1, case_sensitive, state, recipe_regexes)?;
+        if checks
+            .iter()
+            .any(|c: &MultipartCheck| c.field == check.field)
+        {
+            return Err(ParseError::new(
+                index + 1,
+                format!(
+                    "multipart condition repeats selector '{}'",
+                    check.field.name()
+                ),
+            ));
+        }
+        checks.push(check);
+        recipe_regexes = recipe_regexes
+            .checked_add(1)
+            .ok_or_else(|| ParseError::new(index + 1, "recipe regex count overflows"))?;
+        index += 1;
+    }
+    Err(ParseError::new(
+        opening + 1,
+        "multipart condition block has no closing '}'",
+    ))
+}
+
+fn parse_single_line_multipart(
+    input: &str,
+    line: usize,
+    case_sensitive: bool,
+    recipe_regexes: usize,
+    budget: &ParseBudget,
+) -> Result<Option<(ConditionKind, bool)>, ParseError> {
+    let Some(rest) = input.strip_prefix("multipart") else {
+        return Ok(None);
+    };
+    if !rest.starts_with(char::is_whitespace) && !rest.starts_with('{') {
+        return Ok(None);
+    }
+    let rest = rest.trim_start();
+    if rest.is_empty() || rest.starts_with("??") {
+        return Ok(None);
+    }
+    if let Some(after_brace) = rest.strip_prefix('{') {
+        let inner = after_brace.trim();
+        let inner = inner
+            .strip_suffix('}')
+            .ok_or_else(|| ParseError::new(line, "multipart condition block has no closing '}'"))?
+            .trim();
+        if inner.is_empty() {
+            return Err(ParseError::new(
+                line,
+                "multipart condition block cannot be empty",
+            ));
+        }
+        let check = parse_multipart_check(inner, line, case_sensitive, budget, recipe_regexes)?;
+        return Ok(Some((
+            ConditionKind::Multipart {
+                checks: vec![check],
+            },
+            true,
+        )));
+    }
+    let check = parse_multipart_check(rest, line, case_sensitive, budget, recipe_regexes)?;
+    Ok(Some((
+        ConditionKind::Multipart {
+            checks: vec![check],
+        },
+        true,
+    )))
+}
+
+fn parse_multipart_check(
+    input: &str,
+    line: usize,
+    case_sensitive: bool,
+    budget: &ParseBudget,
+    recipe_regexes: usize,
+) -> Result<MultipartCheck, ParseError> {
+    let (field_text, pattern) = input.split_once("??").ok_or_else(|| {
+        ParseError::new(line, "multipart condition requires <selector> ?? <regex>")
+    })?;
+    let mut field_text = field_text.trim();
+    if let Some(rest) = field_text.strip_prefix("multipart") {
+        if rest.starts_with(char::is_whitespace) {
+            field_text = rest.trim_start();
+        }
+    }
+    let field = match field_text.to_ascii_lowercase().as_str() {
+        "%mimetype" | "mimetype" | "%mime-type" | "mime-type" | "%content-type"
+        | "content-type" => MultipartField::MimeType,
+        "%disposition" | "disposition" | "%content-disposition" | "content-disposition" => {
+            MultipartField::Disposition
+        }
+        "%filename" | "filename" | "%name" | "name" => MultipartField::Filename,
+        _ => {
+            return Err(ParseError::new(
+                line,
+                format!("multipart condition does not support selector '{field_text}'"),
+            ));
+        }
+    };
+    budget.check_regex(recipe_regexes, line)?;
+    let regex = compile_condition_regex(pattern.trim_start(), line, case_sensitive)?;
+    Ok(MultipartCheck { field, regex })
 }
 
 fn condition_regex_target(

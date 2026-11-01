@@ -709,6 +709,9 @@ pub enum ConditionKind {
         fields: Vec<KeywordField>,
         regex: RegexCondition,
     },
+    Multipart {
+        checks: Vec<MultipartCheck>,
+    },
     Program(String),
     SmallerThan(usize),
     LargerThan(usize),
@@ -808,6 +811,29 @@ impl KeywordField {
             Self::XKeywords => "X-Keywords",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultipartField {
+    MimeType,
+    Disposition,
+    Filename,
+}
+
+impl MultipartField {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::MimeType => "%mimetype",
+            Self::Disposition => "%disposition",
+            Self::Filename => "%filename",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartCheck {
+    pub field: MultipartField,
+    pub regex: RegexCondition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

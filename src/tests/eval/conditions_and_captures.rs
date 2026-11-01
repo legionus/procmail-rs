@@ -200,6 +200,109 @@ fn thread_identifier_conditions_match_root_and_replies_with_captures() {
 }
 
 #[test]
+fn multipart_conditions_match_single_and_multipart_messages_with_captures() {
+    let source = "\
+:0
+* multipart %mimetype ?? ^text/calendar$
+* multipart %filename ?? ^([a-z]+)\\.ics$
+maildir:calendar
+";
+    let config = config::parse(source).unwrap().expand(&[]).unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+    assert!(plan.requirements().needs_headers);
+    assert!(plan.requirements().needs_body_contents);
+
+    let raw_single = b"Content-Type: text/calendar; name=\"meeting.ics\"\r\n\
+Content-Disposition: inline; filename=\"meeting.ics\"\r\n\r\n\
+BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+    let msg_single = Message::from_bytes(raw_single.to_vec());
+    let mut runtime = RuntimeVariables::default();
+    let delivery = plan
+        .evaluate_full_with_runtime(&msg_single, &mut runtime)
+        .unwrap();
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("calendar".into())]
+    );
+    assert_eq!(runtime.get("MATCH1"), Some("meeting"));
+
+    // Multipart with block matching
+    let source_block = "\
+:0
+* multipart {
+  %mimetype ?? ^text/x-patch$
+  %disposition ?? ^attachment$
+  %filename ?? ^([a-z]+)\\.patch$
+}
+maildir:patches
+";
+    let config_block = config::parse(source_block).unwrap().expand(&[]).unwrap();
+    let plan_block = ExecutionPlan::compile(&config_block, None);
+
+    let raw_multi = b"Content-Type: multipart/mixed; boundary=\"frontier\"\r\n\r\n\
+--frontier\r\n\
+Content-Type: text/plain\r\n\
+Content-Disposition: inline\r\n\r\n\
+Here is the patch.\r\n\
+--frontier\r\n\
+Content-Type: text/x-patch\r\n\
+Content-Disposition: attachment; filename=\"bugfix.patch\"\r\n\r\n\
+--- a/file\r\n+++ b/file\r\n\
+--frontier--\r\n";
+    let msg_multi = Message::from_bytes(raw_multi.to_vec());
+    let mut runtime_block = RuntimeVariables::default();
+    let delivery_block = plan_block
+        .evaluate_full_with_runtime(&msg_multi, &mut runtime_block)
+        .unwrap();
+    assert_eq!(
+        destinations(&delivery_block),
+        [Destination::Maildir("patches".into())]
+    );
+    assert_eq!(runtime_block.get("MATCH1"), Some("bugfix"));
+}
+
+#[test]
+fn multipart_block_prevents_false_positives_across_different_parts() {
+    let source = "\
+:0
+* multipart {
+  %mimetype ?? ^text/x-patch$
+  %filename ?? \\.patch$
+}
+maildir:exact_patches
+
+:0
+* multipart %mimetype ?? ^text/x-patch$
+* multipart %filename ?? \\.patch$
+maildir:loose_patches
+";
+    let config = config::parse(source).unwrap().expand(&[]).unwrap();
+    let plan = ExecutionPlan::compile(&config, None);
+
+    // Message where part 1 has text/x-patch (no filename)
+    // and part 2 has application/octet-stream with filename="payload.patch"
+    let raw = b"Content-Type: multipart/mixed; boundary=\"frontier\"\r\n\r\n\
+--frontier\r\n\
+Content-Type: text/x-patch\r\n\
+Content-Disposition: inline\r\n\r\n\
+diff inline\r\n\
+--frontier\r\n\
+Content-Type: application/octet-stream\r\n\
+Content-Disposition: attachment; filename=\"payload.patch\"\r\n\r\n\
+binary data\r\n\
+--frontier--\r\n";
+    let msg = Message::from_bytes(raw.to_vec());
+    let mut runtime = RuntimeVariables::default();
+    let delivery = plan.evaluate_full_with_runtime(&msg, &mut runtime).unwrap();
+    // exact_patches must NOT match because no single part matches both!
+    // loose_patches DOES match because each condition checks parts independently!
+    assert_eq!(
+        destinations(&delivery),
+        [Destination::Maildir("loose_patches".into())]
+    );
+}
+
+#[test]
 fn runtime_shell_condition_reparses_match_as_a_size_test() {
     let config =
         config::parse(":0 c\n* ^X-Condition: \\/(.*)$\nmbox:first\n:0\n* $$MATCH\nmbox:second\n")

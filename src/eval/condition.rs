@@ -27,6 +27,14 @@ pub(super) struct CompiledCondition {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct CompiledMultipartCheck {
+    pub(super) field: crate::config::MultipartField,
+    pub(super) regex: Regex,
+    pub(super) match_captures: Vec<usize>,
+    pub(super) capture_indexes: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
 enum CompiledConditionKind {
     ShellExpanded {
         condition: ShellExpandedCondition,
@@ -51,6 +59,9 @@ enum CompiledConditionKind {
     KeywordRegex {
         fields: Vec<KeywordField>,
         regex: Regex,
+    },
+    Multipart {
+        checks: Vec<CompiledMultipartCheck>,
     },
     Program {
         command: String,
@@ -124,6 +135,24 @@ fn compile_condition(
                 .join(","),
             regex.pattern()
         ),
+        ConditionKind::Multipart { checks } => {
+            if checks.len() == 1 {
+                format!(
+                    "multipart {} ?? {}",
+                    checks[0].field.name(),
+                    checks[0].regex.pattern()
+                )
+            } else {
+                format!(
+                    "multipart {{ {} }}",
+                    checks
+                        .iter()
+                        .map(|check| format!("{} ?? {}", check.field.name(), check.regex.pattern()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            }
+        }
         ConditionKind::Program(command) => command.clone(),
         ConditionKind::SmallerThan(size) => format!("< {size}"),
         ConditionKind::LargerThan(size) => format!("> {size}"),
@@ -136,6 +165,7 @@ fn compile_condition(
         | ConditionKind::IdentifierRegex { regex, .. }
         | ConditionKind::KeywordRegex { regex, .. } => Some(regex),
         ConditionKind::ShellExpanded(_)
+        | ConditionKind::Multipart { .. }
         | ConditionKind::Program(_)
         | ConditionKind::SmallerThan(_)
         | ConditionKind::LargerThan(_) => None,
@@ -186,6 +216,18 @@ fn compile_condition(
             fields: fields.clone(),
             regex: regex.compiled().clone(),
         },
+        ConditionKind::Multipart { checks } => {
+            let checks = checks
+                .iter()
+                .map(|check| CompiledMultipartCheck {
+                    field: check.field,
+                    regex: check.regex.compiled().clone(),
+                    match_captures: check.regex.match_captures().to_vec(),
+                    capture_indexes: check.regex.capture_indexes().to_vec(),
+                })
+                .collect();
+            CompiledConditionKind::Multipart { checks }
+        }
         ConditionKind::Program(command) => CompiledConditionKind::Program {
             command: command.clone(),
             input: match area {
@@ -235,6 +277,16 @@ impl CompiledCondition {
                 false,
             ),
             CompiledConditionKind::BodyRegex(_) => (
+                InputRequirements {
+                    needs_headers: true,
+                    needs_body_contents: true,
+                    needs_end_of_message: true,
+                },
+                false,
+                false,
+                false,
+            ),
+            CompiledConditionKind::Multipart { .. } => (
                 InputRequirements {
                     needs_headers: true,
                     needs_body_contents: true,
@@ -386,6 +438,7 @@ impl CompiledCondition {
             CompiledConditionKind::AddressRegex { .. } => TraceConditionKind::Address,
             CompiledConditionKind::IdentifierRegex { .. } => TraceConditionKind::Identifier,
             CompiledConditionKind::KeywordRegex { .. } => TraceConditionKind::Keyword,
+            CompiledConditionKind::Multipart { .. } => TraceConditionKind::Multipart,
             CompiledConditionKind::BodyRegex(_) => TraceConditionKind::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => TraceConditionKind::MessageRegex,
             CompiledConditionKind::VariableRegex { .. } => TraceConditionKind::VariableRegex,
@@ -418,6 +471,7 @@ impl CompiledCondition {
             CompiledConditionKind::AddressRegex { .. } => ConditionKindExplanation::Address,
             CompiledConditionKind::IdentifierRegex { .. } => ConditionKindExplanation::Identifier,
             CompiledConditionKind::KeywordRegex { .. } => ConditionKindExplanation::Keyword,
+            CompiledConditionKind::Multipart { .. } => ConditionKindExplanation::Multipart,
             CompiledConditionKind::BodyRegex(_) => ConditionKindExplanation::BodyRegex,
             CompiledConditionKind::MessageRegex(_) => ConditionKindExplanation::MessageRegex,
             CompiledConditionKind::VariableRegex { .. } => ConditionKindExplanation::VariableRegex,
@@ -450,7 +504,9 @@ impl CompiledCondition {
             CompiledConditionKind::KeywordRegex { fields, regex } => {
                 self.matches_keywords(head.header_view(), fields, regex, runtime)?
             }
-            CompiledConditionKind::BodyRegex(_) | CompiledConditionKind::MessageRegex(_) => {
+            CompiledConditionKind::BodyRegex(_)
+            | CompiledConditionKind::MessageRegex(_)
+            | CompiledConditionKind::Multipart { .. } => {
                 return Ok(PartialMatch::Deferred);
             }
             CompiledConditionKind::Program { .. } => return Ok(PartialMatch::Deferred),
@@ -537,6 +593,12 @@ impl CompiledCondition {
                 }
                 self.regex_matches(regex, value.as_bytes(), runtime)?
             }
+            CompiledConditionKind::Multipart { checks } => {
+                let body = message
+                    .matching_input(ConditionInput::Body)
+                    .ok_or(EvalError::BodyWasNotBuffered)?;
+                self.matches_multipart(checks, message.header_view(), body, runtime)?
+            }
             CompiledConditionKind::Program { .. } => {
                 return Err(EvalError::ExternalConditionUnsupported {
                     line: self.location.line(),
@@ -596,6 +658,95 @@ impl CompiledCondition {
         if !matched && (!self.match_captures.is_empty() || !self.capture_indexes.is_empty()) {
             runtime.clear_match_values();
         }
+        Ok(matched)
+    }
+
+    fn matches_multipart(
+        &self,
+        checks: &[CompiledMultipartCheck],
+        header: crate::header_edit::HeaderView<'_>,
+        body: &[u8],
+        runtime: &mut RuntimeVariables,
+    ) -> Result<bool, EvalError> {
+        let has_captures = !self.negated
+            && checks
+                .iter()
+                .any(|c| !c.match_captures.is_empty() || !c.capture_indexes.is_empty());
+        let mut matched_captures: Option<Vec<(String, String)>> = None;
+
+        let matched = crate::mime::any_mime_part(header, body, |part| {
+            for check in checks {
+                let input = match check.field {
+                    crate::config::MultipartField::MimeType => part.mimetype.as_deref(),
+                    crate::config::MultipartField::Disposition => part.disposition.as_deref(),
+                    crate::config::MultipartField::Filename => part.filename.as_deref(),
+                };
+                let Some(input) = input else {
+                    return Ok(false);
+                };
+                if !check.regex.is_match(input) {
+                    return Ok(false);
+                }
+            }
+            if has_captures {
+                let mut values = Vec::new();
+                let mut capture_num = 1usize;
+                for check in checks {
+                    let input = match check.field {
+                        crate::config::MultipartField::MimeType => part.mimetype.as_deref(),
+                        crate::config::MultipartField::Disposition => part.disposition.as_deref(),
+                        crate::config::MultipartField::Filename => part.filename.as_deref(),
+                    }
+                    .unwrap();
+                    if check.match_captures.is_empty() && check.capture_indexes.is_empty() {
+                        continue;
+                    }
+                    if let Some(captures) = check.regex.captures(input) {
+                        if let Some(start) = selected_match_start(&captures, &check.match_captures)
+                        {
+                            if let Some(m) = captures.get(0) {
+                                if let Some(bytes) = input.get(start..m.end()) {
+                                    values.push(("MATCH".to_owned(), match_value(bytes)?));
+                                }
+                            }
+                        }
+                        for index in &check.capture_indexes {
+                            values.push((
+                                format!("MATCH{capture_num}"),
+                                capture_value(&captures, *index)?,
+                            ));
+                            capture_num += 1;
+                        }
+                    }
+                }
+                matched_captures = Some(values);
+            }
+            Ok(true)
+        })
+        .map_err(|error| self.structured_header_error(error))?;
+
+        if matched {
+            if self.negated {
+                runtime.clear_match_values();
+            } else if let Some(values) = matched_captures {
+                let size = values
+                    .iter()
+                    .try_fold(0usize, |total, (_, value)| total.checked_add(value.len()));
+                let Some(size) = size else {
+                    return Err(EvalError::MatchValuesTooLarge { size: usize::MAX });
+                };
+                if size > crate::config::MAX_MATCH_BYTES {
+                    return Err(EvalError::MatchValuesTooLarge { size });
+                }
+                runtime.clear_numbered_match_values();
+                for (name, value) in values {
+                    runtime.set_match_value(name, value);
+                }
+            }
+        } else {
+            runtime.clear_match_values();
+        }
+
         Ok(matched)
     }
 

@@ -255,3 +255,120 @@ Subject: Hello\n\nOther\n";
 
     fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn multipart_condition_routes_mime_messages_and_prevents_cross_part_false_positives() {
+    let base = temporary_directory();
+    let patches_dir = base.join("patches");
+    let calendar_dir = base.join("calendar");
+    let loose_dir = base.join("loose");
+    let fallback_dir = base.join("fallback");
+    create_maildir(&patches_dir);
+    create_maildir(&calendar_dir);
+    create_maildir(&loose_dir);
+    create_maildir(&fallback_dir);
+
+    let config = base.join("rules.rc");
+    fs::write(
+        &config,
+        format!(
+            "MAILDIR={}\n\
+:0\n\
+* multipart {{\n\
+  %mimetype ?? ^text/x-patch$\n\
+  %filename ?? \\.patch$\n\
+}}\n\
+patches/\n\
+\n\
+:0\n\
+* multipart %mimetype ?? ^text/calendar$\n\
+calendar/\n\
+\n\
+:0\n\
+* multipart %mimetype ?? ^text/x-patch$\n\
+* multipart %filename ?? \\.patch$\n\
+loose/\n\
+\n\
+:0\n\
+fallback/\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+
+    let calendar_msg = b"From: organizer@example.org\n\
+To: user@example.org\n\
+Subject: Meeting\n\
+Content-Type: text/calendar; charset=utf-8; name=\"invite.ics\"\n\
+Content-Disposition: inline; filename=\"invite.ics\"\n\
+\n\
+BEGIN:VCALENDAR\n\
+END:VCALENDAR\n";
+
+    let exact_patch_msg = b"From: dev@example.org\n\
+To: user@example.org\n\
+Subject: Patch v1\n\
+Content-Type: multipart/mixed; boundary=\"frontier\"\n\
+\n\
+--frontier\n\
+Content-Type: text/plain\n\
+\n\
+Cover letter\n\
+--frontier\n\
+Content-Type: text/x-patch\n\
+Content-Disposition: attachment; filename=\"feature.patch\"\n\
+\n\
+--- a/file\n\
++++ b/file\n\
+--frontier--\n";
+
+    let mismatched_parts_msg = b"From: attacker@example.org\n\
+To: user@example.org\n\
+Subject: Fake patch\n\
+Content-Type: multipart/mixed; boundary=\"frontier\"\n\
+\n\
+--frontier\n\
+Content-Type: text/x-patch\n\
+Content-Disposition: inline\n\
+\n\
+Inline patch description without file\n\
+--frontier\n\
+Content-Type: application/pdf\n\
+Content-Disposition: attachment; filename=\"payload.patch\"\n\
+\n\
+PDF content\n\
+--frontier--\n";
+
+    let plain_msg = b"From: friend@example.org\n\
+To: user@example.org\n\
+Subject: Chat\n\
+Content-Type: text/plain\n\
+\n\
+Just text\n";
+
+    for msg in [
+        calendar_msg.as_slice(),
+        exact_patch_msg.as_slice(),
+        mismatched_parts_msg.as_slice(),
+        plain_msg.as_slice(),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_procmail-rs"))
+            .args(["filter", "--config"])
+            .arg(&config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(msg).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    }
+
+    assert_eq!(delivered_messages(&calendar_dir).len(), 1);
+    assert_eq!(delivered_messages(&patches_dir).len(), 1);
+    assert_eq!(delivered_messages(&loose_dir).len(), 1);
+    assert_eq!(delivered_messages(&fallback_dir).len(), 1);
+
+    fs::remove_dir_all(base).unwrap();
+}

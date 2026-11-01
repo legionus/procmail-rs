@@ -264,7 +264,7 @@ fn visit_fields<E>(
     Ok(false)
 }
 
-fn remove_comments_and_unfold(input: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn remove_comments_and_unfold(input: &[u8]) -> Option<Vec<u8>> {
     let mut output = Vec::with_capacity(input.len());
     let mut comment_depth = 0usize;
     let mut quoted = false;
@@ -555,7 +555,7 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
     value
 }
 
-fn work_limit_error() -> StructuredHeaderError {
+pub(crate) fn work_limit_error() -> StructuredHeaderError {
     StructuredHeaderError {
         message: format!(
             "structured header value count exceeds the hard limit of {MAX_STRUCTURED_HEADER_VALUES}"

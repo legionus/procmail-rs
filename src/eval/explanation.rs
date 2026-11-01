@@ -91,6 +91,7 @@ pub enum ConditionKindExplanation {
     Address,
     Identifier,
     Keyword,
+    Multipart,
     Program,
     SmallerThan,
     LargerThan,

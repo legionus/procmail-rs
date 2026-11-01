@@ -292,6 +292,7 @@ pub enum ConditionKind {
     Address,
     Identifier,
     Keyword,
+    Multipart,
     Program,
     SmallerThan,
     LargerThan,

@@ -2,7 +2,9 @@
 // Copyright (C) 2026  Alexey Gladkov <legion@kernel.org>
 
 use super::*;
-use crate::config::{AddressField, IdentifierField, KeywordField, ParameterOperation};
+use crate::config::{
+    AddressField, IdentifierField, KeywordField, MultipartField, ParameterOperation,
+};
 
 fn parse_wide(input: &str) -> Result<Config, ParseError> {
     let mut state = ParseBudget::default();
@@ -1223,6 +1225,155 @@ fn rejects_unknown_or_repeated_structured_header_fields() {
         assert_eq!(error.line, 2, "{condition}");
         assert!(error.message.contains("condition"), "{condition}: {error}");
     }
+}
+
+#[test]
+fn parses_multipart_conditions_and_blocks() {
+    let source = "\
+:0
+* multipart %mimetype ?? ^text/calendar$
+maildir:calendar
+
+:0
+* multipart %disposition ?? ^attachment$
+maildir:attachments
+
+:0
+* multipart %filename ?? \\.(?:patch|diff)$
+maildir:patches
+
+:0
+* multipart {
+  %mimetype ?? ^text/x-patch$
+  %filename ?? \\.patch$
+}
+maildir:strict_patches
+
+:0
+* ! multipart {
+  %mimetype ?? ^text/plain$
+}
+maildir:non_text
+
+:0
+* ! multipart %mimetype ?? ^text/html$
+maildir:non_html
+
+:0
+* multipart { %mimetype ?? ^image/png$ }
+maildir:png
+";
+    let config = parse(source).unwrap();
+    assert_eq!(config.statements.len(), 7);
+
+    let Statement::Recipe(r1) = &config.statements[0] else {
+        panic!()
+    };
+    let ConditionKind::Multipart { checks } = &r1.conditions[0].kind else {
+        panic!()
+    };
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].field, MultipartField::MimeType);
+    assert_eq!(checks[0].regex.pattern(), "^text/calendar$");
+    assert!(!r1.conditions[0].negated);
+
+    let Statement::Recipe(r2) = &config.statements[1] else {
+        panic!()
+    };
+    let ConditionKind::Multipart { checks } = &r2.conditions[0].kind else {
+        panic!()
+    };
+    assert_eq!(checks[0].field, MultipartField::Disposition);
+    assert_eq!(checks[0].regex.pattern(), "^attachment$");
+
+    let Statement::Recipe(r3) = &config.statements[2] else {
+        panic!()
+    };
+    let ConditionKind::Multipart { checks } = &r3.conditions[0].kind else {
+        panic!()
+    };
+    assert_eq!(checks[0].field, MultipartField::Filename);
+    assert_eq!(checks[0].regex.pattern(), "\\.(?:patch|diff)$");
+
+    let Statement::Recipe(r4) = &config.statements[3] else {
+        panic!()
+    };
+    let ConditionKind::Multipart { checks } = &r4.conditions[0].kind else {
+        panic!()
+    };
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks[0].field, MultipartField::MimeType);
+    assert_eq!(checks[0].regex.pattern(), "^text/x-patch$");
+    assert_eq!(checks[1].field, MultipartField::Filename);
+    assert_eq!(checks[1].regex.pattern(), "\\.patch$");
+
+    let Statement::Recipe(r5) = &config.statements[4] else {
+        panic!()
+    };
+    let ConditionKind::Multipart { checks } = &r5.conditions[0].kind else {
+        panic!()
+    };
+    assert_eq!(checks.len(), 1);
+    assert!(r5.conditions[0].negated);
+
+    let Statement::Recipe(r6) = &config.statements[5] else {
+        panic!()
+    };
+    let ConditionKind::Multipart { checks } = &r6.conditions[0].kind else {
+        panic!()
+    };
+    assert_eq!(checks.len(), 1);
+    assert!(r6.conditions[0].negated);
+
+    let Statement::Recipe(r7) = &config.statements[6] else {
+        panic!()
+    };
+    let ConditionKind::Multipart { checks } = &r7.conditions[0].kind else {
+        panic!()
+    };
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].field, MultipartField::MimeType);
+    assert_eq!(checks[0].regex.pattern(), "^image/png$");
+
+    // Check variable condition on multipart
+    let var_config = parse(":0\n* multipart ?? ^var$\nmaildir:var\n").unwrap();
+    let Statement::Recipe(var_r) = &var_config.statements[0] else {
+        panic!()
+    };
+    assert!(
+        matches!(&var_r.conditions[0].kind, ConditionKind::VariableRegex { name, .. } if name == "multipart")
+    );
+
+    // Check plain regex condition on multipart
+    let regex_config = parse(":0\n* multipart\nmaildir:re\n").unwrap();
+    let Statement::Recipe(re_r) = &regex_config.statements[0] else {
+        panic!()
+    };
+    assert!(
+        matches!(&re_r.conditions[0].kind, ConditionKind::Regex(re) if re.pattern() == "multipart")
+    );
+}
+
+#[test]
+fn rejects_invalid_multipart_conditions() {
+    // Empty block
+    assert!(parse(":0\n* multipart {}\nmaildir:dest\n").is_err());
+    assert!(parse(":0\n* multipart {\n}\nmaildir:dest\n").is_err());
+    assert!(parse(":0\n* multipart {   }\nmaildir:dest\n").is_err());
+
+    // Unclosed block
+    assert!(parse(":0\n* multipart {\n  %mimetype ?? ^text/plain$\nmaildir:dest\n").is_err());
+    assert!(parse(":0\n* multipart { %mimetype ?? ^text/plain$\nmaildir:dest\n").is_err());
+
+    // Duplicate selector in block
+    assert!(parse(":0\n* multipart {\n  %mimetype ?? ^text/plain$\n  %mimetype ?? ^text/html$\n}\nmaildir:dest\n").is_err());
+
+    // Unsupported selector
+    assert!(parse(":0\n* multipart %unknown ?? ^value$\nmaildir:dest\n").is_err());
+    assert!(parse(":0\n* multipart foo ?? ^value$\nmaildir:dest\n").is_err());
+
+    // Missing ??
+    assert!(parse(":0\n* multipart %mimetype\nmaildir:dest\n").is_err());
 }
 
 #[test]
