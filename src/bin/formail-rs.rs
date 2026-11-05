@@ -64,7 +64,11 @@ impl Default for Options {
 }
 
 fn print_version() {
-    eprintln!("formail-rs 0.2.0 (procmail-rs 0.2.0)");
+    eprintln!(
+        "formail-rs {} (procmail-rs {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 fn print_help() {

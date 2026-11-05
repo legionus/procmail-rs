@@ -9,6 +9,41 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-05
+
+- Introduce `formail-rs`, a procmail-compatible companion utility for
+  standalone header modification, extraction, unfolding, deduplication,
+  RFC 5322 Message-ID generation, and mbox escaping. It shares the
+  bounded parsing, byte preservation, and fail-closed guarantees of
+  `procmail-rs`, enforces `#![forbid(unsafe_code)]`, and streams message
+  bodies in constant O(1) memory.
+- Extract shared header manipulation, line unfolding, pattern matching, and
+  indexed storage into public interfaces in `procmail_rs::header_edit`, and
+  reorganize binaries into a uniform `src/bin/` layout.
+- Add structured MIME part inspection via the `multipart` condition and
+  `multipart { ... }` block syntax, supporting `%mimetype`, `%disposition`,
+  and `%filename` selectors (with RFC 2047 and RFC 2231 decoding). Multi-selector
+  blocks match against the same MIME subpart to prevent false positives across
+  different parts, bounded to 8 nesting levels and 256 total parts.
+- Extend the `address` condition to inspect delivery headers (`Delivered-To`,
+  `X-Original-To`, `Envelope-To`) and resent headers (`Resent-From`,
+  `Resent-Sender`, `Resent-To`, `Resent-Cc`), and add `%recipient`,
+  `%delivered`, and `%sender` aliases for subaddress and alias routing.
+- Extend the `identifier` condition to inspect thread headers (`In-Reply-To`,
+  `References`, `Thread-Index`) and add the `%thread` alias for discussion
+  routing.
+- Add synchronized message status editing (`status add|remove|set FLAGS`,
+  `status clear`) in `headers { ... }` blocks for the `read`, `flagged`, and
+  `replied` flags, synchronizing `Status` and `X-Status` headers and routing
+  flagged messages directly into Maildir `cur/` with canonical `:2,<flags>` suffixes.
+- Add synchronized message priority editing (`priority high|normal|low|clear`)
+  in `headers { ... }` blocks, maintaining `Importance`, `Priority`, and
+  `X-Priority` in parallel across mail client conventions.
+- Add synchronized keyword editing (`keywords add|remove|set|clear`) across
+  `Keywords`, `X-Label`, and `X-Keywords`, and add the structured condition
+  `keyword all|FIELD[,FIELD...] ?? REGEX` to match individual tags in first-seen
+  order without buffering message bodies.
+
 ## [0.2.0] - 2026-10-09
 
 - Preserve the rc filename as well as the line number through runtime
@@ -79,6 +114,7 @@ Keep a Changelog, and versions follow Semantic Versioning as described in
   process directory.
 - Support 32-bit and 64-bit Linux targets and 64-bit FreeBSD.
 
-[Unreleased]: https://github.com/legionus/procmail-rs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/legionus/procmail-rs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/legionus/procmail-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/legionus/procmail-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/legionus/procmail-rs/releases/tag/v0.1.0
